@@ -24,7 +24,8 @@ plug is asked what it has and listed as one device per outlet.
 """
 
 import tuya_lan
-from devices import CAP_POWER, CAP_STATE, ControlError, Device
+from devices import (CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
+                     ControlError, Device)
 
 KEY_FILE = 'tuya_keys.json'
 
@@ -53,6 +54,41 @@ POWER_MEMORY = (('Stay off', 'power_off'),
                 ('Come back on', 'power_on'),
                 ('Remember how it was', 'last'))
 POWER_MEMORY_VALUES = tuple(value for _label, value in POWER_MEMORY)
+
+# A cover -- a roller shade, a curtain motor -- speaks a different instruction
+# set through the same datapoints. Datapoint 1 is the giveaway and the reason
+# no product-id table is needed: on a plug it is a bool, and on a cover it is
+# one of these three strings. Reading the type is what tells the two apart,
+# the same way a multi-outlet plug is found by asking rather than by model.
+COVER_CONTROL_DP = '1'      # 'open' / 'stop' / 'close'
+COVER_TARGET_DP = '2'       # where it is being sent, 0-100
+COVER_POSITION_DP = '3'     # where it actually is, 0-100
+COVER_BATTERY_DP = '13'     # percent, on the battery-powered ones
+
+COVER_OPEN = 'open'
+COVER_STOP = 'stop'
+COVER_CLOSE = 'close'
+COVER_CONTROLS = (COVER_OPEN, COVER_STOP, COVER_CLOSE)
+
+# Offered as named commands as well as a position, because "stop" has no
+# percentage: it means wherever it has got to.
+COVER_COMMANDS = (('Open', COVER_OPEN),
+                  ('Stop', COVER_STOP),
+                  ('Close', COVER_CLOSE))
+
+
+def looks_like_a_cover(dps):
+    """Whether this device's datapoints are a shade's rather than a plug's."""
+    return (dps or {}).get(COVER_CONTROL_DP) in COVER_CONTROLS
+
+
+def clean_position(value):
+    """A percentage a cover will accept, or a refusal saying why."""
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        raise ControlError('%r is not a position' % (value,))
+    return max(0, min(100, number))
 
 
 def outlet_label(dp):
@@ -171,6 +207,16 @@ class TuyaDriver(object):
                       % (base.name, exc))
             return [base]
 
+        if looks_like_a_cover(dps):
+            # A shade is one device however many datapoints it answers with,
+            # and it is never split into outlets. Recorded on the device so
+            # capabilities() -- which gets no session and cannot ask again --
+            # still knows what this is after a restart.
+            base.driver_data['cover'] = True
+            base.name = 'Tuya %s Shade' % base.native_id[-4:].upper()
+            self._log('%s is a cover, not a plug' % base.name)
+            return [base]
+
         switches = [dp for dp in SWITCH_DPS if isinstance(dps.get(dp), bool)]
         if len(switches) < 2:
             return [base]
@@ -182,16 +228,65 @@ class TuyaDriver(object):
     # -- capabilities ------------------------------------------------------
 
     @staticmethod
-    def capabilities(device):
-        """A plug switches, and reports whether it is on. That is all."""
+    def is_cover(device):
+        """Whether this entry is a shade rather than a plug.
+
+        Read off the device rather than the wire: capabilities() is asked
+        constantly, by every menu and every scene, and a round trip per ask
+        would put a Tuya packet behind drawing a list.
+        """
+        data = getattr(device, 'driver_data', None) or {}
+        return bool(data.get('cover'))
+
+    @classmethod
+    def capabilities(cls, device):
+        """A plug switches and reports. A shade goes to a percentage.
+
+        CAP_BRIGHTNESS is deliberately absent from the cover set: it is what
+        the scene engine reads to decide something is a light, and a shade
+        being dimmed by Movie Night is not what anyone means.
+        """
+        if cls.is_cover(device):
+            return set([CAP_POSITION, CAP_STATE, CAP_POWER, CAP_COMMANDS])
         return set([CAP_POWER, CAP_STATE])
 
-    @staticmethod
-    def commands(device):
+    @classmethod
+    def commands(cls, device):
+        if cls.is_cover(device):
+            return [label for label, _value in COVER_COMMANDS]
         return []
 
     def send_command(self, device, name):
+        if self.is_cover(device):
+            for label, value in COVER_COMMANDS:
+                if label == name:
+                    self._set_cover(device, {COVER_CONTROL_DP: value})
+                    return
+            raise ControlError('%s has no command called "%s"'
+                               % (device.name, name))
         raise ControlError('%s does not send commands' % device.name)
+
+    # -- covers ------------------------------------------------------------
+
+    def _set_cover(self, device, dps):
+        try:
+            self._session(device).set_dps(dps)
+        except tuya_lan.TuyaError as exc:
+            raise ControlError('%s: %s' % (device.name, exc))
+        return True
+
+    def set_position(self, device, percent):
+        """Send a shade to `percent`. 0 is shut, 100 fully open.
+
+        Datapoint 2 is the target; datapoint 3 is where it has got to. Writing
+        the target and reading the position back is what makes the slider
+        settle where the shade actually stopped rather than where it was
+        asked to go.
+        """
+        if not self.is_cover(device):
+            raise ControlError('%s is not a shade' % device.name)
+        return self._set_cover(device, {COVER_TARGET_DP:
+                                        clean_position(percent)})
 
     # -- power-cut memory --------------------------------------------------
 
@@ -318,6 +413,14 @@ class TuyaDriver(object):
         return members or list(SWITCH_DPS)
 
     def turn(self, device, on):
+        # A shade has no relay to flip. "On" is open and "off" is shut, which
+        # is what a caller that only knows how to switch things -- a sequence
+        # step, the web remote's pair of buttons -- is asking for.
+        if self.is_cover(device):
+            return self._set_cover(
+                device,
+                {COVER_CONTROL_DP: COVER_OPEN if on else COVER_CLOSE})
+
         if self.is_master(device):
             wanted = dict((dp, bool(on)) for dp in self.member_dps(device))
         else:
@@ -339,6 +442,9 @@ class TuyaDriver(object):
 
     def _state_from_dps(self, device, dps):
         """This entry's switch, as the state dict the rest of the add-on uses."""
+        if self.is_cover(device):
+            return self._cover_state_from_dps(dps)
+
         if self.is_master(device):
             readings = [(dps or {}).get(dp) for dp in self.member_dps(device)]
             readings = [r for r in readings if isinstance(r, bool)]
@@ -355,6 +461,29 @@ class TuyaDriver(object):
         # 'on'/'off' rather than a bool: that is the vocabulary the scene
         # engine reads, so a plug captured into a scene needs no special case.
         return {'power': 'on' if value else 'off', 'dps': dps}
+
+    @staticmethod
+    def _cover_state_from_dps(dps):
+        """Where the shade is, as the state dict the rest of the add-on uses.
+
+        Datapoint 3 is where it has got to; datapoint 2 is where it was last
+        told to go. The real position is preferred, and the target is the
+        fallback for the cheaper motors that report only what they were asked
+        -- a shade that says 40 because that is what it was sent is still
+        better than a slider with nothing in it.
+        """
+        dps = dps or {}
+        for dp in (COVER_POSITION_DP, COVER_TARGET_DP):
+            value = dps.get(dp)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            state = {'position': max(0, min(100, int(value))), 'dps': dps}
+            battery = dps.get(COVER_BATTERY_DP)
+            if isinstance(battery, (int, float)) \
+                    and not isinstance(battery, bool):
+                state['battery'] = int(battery)
+            return state
+        return None
 
     def get_state(self, device):
         try:

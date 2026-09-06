@@ -1,3 +1,29 @@
+2.40.0 (Aryez - 2026)
+    Added: Tuya roller shades and curtain motors. Open, close or set a
+        percentage -- from the menus, a sequence step or the web remote --
+        entirely on the LAN, with the position read back from the motor.
+    This is the blind that does not need the internet. SwitchBot has to go
+        out to its own servers because its hardware speaks Bluetooth and
+        there is no local API for the bridge; a Tuya Wi-Fi motor is on the
+        network like the plugs are, so it keeps working on a dead uplink.
+    Telling a shade from a plug needs no table of product ids. Tuya sends
+        both down the same datapoints, but datapoint 1 is a bool on a plug
+        and one of open/stop/close on a cover. The driver reads the type,
+        the same way it already finds a multi-outlet plug by asking rather
+        than by model.
+    That distinction was worth making properly. Adopted as a plug -- which
+        is what would have happened before this -- a shade would have
+        claimed power and nothing else, and every "switch everything off"
+        path in the add-on would have shut the blinds as a side effect of
+        turning off a lamp.
+    Datapoint 2 is where the shade is being sent, 3 is where it has got to.
+        The real position is preferred; the target stands in for the cheaper
+        motors that report only what they were last told. A shade that
+        reports neither says nothing rather than claiming to be shut.
+    Open, Stop and Close are offered as named commands beside the
+        percentages, because "stop" has no percentage -- it means wherever
+        it has got to.
+
 2.39.0 (Aryez - 2026)
     Added: SwitchBot blinds and shades -- Blind Tilt, Curtain, Roller Shade.
         Open, close, or set a percentage, from the menus, a sequence step or

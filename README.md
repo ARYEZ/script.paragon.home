@@ -25,6 +25,9 @@ Built for **Kodi 17.6 (Krypton)** — `xbmc.python 2.25.0`, Python 2.7.
   Pro-class blaster; a Mini has no transmitter for it.
 * **Tuya smart plugs** — GHome, Gosund, Smart Life and most no-name plugs,
   protocol 3.1 to 3.4. Multi-outlet plugs are listed one device per outlet.
+* **Tuya roller shades and curtain motors** — opened and closed to a
+  percentage, entirely on the LAN, with the position read back from the
+  motor. No hub, no account, no cloud.
 * **TP-Link Kasa plugs** — HS100, HS103, HS110 and the KP series. No account,
   no key, no setup: found is the same as usable.
 * **SwitchBot blinds and shades** — Blind Tilt, Curtain and Roller Shade,
@@ -741,6 +744,36 @@ Three layers, each answering one question:
 | **Scene** | how the lights should *look* |
 | **Sequence** | what to *do*, in order — fifteen steps |
 | **Rerack** | when a *day* does it — nine phases |
+
+---
+
+## Roller shades (Tuya)
+
+A Tuya Wi-Fi shade motor is the one blind that stays on your network. No hub,
+no token, no cloud — the same local protocol as the plugs, so it keeps working
+on a dead uplink and it answers with where the shade actually is.
+
+Setup is a plug's setup: run **Refresh devices**, then give it its **local
+key** under Manage devices. Nothing else.
+
+**Buy the motor, not the bridge.** Many shades advertised as "Tuya compatible"
+are radio motors with an optional Wi-Fi bridge sold beside them; those are not
+on your LAN in any useful sense, and their 433MHz is the A-OK protocol that
+neither Broadlink nor Bond reproduce reliably. The listing has to say the
+motor itself is Wi-Fi, **no hub required**.
+
+Telling a shade from a plug needs no table of product ids. Tuya sends both
+down the same datapoints, but datapoint 1 is a bool on a plug and one of
+`open` / `stop` / `close` on a cover, so the driver reads the type and knows.
+Datapoint 2 is where the shade is being sent and datapoint 3 is where it has
+got to; the real position is preferred and the target is the fallback, because
+the cheaper motors report only what they were last told.
+
+A shade reports a *position*, so scenes pass over it exactly as they pass over
+a plug — see the SwitchBot section below for why that matters. Put one in a
+**sequence** instead. Open, Stop and Close are offered as named commands
+alongside the percentage, because "stop" has no percentage: it means wherever
+it has got to.
 
 ---
 

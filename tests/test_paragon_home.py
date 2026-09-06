@@ -11902,5 +11902,196 @@ class TestBlindsInSequences(unittest.TestCase):
             self.sequences.describe_step(step, device_name='Lounge Blinds'),
             'Lounge Blinds: 40% open')
 
+class TestTuyaCovers(unittest.TestCase):
+    """A roller shade on the LAN, against a device speaking the real protocol.
+
+    Tuya sends a shade and a plug down the same datapoints, so the driver has
+    to tell them apart from what comes back rather than from a table of
+    product ids. Datapoint 1 is the whole tell: a bool on a plug, one of
+    'open'/'stop'/'close' on a cover.
+
+    This matters more than it looks. Adopted as a plug -- which is what the
+    driver did before this -- a shade would claim CAP_POWER and nothing else,
+    and every "switch everything off" path in the add-on would have shut the
+    blinds as a side effect of turning off a lamp.
+    """
+
+    KEY = '0123456789abcdef'
+    # What a battery roller shade answers with. Position 40, target 40,
+    # battery 86 -- and datapoint 1 a string, which is the discriminator.
+    SHADE_DPS = {'1': 'stop', '2': 40, '3': 40, '7': 'opening', '13': 86}
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'tuya_driver',
+                     'tuya_lan', 'hub', 'scenes'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import tuya_lan
+
+        self.tuya_lan = tuya_lan
+        self.real_port = tuya_lan.CONTROL_PORT
+        self.plug = None
+
+    def tearDown(self):
+        self.tuya_lan.CONTROL_PORT = self.real_port
+        if self.plug is not None:
+            crashed = self.plug.crashed
+            self.plug.close()
+            self.assertIsNone(crashed, 'the fake shade crashed: %r' % crashed)
+        clean_profile()
+
+    def start(self, dps=None):
+        self.plug = FakeTuyaPlug(key=self.KEY.encode('utf-8'),
+                                 dps=dict(dps or self.SHADE_DPS))
+        self.tuya_lan.CONTROL_PORT = self.plug.port
+        return self.plug
+
+    def driver(self):
+        from tuya_driver import TuyaDriver
+
+        return TuyaDriver(keys={'sh4de1': self.KEY}, timeout=3.0)
+
+    def shade(self):
+        return Device('sh4de1', name='Lounge Shade', driver='tuya',
+                      ip='127.0.0.1', lan=True, native_id='sh4de1',
+                      driver_data={'version': '3.3', 'cover': True})
+
+    def plug_device(self):
+        return Device('wp9abc', name='Lamp Plug', driver='tuya',
+                      ip='127.0.0.1', lan=True, native_id='wp9abc',
+                      driver_data={'version': '3.3'})
+
+    # -- telling one from the other ----------------------------------------
+
+    def test_a_string_on_datapoint_one_is_what_marks_a_cover(self):
+        import tuya_driver
+
+        self.assertTrue(tuya_driver.looks_like_a_cover({'1': 'open'}))
+        self.assertTrue(tuya_driver.looks_like_a_cover({'1': 'stop'}))
+        self.assertTrue(tuya_driver.looks_like_a_cover({'1': 'close'}))
+
+    def test_a_plug_is_not_mistaken_for_a_cover(self):
+        """Datapoint 1 on a plug is a bool, and False is not 'close'."""
+        import tuya_driver
+
+        self.assertFalse(tuya_driver.looks_like_a_cover({'1': False}))
+        self.assertFalse(tuya_driver.looks_like_a_cover({'1': True}))
+        self.assertFalse(tuya_driver.looks_like_a_cover({}))
+
+    def test_discovery_marks_a_shade_and_does_not_split_it(self):
+        """A shade answers on several datapoints and is still one device."""
+        self.start()
+        driver = self.driver()
+
+        found = driver._devices_for({'device_id': 'sh4de1', 'ip': '127.0.0.1',
+                                     'version': '3.3'})
+
+        self.assertEqual(len(found), 1)
+        self.assertTrue(driver.is_cover(found[0]))
+
+    # -- what it claims to be ----------------------------------------------
+
+    def test_a_shade_claims_a_position_and_not_a_brightness(self):
+        from devices import CAP_BRIGHTNESS, CAP_COLOR, CAP_POSITION
+
+        caps = self.driver().capabilities(self.shade())
+
+        self.assertIn(CAP_POSITION, caps)
+        self.assertNotIn(CAP_BRIGHTNESS, caps)
+        self.assertNotIn(CAP_COLOR, caps)
+
+    def test_a_plug_is_unchanged_by_any_of_this(self):
+        from devices import CAP_POSITION, CAP_POWER, CAP_STATE
+
+        caps = self.driver().capabilities(self.plug_device())
+
+        self.assertEqual(caps, set([CAP_POWER, CAP_STATE]))
+        self.assertNotIn(CAP_POSITION, caps)
+
+    def test_a_scene_passes_over_a_shade(self):
+        """The reason this could not just be adopted as a plug."""
+        import hub as hub_mod
+        import scenes as scene_lib
+
+        hub = hub_mod.Hub(drivers=[self.driver()])
+
+        self.assertFalse(scene_lib.is_a_light(self.shade(), hub))
+        self.assertEqual(
+            scene_lib.scene_targets(scene_lib.make_scene('All Off'),
+                                    [self.shade()], hub),
+            [])
+
+    # -- driving it --------------------------------------------------------
+
+    def test_a_position_goes_to_the_target_datapoint(self):
+        plug = self.start()
+
+        self.driver().set_position(self.shade(), 65)
+
+        self.assertEqual(plug.dps['2'], 65)
+
+    def test_a_position_is_clamped_to_what_a_shade_can_do(self):
+        import tuya_driver
+
+        clean = tuya_driver.clean_position
+        self.assertEqual(clean(-40), 0)
+        self.assertEqual(clean(140), 100)
+        self.assertEqual(clean('65'), 65)
+
+    def test_nonsense_is_refused_rather_than_sent(self):
+        import tuya_driver
+        from devices import ControlError
+
+        self.assertRaises(ControlError, tuya_driver.clean_position, 'shut')
+
+    def test_on_and_off_mean_open_and_closed(self):
+        """A sequence step and the web remote only know how to switch."""
+        plug = self.start()
+        driver = self.driver()
+
+        driver.turn(self.shade(), True)
+        self.assertEqual(plug.dps['1'], 'open')
+        driver.turn(self.shade(), False)
+        self.assertEqual(plug.dps['1'], 'close')
+
+    def test_stop_is_offered_because_it_has_no_percentage(self):
+        plug = self.start()
+        driver = self.driver()
+
+        self.assertEqual(driver.commands(self.shade()),
+                         ['Open', 'Stop', 'Close'])
+        driver.send_command(self.shade(), 'Stop')
+        self.assertEqual(plug.dps['1'], 'stop')
+
+    def test_a_plug_is_still_offered_no_commands(self):
+        self.assertEqual(self.driver().commands(self.plug_device()), [])
+
+    # -- reading it --------------------------------------------------------
+
+    def test_it_reports_where_the_shade_actually_is(self):
+        self.start()
+
+        state = self.driver().get_state(self.shade())
+
+        self.assertEqual(state['position'], 40)
+        self.assertEqual(state['battery'], 86)
+
+    def test_the_target_stands_in_when_a_motor_reports_no_position(self):
+        """Cheaper motors answer only with what they were last told."""
+        self.start(dps={'1': 'stop', '2': 70})
+
+        state = self.driver().get_state(self.shade())
+
+        self.assertEqual(state['position'], 70)
+
+    def test_a_shade_that_reports_neither_says_nothing(self):
+        """Better than reporting 0, which reads as "shut" and is a guess."""
+        self.start(dps={'1': 'stop'})
+
+        self.assertIsNone(self.driver().get_state(self.shade()))
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
