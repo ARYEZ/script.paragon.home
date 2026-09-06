@@ -1238,12 +1238,30 @@ def channel_down():
     return True, 'Channel down'
 
 
+# Sent before a channel's own digits. Paragon TV reads the first digit of a
+# fresh entry as a speed dial and jumps immediately, so "1" then "4" lands on
+# speed dial 1 rather than channel 14 -- handleNumberAction takes the speed
+# dial branch and returns before the 4 ever arrives.
+#
+# That is right for the remote in your hand, where pressing 1 *means* speed
+# dial 1. It is never right here: a channel tapped in a list is the channel
+# that was asked for. A leading zero settles it without touching Paragon TV,
+# because the speed dial branch only runs while nothing has been entered yet
+# and only for 1-9. Zero fails both, so it opens the entry harmlessly and the
+# real digits are then read as digits.
+CHANNEL_ENTRY_PREFIX = 'number0'
+
+
 def tune(number):
     """Go to a channel by typing its number, exactly as you would by hand.
 
     The digits go in one at a time and a select commits them, because that is
     what Paragon TV's own handlers expect: handleNumberAction gathers them
     and handleSelectAction acts on them.
+
+    Opened with a zero -- see CHANNEL_ENTRY_PREFIX for why, and note that it
+    matters for single digits too: without it, asking for channel 3 on a box
+    with a speed dial on 3 goes wherever that speed dial points.
     """
     try:
         number = int(number)
@@ -1254,6 +1272,8 @@ def tune(number):
     if current_channel() is None:
         return False, 'Paragon TV is not running'
 
+    send_action(CHANNEL_ENTRY_PREFIX)
+    xbmc.sleep(int(KEY_PAUSE * 1000))
     for digit in str(number):
         send_action('number%s' % digit)
         xbmc.sleep(int(KEY_PAUSE * 1000))

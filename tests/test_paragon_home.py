@@ -12287,5 +12287,94 @@ class TestTheQuietButton(unittest.TestCase):
         self.at(self.tv.db_to_percent(-38.5))
         self.assertTrue(self.tv.player_state()['quiet'])
 
+class TestTuningByNumber(unittest.TestCase):
+    """Tapping a channel in the list goes to that channel.
+
+    It did not. Paragon TV reads the first digit of a fresh entry as a speed
+    dial and jumps straight there -- handleNumberAction takes the speed dial
+    branch and returns before the second digit arrives -- so channel 14 on a
+    box with a speed dial on 1 went wherever speed dial 1 pointed. Every
+    channel from 10 to 49 was affected, and so was every single-digit channel
+    with a speed dial on it, which is the half nobody noticed.
+
+    That behaviour is right for the remote in your hand, where pressing 1
+    means speed dial 1, so the fix belongs here rather than in Paragon TV: a
+    channel tapped in a list is the channel that was asked for.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        xbmc.reset_rpc()
+        for name in ('addon_utils', 'paragon_home', 'tv', 'remote'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import tv
+
+        self.tv = tv
+        # tune refuses when the television is not on; say that it is.
+        window = xbmcgui.Window(tv.HOME_WINDOW)
+        window.setProperty(tv.PROP_CHANNEL, '7')
+
+    def tearDown(self):
+        clean_profile()
+
+    def actions(self):
+        """Every Action() builtin the code ran, in order."""
+        return [command[len('Action('):-1] for command in xbmc.BUILTINS
+                if command.startswith('Action(')]
+
+    def test_a_two_digit_channel_is_not_read_as_a_speed_dial(self):
+        """The bug, in one line: 1 then 4 has to reach 14."""
+        ok, _message = self.tv.tune(14)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.actions(),
+                         ['number0', 'number1', 'number4', 'select'])
+
+    def test_a_single_digit_channel_is_opened_the_same_way(self):
+        """The half nobody noticed. Channel 3 on a box with a speed dial on
+        3 went to the speed dial, silently and plausibly."""
+        self.tv.tune(3)
+
+        self.assertEqual(self.actions(), ['number0', 'number3', 'select'])
+
+    def test_a_three_digit_channel_still_works(self):
+        self.tv.tune(142)
+
+        self.assertEqual(
+            self.actions(),
+            ['number0', 'number1', 'number4', 'number2', 'select'])
+
+    def test_the_entry_is_always_opened_before_any_real_digit(self):
+        """Whatever the channel, nothing but the zero may come first."""
+        for channel in (1, 9, 10, 19, 20, 29, 30, 39, 40, 49, 99, 100, 999):
+            xbmc.reset_rpc()
+            self.tv.tune(channel)
+            sent = self.actions()
+            self.assertEqual(sent[0], 'number0',
+                             'channel %d opened with %s' % (channel, sent[0]))
+            self.assertEqual(sent[-1], 'select')
+            self.assertEqual(sent[1:-1],
+                             ['number%s' % d for d in str(channel)])
+
+    def test_a_channel_that_does_not_exist_sends_nothing(self):
+        for bad in (0, -1, 1000, 'seven', None):
+            xbmc.reset_rpc()
+            ok, _message = self.tv.tune(bad)
+            self.assertFalse(ok, '%r should be refused' % (bad,))
+            self.assertEqual(self.actions(), [])
+
+    def test_it_refuses_when_the_television_is_not_on(self):
+        xbmcgui.Window(self.tv.HOME_WINDOW).setProperty(
+            self.tv.PROP_CHANNEL, '')
+
+        ok, message = self.tv.tune(14)
+
+        self.assertFalse(ok)
+        self.assertEqual(self.actions(), [])
+        self.assertIn('not running', message)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

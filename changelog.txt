@@ -1,3 +1,22 @@
+2.41.2 (Aryez - 2026)
+    Fixed: picking a channel on the web remote went to a speed dial instead.
+        Channels 10-19 landed on speed dial 1, 20-29 on speed dial 2, and so
+        on for every speed dial that was set.
+    Paragon TV reads the first digit of a fresh entry as a speed dial and
+        jumps immediately -- handleNumberAction takes that branch and returns
+        before the second digit arrives -- so "1" then "4" never became 14.
+    Also fixed, and nobody had noticed it: the same thing happened to single
+        digits. Asking for channel 3 on a box with a speed dial on 3 went
+        wherever that speed dial pointed, which looks like a channel change
+        and is not the one that was asked for.
+    Paragon TV is unchanged. That behaviour is right for the remote in your
+        hand, where pressing 1 means speed dial 1; it is never right for a
+        channel tapped in a list. Channel entry from the remote now opens
+        with a zero, which the speed dial branch ignores -- it only runs
+        while nothing has been entered and only for 1 to 9 -- so the digits
+        that follow are read as digits.
+    tune() had no tests at all, which is how this survived. It has seven now.
+
 2.41.1 (Aryez - 2026)
     Added: pressing Quiet or Louder now raises Kodi's own volume bar, the
         same one the volume keys raise. Pressing it from a phone looks on
