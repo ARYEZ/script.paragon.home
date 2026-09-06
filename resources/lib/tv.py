@@ -131,6 +131,26 @@ SETTING_LINE = re.compile(r'setting id="(.*?)"(?:.*?) value="(.*?)"')
 # Paragon TV allows up to this many channels.
 MAX_CHANNELS = 999
 
+# The mute button sets a level rather than silencing the television: quiet
+# enough to talk over, not so quiet that the room feels switched off.
+#
+# Kodi has no way to be told a decibel figure. Application.SetVolume takes an
+# integer percentage, and Kodi maps percentage linearly onto its volume range
+# -- so a level in dB converts cleanly, and dB is the right unit to keep it
+# in because that is what the volume bar shows you.
+#
+# The floor is Kodi's own VOLUME_MINIMUM. It is a setting because a build
+# with a different floor would put every level in the wrong place, and one
+# number here is a better fix than a rebuild.
+VOLUME_FLOOR_DB = -60.0
+QUIET_LEVEL_DB = -39.3
+NORMAL_LEVEL_DB = -20.0
+
+# How near a level counts as being at it. Wide enough that a nudge of the
+# volume keys does not strand the button, narrow enough that the two levels
+# never overlap.
+LEVEL_TOLERANCE_DB = 2.0
+
 # What is on every channel, written by the Overlay every few seconds. See
 # WebRemoteSnapshot: only the Overlay can work this out, so it writes it down
 # and this reads it.
@@ -743,7 +763,9 @@ BUTTONS = {
     # -- sound ------------------------------------------------------------
     'volumeup': ('Application.SetVolume', 'increment'),
     'volumedown': ('Application.SetVolume', 'decrement'),
-    'mute': ('Application.SetMute', 'toggle'),
+    # Not Application.SetMute: this drops to a level you can talk over
+    # rather than silencing the room. See toggle_quiet.
+    'mute': (None, 'quiet'),
 }
 
 
@@ -807,8 +829,8 @@ def press(button):
     if shape is None:
         return (_rpc(method) is not None), ''
 
-    if shape == 'toggle':
-        return (_rpc(method, {'mute': 'toggle'}) is not None), ''
+    if shape == 'quiet':
+        return toggle_quiet()
 
     if shape == 'increment' and method == 'Application.SetVolume':
         return (_rpc(method, {'volume': 'increment'}) is not None), ''
@@ -863,6 +885,110 @@ def seek(percent):
     return False, 'Could not seek'
 
 
+def db_to_percent(db, floor=None):
+    """A decibel level as the percentage Kodi's volume is set in."""
+    floor = VOLUME_FLOOR_DB if floor is None else float(floor)
+    if floor >= 0:
+        # A floor at or above zero leaves no range to map onto. Nonsense in,
+        # full volume out, rather than a division by zero on a button press.
+        return 100.0
+    ratio = (float(db) - floor) / (0.0 - floor)
+    return max(0.0, min(100.0, ratio * 100.0))
+
+
+def percent_to_db(percent, floor=None):
+    """The other way, for reading back where the volume actually is."""
+    floor = VOLUME_FLOOR_DB if floor is None else float(floor)
+    if floor >= 0:
+        return 0.0
+    ratio = max(0.0, min(100.0, float(percent))) / 100.0
+    return floor + ratio * (0.0 - floor)
+
+
+def _setting_float(name, fallback):
+    """One of this add-on's own settings as a number, or the fallback.
+
+    Read on each press rather than cached: changing a level in settings
+    should take effect on the next press, not the next restart.
+    """
+    try:
+        raw = xbmcaddon.Addon().getSetting(name)
+    except Exception:
+        return fallback
+    try:
+        return float((raw or '').strip())
+    except (TypeError, ValueError):
+        return fallback
+
+
+def levels():
+    """(quiet, normal) in dB, from settings, falling back to the defaults."""
+    return (_setting_float('tv_quiet_db', QUIET_LEVEL_DB),
+            _setting_float('tv_normal_db', NORMAL_LEVEL_DB))
+
+
+def volume_percent():
+    """Where the volume is now, as a percentage, or None."""
+    app = _rpc('Application.GetProperties', {'properties': ['volume']})
+    if not isinstance(app, dict):
+        return None
+    value = app.get('volume')
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def set_volume_percent(percent):
+    """Set the volume, keeping the fraction.
+
+    The builtin rather than Application.SetVolume, because the JSON-RPC
+    method takes an integer and these levels do not land on whole
+    percentages: -39.3 dB is 34.5%, and 34 or 35 is a different level.
+    """
+    xbmc.executebuiltin('SetVolume(%.2f)' % max(0.0, min(100.0, percent)))
+
+
+def at_quiet_level(percent=None):
+    """Whether the volume is sitting at the quiet level.
+
+    What lights the button. Read from the volume itself rather than from a
+    flag this module set, so it stays right when the level is changed by the
+    volume keys, a Kodi remote or anything else.
+    """
+    if percent is None:
+        percent = volume_percent()
+    if percent is None:
+        return False
+    quiet, _normal = levels()
+    return abs(percent_to_db(percent) - quiet) <= LEVEL_TOLERANCE_DB
+
+
+def toggle_quiet():
+    """The mute button: down to the quiet level, or back up to the normal one.
+
+    Stateless on purpose. Remembering which way it went last would be wrong
+    the moment the volume moved by any other route, and a button that needs
+    pressing twice because it thinks it is somewhere it is not is worse than
+    one that simply looks first.
+
+    Kodi's own mute is cleared on the way, so a television muted from the
+    Kodi remote comes back rather than silently staying off at a new level.
+    """
+    quiet, normal = levels()
+    percent = volume_percent()
+    if percent is None:
+        return False, 'Could not read the volume'
+
+    here = percent_to_db(percent)
+    # The midpoint decides, so anywhere down at the quiet end comes back up
+    # and anywhere above it goes down -- including levels neither button set.
+    target = normal if here <= (quiet + normal) / 2.0 else quiet
+
+    _rpc('Application.SetMute', {'mute': False}, quiet=True)
+    set_volume_percent(db_to_percent(target))
+    return True, '%.1f dB' % target
+
+
 def player_state():
     """Volume, mute and what the player is doing. Never raises.
 
@@ -870,7 +996,7 @@ def player_state():
     knows it is a pause button, a mute button that knows it is muted.
     """
     state = {'playing': False, 'paused': False, 'speed': 0,
-             'volume': None, 'muted': False}
+             'volume': None, 'muted': False, 'quiet': False}
 
     # Shape-checked, not assumed. This is one call inside the snapshot every
     # poll builds, and an answer that is not the dict it should be would
@@ -882,6 +1008,7 @@ def player_state():
         app = {}
     if 'volume' in app:
         state['volume'] = app.get('volume')
+        state['quiet'] = at_quiet_level(app.get('volume'))
     state['muted'] = bool(app.get('muted'))
 
     player = active_player()

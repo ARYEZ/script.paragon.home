@@ -1,3 +1,26 @@
+2.41.0 (Aryez - 2026)
+    Changed: the web remote's Mute button sets a level instead of silencing
+        the television. Quiet enough to talk over, not so quiet the room
+        feels switched off. It reads "Quiet", and "Louder" once it is down.
+    Kodi cannot be told a decibel figure -- Application.SetVolume takes an
+        integer percentage -- so the level is kept in dB, which is the unit
+        the volume bar shows, and converted on the way out. -39.3 dB on
+        Kodi's -60 dB floor is 34.5%, which is why the SetVolume builtin is
+        used rather than the JSON-RPC method: the builtin parses a float,
+        and 34 or 35 is a different level.
+    A second press goes back up to the normal level rather than to wherever
+        the volume happened to be. Which way a press goes is decided by
+        which side of the midpoint the volume is on, not by a remembered
+        flag: the volume can be moved by the volume keys, a Kodi remote or
+        another script, and a button that needs pressing twice because it
+        believes it is somewhere it is not is worse than one that looks.
+    Kodi's own mute is cleared on the way, so a television muted from the
+        Kodi remote comes back rather than sitting silently at a new level.
+    Both levels are settings, under Remote, in decibels. A build whose
+        volume floor is not -60 dB puts every level in the wrong place, and
+        one number there is a better fix than a new version.
+    Kodi's real mute is no longer on the page.
+
 2.40.0 (Aryez - 2026)
     Added: Tuya roller shades and curtain motors. Open, close or set a
         percentage -- from the menus, a sequence step or the web remote --

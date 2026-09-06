@@ -115,6 +115,12 @@ the add-on ships a single locale.
         <setting type="action" label="Show the address and PIN"
                  action="RunScript(script.paragon.home,action=remote)"
                  option="close" enable="eq(-5,true)"/>
+        <setting type="lsep" label="The remote's Quiet button sets a level rather than muting."/>
+        <setting type="lsep" label="In decibels, as the volume bar shows them."/>
+        <setting id="tv_quiet_db" type="text" label="Quiet level (dB)"
+                 default="-39.3"/>
+        <setting id="tv_normal_db" type="text" label="Normal level (dB)"
+                 default="-20.0"/>
     </category>
 
     <category label="Advanced">

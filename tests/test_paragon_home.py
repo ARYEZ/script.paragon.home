@@ -12093,5 +12093,172 @@ class TestTuyaCovers(unittest.TestCase):
 
         self.assertIsNone(self.driver().get_state(self.shade()))
 
+class TestTheQuietButton(unittest.TestCase):
+    """The remote's mute button sets a level instead of silencing the room.
+
+    Quiet enough to talk over, not so quiet the television feels switched
+    off. Kodi cannot be told a decibel figure -- Application.SetVolume takes
+    an integer percentage -- so the level is kept in dB, which is the unit
+    the volume bar shows, and converted on the way out.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        xbmc.reset_rpc()
+        for name in ('addon_utils', 'paragon_home', 'tv', 'remote'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import tv
+
+        self.tv = tv
+
+    def tearDown(self):
+        clean_profile()
+
+    def at(self, percent):
+        """Tell the stub Kodi the volume is here."""
+        xbmc.rpc_results['Application.GetProperties'] = {
+            'volume': percent, 'muted': False}
+
+    def volumes_set(self):
+        """Every SetVolume builtin the code ran, as floats."""
+        return [float(command[len('SetVolume('):-1])
+                for command in xbmc.BUILTINS
+                if command.startswith('SetVolume(')]
+
+    # -- the arithmetic ----------------------------------------------------
+
+    def test_the_level_converts_to_the_percentage_kodi_takes(self):
+        """-39.3 dB on a -60 dB floor is 34.5%."""
+        self.assertAlmostEqual(self.tv.db_to_percent(-39.3), 34.5, places=3)
+
+    def test_it_converts_back(self):
+        self.assertAlmostEqual(self.tv.percent_to_db(34.5), -39.3, places=3)
+
+    def test_the_ends_are_the_ends(self):
+        self.assertAlmostEqual(self.tv.db_to_percent(0.0), 100.0)
+        self.assertAlmostEqual(self.tv.db_to_percent(-60.0), 0.0)
+
+    def test_a_level_past_the_floor_is_clamped(self):
+        self.assertAlmostEqual(self.tv.db_to_percent(-200.0), 0.0)
+        self.assertAlmostEqual(self.tv.db_to_percent(40.0), 100.0)
+
+    def test_a_nonsense_floor_does_not_divide_by_zero(self):
+        """A floor at or above zero leaves no range. Full volume, not a crash
+        on a button press."""
+        self.assertAlmostEqual(self.tv.db_to_percent(-39.3, floor=0.0), 100.0)
+
+    # -- pressing it -------------------------------------------------------
+
+    def test_a_loud_television_goes_quiet(self):
+        self.at(80.0)
+
+        ok, message = self.tv.press('mute')
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(self.volumes_set()[-1], 34.5, places=1)
+        self.assertIn('-39.3', message)
+
+    def test_a_quiet_television_comes_back_up(self):
+        """The second press is the way back, not another trip down."""
+        self.at(34.5)
+
+        ok, message = self.tv.press('mute')
+
+        self.assertTrue(ok)
+        # -20 dB on a -60 floor is 66.67%.
+        self.assertAlmostEqual(self.volumes_set()[-1], 66.67, places=1)
+        self.assertIn('-20.0', message)
+
+    def test_the_midpoint_decides_not_a_remembered_flag(self):
+        """A level neither button set still goes the sensible way.
+
+        Nothing here remembers which way it went last: the volume can be
+        moved by the volume keys, a Kodi remote or another script, and a
+        button that has to be pressed twice because it believes it is
+        somewhere it is not is worse than one that looks first.
+        """
+        # Just below the midpoint of -39.3 and -20.0, so: back up.
+        self.at(self.tv.db_to_percent(-32.0))
+        self.tv.press('mute')
+        self.assertAlmostEqual(self.volumes_set()[-1], 66.67, places=1)
+
+        # Just above it, so: down.
+        xbmc.reset_rpc()
+        self.at(self.tv.db_to_percent(-27.0))
+        self.tv.press('mute')
+        self.assertAlmostEqual(self.volumes_set()[-1], 34.5, places=1)
+
+    def test_kodis_own_mute_is_cleared_on_the_way(self):
+        """A television muted from the Kodi remote comes back, rather than
+        silently sitting at a new level."""
+        self.at(80.0)
+
+        self.tv.press('mute')
+
+        unmutes = [call for call in xbmc.rpc_calls
+                   if call.get('method') == 'Application.SetMute'
+                   and call.get('params', {}).get('mute') is False]
+        self.assertEqual(len(unmutes), 1)
+
+    def test_it_no_longer_toggles_kodis_mute(self):
+        """The whole point. A toggle here would silence the room."""
+        self.at(80.0)
+
+        self.tv.press('mute')
+
+        toggles = [call for call in xbmc.rpc_calls
+                   if call.get('params', {}).get('mute') == 'toggle']
+        self.assertEqual(toggles, [])
+
+    def test_an_unreadable_volume_changes_nothing(self):
+        """Better than guessing at a level from nothing."""
+        xbmc.rpc_results['Application.GetProperties'] = {'muted': False}
+
+        ok, message = self.tv.press('mute')
+
+        self.assertFalse(ok)
+        self.assertEqual(self.volumes_set(), [])
+        self.assertIn('volume', message.lower())
+
+    # -- the levels are settings -------------------------------------------
+
+    def test_the_levels_come_from_settings(self):
+        xbmcaddon.SETTINGS['tv_quiet_db'] = '-45.0'
+        xbmcaddon.SETTINGS['tv_normal_db'] = '-12.0'
+        self.at(90.0)
+
+        self.tv.press('mute')
+
+        # -45 on a -60 floor is 25%.
+        self.assertAlmostEqual(self.volumes_set()[-1], 25.0, places=1)
+
+    def test_a_setting_that_is_not_a_number_falls_back(self):
+        """A half-typed level should not stop the button working."""
+        xbmcaddon.SETTINGS['tv_quiet_db'] = 'minus a lot'
+        self.at(90.0)
+
+        self.tv.press('mute')
+
+        self.assertAlmostEqual(self.volumes_set()[-1], 34.5, places=1)
+
+    # -- what the page draws from ------------------------------------------
+
+    def test_the_state_says_when_the_television_is_quiet(self):
+        """What lights the button, read from the volume rather than a flag."""
+        self.at(34.5)
+        self.assertTrue(self.tv.player_state()['quiet'])
+
+        xbmc.reset_rpc()
+        self.at(80.0)
+        self.assertFalse(self.tv.player_state()['quiet'])
+
+    def test_a_nudge_of_the_volume_keys_does_not_strand_the_button(self):
+        """Within the tolerance is still at the level."""
+        self.at(self.tv.db_to_percent(-38.5))
+        self.assertTrue(self.tv.player_state()['quiet'])
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

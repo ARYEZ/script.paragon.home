@@ -2485,7 +2485,7 @@ button.chan {
         </div>
 
         <div class="keys three">
-          <button class="key" data-press="mute" id="tv_muteKey">Mute</button>
+          <button class="key" data-press="mute" id="tv_muteKey">Quiet</button>
           <button class="key" data-press="volumedown" aria-label="Volume down">&minus;</button>
           <button class="key" data-press="volumeup" aria-label="Volume up">+</button>
         </div>
@@ -3244,8 +3244,14 @@ function renderControls() {
   play.innerHTML = (player.playing && !player.paused) ? '&#10074;&#10074;'
                                                       : '&#9654;&#65038;';
 
+  // Lit when the volume is down at the quiet level, not when Kodi is muted:
+  // this button sets a level you can talk over rather than silencing the
+  // room. Kodi's own mute can still be on -- from its own remote -- and the
+  // readout says so, because a silent television with the button unlit
+  // would otherwise look broken.
   var mute = document.getElementById('tv_muteKey');
-  mute.classList.toggle('lit', !!player.muted);
+  mute.classList.toggle('lit', !!player.quiet);
+  mute.textContent = player.quiet ? 'Louder' : 'Quiet';
 
   var volume = document.getElementById('tv_volNow');
   volume.textContent = (player.volume === null ||
