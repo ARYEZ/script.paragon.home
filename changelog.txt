@@ -1,3 +1,13 @@
+2.41.1 (Aryez - 2026)
+    Added: pressing Quiet or Louder now raises Kodi's own volume bar, the
+        same one the volume keys raise. Pressing it from a phone looks on
+        the television exactly like turning the volume down from the remote.
+    SetVolume takes a second parameter for this, and it has to be the
+        literal word "showvolumebar". Kodi compares against that exact
+        string and silently ignores anything else -- "true" leaves the bar
+        off with nothing going wrong to notice -- so a test asserts the
+        spelling rather than just the presence of a second parameter.
+
 2.41.0 (Aryez - 2026)
     Changed: the web remote's Mute button sets a level instead of silencing
         the television. Quiet enough to talk over, not so quiet the room

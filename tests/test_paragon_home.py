@@ -12122,11 +12122,15 @@ class TestTheQuietButton(unittest.TestCase):
         xbmc.rpc_results['Application.GetProperties'] = {
             'volume': percent, 'muted': False}
 
-    def volumes_set(self):
-        """Every SetVolume builtin the code ran, as floats."""
-        return [float(command[len('SetVolume('):-1])
+    def volume_commands(self):
+        """Every SetVolume builtin the code ran, as its argument list."""
+        return [command[len('SetVolume('):-1].split(',')
                 for command in xbmc.BUILTINS
                 if command.startswith('SetVolume(')]
+
+    def volumes_set(self):
+        """Just the percentages, as floats."""
+        return [float(args[0]) for args in self.volume_commands()]
 
     # -- the arithmetic ----------------------------------------------------
 
@@ -12222,6 +12226,29 @@ class TestTheQuietButton(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.volumes_set(), [])
         self.assertIn('volume', message.lower())
+
+    def test_the_volume_bar_comes_up_like_it_does_for_the_volume_keys(self):
+        """Pressing Quiet from a phone should look like the remote on screen.
+
+        The word matters: Kodi compares the second parameter against the
+        literal "showvolumebar" and silently ignores anything else, so
+        "true" leaves the bar off with nothing going wrong to notice.
+        """
+        self.at(80.0)
+
+        self.tv.press('mute')
+
+        args = self.volume_commands()[-1]
+        self.assertEqual(len(args), 2,
+                         'SetVolume needs its second parameter for the bar')
+        self.assertEqual(args[1], 'showvolumebar')
+
+    def test_the_bar_comes_up_going_back_up_too(self):
+        self.at(34.5)
+
+        self.tv.press('mute')
+
+        self.assertEqual(self.volume_commands()[-1][1], 'showvolumebar')
 
     # -- the levels are settings -------------------------------------------
 

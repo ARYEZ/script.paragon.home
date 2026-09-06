@@ -938,14 +938,30 @@ def volume_percent():
     return float(value)
 
 
-def set_volume_percent(percent):
-    """Set the volume, keeping the fraction.
+# What SetVolume's second parameter has to be, spelled exactly. Kodi compares
+# it against this literal word -- "true" is silently ignored, and the volume
+# bar simply does not appear, which is a maddening thing to debug from the
+# sofa because nothing goes wrong.
+SHOW_VOLUME_BAR = 'showvolumebar'
+
+
+def set_volume_percent(percent, show=True):
+    """Set the volume, keeping the fraction, and show the volume bar.
 
     The builtin rather than Application.SetVolume, because the JSON-RPC
     method takes an integer and these levels do not land on whole
     percentages: -39.3 dB is 34.5%, and 34 or 35 is a different level.
+
+    The bar is Kodi's own, the same one the volume keys raise, so pressing
+    Quiet from a phone looks on the television exactly like turning the
+    volume down from the remote. Kodi only raises it when the volume
+    actually changes, which is the behaviour wanted here anyway.
     """
-    xbmc.executebuiltin('SetVolume(%.2f)' % max(0.0, min(100.0, percent)))
+    value = max(0.0, min(100.0, percent))
+    if show:
+        xbmc.executebuiltin('SetVolume(%.2f,%s)' % (value, SHOW_VOLUME_BAR))
+    else:
+        xbmc.executebuiltin('SetVolume(%.2f)' % value)
 
 
 def at_quiet_level(percent=None):
