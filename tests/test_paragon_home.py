@@ -522,6 +522,167 @@ class TestScenes(unittest.TestCase):
         self.assertEqual(levels, [20])
         self.assertEqual(scene['devices']['EE:11']['brightness'], 90)
 
+    def test_strip_brightness_overrides_for_the_strip_only(self):
+        """A strip along a counter is a line of light, not a room's worth."""
+        controller = RecordingController()
+        bulb = Device('AA:BB', name='Bulb', model='H6008', lan=True,
+                      ip='127.0.0.1')
+        strip = Device('FF:99', name='Kitchen Light Strip', model='H6008',
+                       lan=True, ip='127.0.0.4')
+        scene = scene_lib.make_scene('Dawn', brightness=50,
+                                     strip_brightness=35)
+        applied, errors = scene_lib.apply_scene(controller, scene,
+                                                [bulb, strip])
+
+        self.assertEqual(applied, 2)
+        self.assertEqual(errors, [])
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'AA:BB': 50, 'FF:99': 35})
+
+    def test_the_four_brightnesses_land_on_four_different_lights(self):
+        """One scene, four levels, each on the light it was meant for."""
+        controller = RecordingController()
+        bulb = Device('AA:BB', name='Bulb', model='H6008', lan=True,
+                      ip='127.0.0.1')
+        bar = Device('CC:DD', name='Greatroom Lightbar One', model='H610A',
+                     lan=True, ip='127.0.0.2')
+        back = Device('EE:11', name='Hundy Backlight', model='H6008',
+                      lan=True, ip='127.0.0.3')
+        strip = Device('FF:99', name='Kitchen Light Strip', model='H6008',
+                       lan=True, ip='127.0.0.4')
+        scene = scene_lib.make_scene('Dawn', brightness=50, bar_brightness=5,
+                                     backlight_brightness=20,
+                                     strip_brightness=35)
+        scene_lib.apply_scene(controller, scene, [bulb, bar, back, strip])
+
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'AA:BB': 50, 'CC:DD': 5,
+                                  'EE:11': 20, 'FF:99': 35})
+
+    def test_a_backlight_strip_takes_the_backlight_figure(self):
+        """Two of the three words in one name, and the order has to hold.
+
+        A backlight is usually a strip, so this is the collision that will
+        actually happen in a room rather than a contrived one.
+        """
+        controller = RecordingController()
+        both = Device('EE:11', name='TV Backlight Strip', model='H6008',
+                      lan=True, ip='127.0.0.3')
+        self.assertTrue(scene_lib.is_backlight(both))
+        self.assertTrue(scene_lib.is_lightstrip(both))
+
+        scene = scene_lib.make_scene('Dawn', brightness=50,
+                                     backlight_brightness=20,
+                                     strip_brightness=35)
+        scene_lib.apply_scene(controller, scene, [both])
+
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'EE:11': 20})
+
+    def test_a_lightbar_strip_takes_the_bar_figure(self):
+        """The other collision. Strip is last of the three, deliberately."""
+        controller = RecordingController()
+        both = Device('CC:DD', name='Counter Strip', model='H610A',
+                      lan=True, ip='127.0.0.2')
+        self.assertTrue(scene_lib.is_lightbar(both))
+        self.assertTrue(scene_lib.is_lightstrip(both))
+
+        scene = scene_lib.make_scene('Dawn', brightness=50, bar_brightness=5,
+                                     strip_brightness=35)
+        scene_lib.apply_scene(controller, scene, [both])
+
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'CC:DD': 5})
+
+    def test_adding_strips_changed_nothing_for_bars_and_backlights(self):
+        """A scene written before strips existed behaves exactly as it did.
+
+        The whole reason strip is asked last: no light that already took a
+        bar or backlight figure may quietly start taking a different one.
+        """
+        controller = RecordingController()
+        bar = Device('CC:DD', name='Greatroom Lightbar One', model='H610A',
+                     lan=True, ip='127.0.0.2')
+        back = Device('EE:11', name='Hundy Backlight', model='H6008',
+                      lan=True, ip='127.0.0.3')
+        scene = scene_lib.make_scene('Dawn', brightness=50, bar_brightness=5,
+                                     backlight_brightness=20)
+
+        scene_lib.apply_scene(controller, scene, [bar, back])
+
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'CC:DD': 5, 'EE:11': 20})
+
+    def test_a_strip_is_recognised_by_name_and_nothing_else(self):
+        """Shape, not SKU -- the same reasoning as a backlight."""
+        named = Device('FF:99', name='Kitchen Light Strip', model='H6008')
+        lower = Device('FF:98', name='under cabinet led strip', model='H6008')
+        joined = Device('FF:97', name='Lightstrip', model='H6008')
+        bulb = Device('AA:BB', name='Bulb', model='H6008')
+        back = Device('EE:11', name='Hundy Backlight', model='H6008')
+
+        self.assertTrue(scene_lib.is_lightstrip(named))
+        self.assertTrue(scene_lib.is_lightstrip(lower))
+        self.assertTrue(scene_lib.is_lightstrip(joined))
+        self.assertFalse(scene_lib.is_lightstrip(bulb))
+        # "Backlight" does not contain "strip"; the words never collide by
+        # accident, only when a name really carries both.
+        self.assertFalse(scene_lib.is_lightstrip(back))
+
+    def test_strip_brightness_absent_leaves_it_on_the_scene_value(self):
+        controller = RecordingController()
+        strip = Device('FF:99', name='Kitchen Light Strip', model='H6008',
+                       lan=True, ip='127.0.0.4')
+        scene = scene_lib.make_scene('Dawn', brightness=50)
+
+        scene_lib.apply_scene(controller, scene, [strip])
+
+        levels = dict((c[1], c[2]) for c in controller.calls
+                      if c[0] == 'brightness')
+        self.assertEqual(levels, {'FF:99': 50})
+
+    def test_strip_override_does_not_write_back_into_the_scene(self):
+        controller = RecordingController()
+        strip = Device('FF:99', name='Kitchen Light Strip', model='H6008',
+                       lan=True, ip='127.0.0.4')
+        scene = scene_lib.make_scene('Dawn', brightness=50,
+                                     strip_brightness=35)
+
+        scene_lib.apply_scene(controller, scene, [strip])
+
+        self.assertEqual(scene['brightness'], 50)
+        self.assertEqual(scene['strip_brightness'], 35)
+
+    def test_normalise_clamps_strip_brightness(self):
+        scene = scene_lib.normalise({'name': 'X', 'strip_brightness': 900})
+        self.assertEqual(scene['strip_brightness'], 100)
+        scene = scene_lib.normalise({'name': 'X', 'strip_brightness': 'junk'})
+        self.assertIsNone(scene['strip_brightness'])
+        scene = scene_lib.normalise({'name': 'X'})
+        self.assertIsNone(scene['strip_brightness'])
+
+    def test_a_scene_saved_before_strips_existed_still_loads(self):
+        """The field is simply absent in scenes.json on every existing box."""
+        scene = scene_lib.normalise({'name': 'Warshade', 'brightness': 40,
+                                     'bar_brightness': 5,
+                                     'backlight_brightness': 20})
+
+        self.assertEqual(scene['brightness'], 40)
+        self.assertEqual(scene['bar_brightness'], 5)
+        self.assertEqual(scene['backlight_brightness'], 20)
+        self.assertIsNone(scene['strip_brightness'])
+
+    def test_the_scene_reads_out_its_strip_brightness(self):
+        scene = scene_lib.make_scene('Dawn', brightness=50,
+                                     strip_brightness=35)
+
+        self.assertIn('strip 35%', scene_lib.describe(scene))
+
     def test_normalise_clamps_backlight_brightness(self):
         scene = scene_lib.normalise({'name': 'X', 'backlight_brightness': 900})
         self.assertEqual(scene['backlight_brightness'], 100)

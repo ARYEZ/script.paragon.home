@@ -1,3 +1,25 @@
+2.42.0 (Aryez - 2026)
+    Added: a scene can carry a separate brightness for light strips, beside
+        the ones it already carries for lightbars and backlights. "Light
+        strip brightness" sits under Backlight brightness in the scene
+        editor and defaults to the same as above.
+    The third of one problem. A strip run along a counter or a shelf is a
+        line of light rather than something filling a room, and the
+        percentage that suits the bulbs overhead is rarely the one that
+        suits it.
+    Matched on the name containing "Strip", like a backlight is matched on
+        "Backlight", and for the same reason: what makes a light a strip is
+        its shape, and the name is the only place that is recorded. "Kitchen
+        Light Strip", "under cabinet led strip" and "Lightstrip" all match.
+    Where a name carries more than one of the words the order is backlight,
+        then lightbar, then strip -- most specific first. A backlight is
+        usually a strip, so "TV Backlight Strip" is a collision that happens
+        in a real room and has to resolve the same way every time.
+    Strip is asked last for a second reason: it was added after the other
+        two, so going last means no light that already took a bar or
+        backlight figure quietly started taking a different one. A test
+        holds that.
+
 2.41.2 (Aryez - 2026)
     Fixed: picking a channel on the web remote went to a speed dial instead.
         Channels 10-19 landed on speed dial 1, 20-29 on speed dial 2, and so

@@ -789,6 +789,10 @@ class ControlPanel(object):
                 'same as above'
                 if scene.get('backlight_brightness') is None
                 else '%d%%' % scene['backlight_brightness'])
+            strip_brightness = (
+                'same as above'
+                if scene.get('strip_brightness') is None
+                else '%d%%' % scene['strip_brightness'])
             if scene['mode'] == scene_lib.MODE_COLOR:
                 appearance = 'RGB %d, %d, %d' % tuple(scene['color'][:3])
             elif scene['mode'] == scene_lib.MODE_MIX:
@@ -831,6 +835,8 @@ class ControlPanel(object):
                  lambda: self._edit_bar_brightness(scene)),
                 ('Backlight brightness: %s' % backlight_brightness,
                  lambda: self._edit_backlight_brightness(scene)),
+                ('Light strip brightness: %s' % strip_brightness,
+                 lambda: self._edit_strip_brightness(scene)),
                 ('Appearance: %s' % appearance,
                  lambda: self._edit_appearance(scene)),
                 ('Lights: %s' % target_label,
@@ -1048,6 +1054,29 @@ class ControlPanel(object):
                 scene['bar_brightness'] = max(1, min(100, value))
         else:
             scene['bar_brightness'] = BRIGHTNESS_STEPS[choice - 1]
+
+    def _edit_strip_brightness(self, scene):
+        """A separate brightness for light strips, overriding the scene's own.
+
+        The third of the same problem the lightbars and backlights have: a
+        strip along a counter is a line of light rather than something
+        filling a room, and the percentage that suits the bulbs overhead is
+        rarely the one that suits it.
+        """
+        options = ['Same as the scene brightness']
+        options += ['%d%%' % step for step in BRIGHTNESS_STEPS]
+        options.append('Custom...')
+        choice = _select('Light strip brightness', options)
+        if choice == BACK:
+            return
+        if choice == 0:
+            scene['strip_brightness'] = None
+        elif choice == len(options) - 1:
+            value = self._ask_number('Light strip brightness (1-100)', '40')
+            if value is not None:
+                scene['strip_brightness'] = max(1, min(100, value))
+        else:
+            scene['strip_brightness'] = BRIGHTNESS_STEPS[choice - 1]
 
     def _edit_backlight_brightness(self, scene):
         """A separate brightness for backlights, overriding the scene's own.

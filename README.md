@@ -233,25 +233,34 @@ upgrades and can be hand-edited or copied between boxes.
 Not every light does the same thing with the same percentage. A lightbar at
 50% throws far more light than a bulb at 50%, and a strip washing a wall
 behind a screen at the level that suits the room's bulbs is either glare or
-nothing at all. So a scene carries two more brightnesses beside its own:
+nothing at all. So a scene carries three more brightnesses beside its own:
 
 | Row | Applies to | Default |
 |---|---|---|
 | **Lightbar brightness** | anything whose model is a known lightbar SKU, or whose name contains "Lightbar" | same as the scene |
 | **Backlight brightness** | anything whose name contains "Backlight" | same as the scene |
+| **Light strip brightness** | anything whose name contains "Strip" | same as the scene |
 
-Both sit in the scene editor under the ordinary **Brightness** row, and both
-default to *same as above* — set one only when that kind of light needs a
+All three sit in the scene editor under the ordinary **Brightness** row, and
+all default to *same as above* — set one only when that kind of light needs a
 different figure. They override the scene's brightness for those lights and
 nothing else, including in a captured scene.
 
-A backlight is matched on its name alone, with no model list behind it. What
-makes a light a backlight is where it is pointed rather than what it is: the
-same bulb is a backlight behind a screen and an ordinary light in a lamp, and
-the name is the only place that fact is written down. Rename a light to
-include "Backlight" and it takes the backlight figure; take the word out and
-it goes back to the scene's own. A light matching both rules takes the
-backlight figure, the more specific of the two.
+A backlight and a strip are matched on their names alone, with no model list
+behind them. What makes a light a backlight is where it is pointed rather
+than what it is — the same bulb is a backlight behind a screen and an
+ordinary light in a lamp — and what makes one a strip is its shape. The name
+is the only place either fact is written down. Rename a light to include
+"Backlight" and it takes the backlight figure; take the word out and it goes
+back to the scene's own.
+
+**Where a name carries more than one of the words, the order is backlight,
+then lightbar, then strip** — most specific first. That matters in a real
+room rather than in theory: a backlight is usually a strip, so "TV Backlight
+Strip" matches two rules and has to resolve the same way every time. Strip is
+asked last for a second reason as well: it was added after the other two, so
+going last means no light that already took a bar or backlight figure quietly
+started taking a different one.
 
 ### Mixing several colours over the lights
 

@@ -9,7 +9,7 @@ Targets Kodi 17.6 (Krypton) - xbmc.python 2.25.0, Python 2.7.
 The Python sources are written to run unmodified on Python 3 as well, so the
 same tree can be re-targeted at Kodi 19+ by bumping the xbmc.python import.
 -->
-<addon id="script.paragon.home" name="Paragon Home" version="2.41.2" provider-name="Aryez">
+<addon id="script.paragon.home" name="Paragon Home" version="2.42.0" provider-name="Aryez">
     <requires>
         <import addon="xbmc.python" version="2.25.0"/>
     </requires>

@@ -29,6 +29,10 @@ Fields:
                 opposite problem: a strip washing a wall behind a screen is
                 either glare or nothing at the level that suits the bulbs
                 lighting the room.
+    strip_brightness
+                1-100, or None. The third of the same: a strip run along a
+                counter or a shelf is a line of light rather than a source
+                filling a room, and lands somewhere between the two.
 """
 
 import random
@@ -63,6 +67,13 @@ LIGHTBAR_MODELS = ('H610A',)
 # backlight while the identical bulb in a lamp is not. The name is the only
 # place that fact is recorded.
 BACKLIGHT_WORD = 'BACKLIGHT'
+
+# And a light strip, on the same reasoning. "Strip" rather than "lightstrip"
+# so that "Kitchen Light Strip" and "LED Strip" both match without anyone
+# having to name a device a particular way. Neither BACKLIGHT nor LIGHTBAR
+# contains it, so the three words never collide on a name by accident -- and
+# where a name does carry more than one, apply_scene settles the order.
+STRIP_WORD = 'STRIP'
 
 # How far apart the RGB channels must be before a reading counts as a real
 # colour rather than a shade of white. Govee bulbs report white either as
@@ -219,13 +230,14 @@ def rotate_assignment(assignment, color_count):
 def make_scene(name, power=POWER_ON, brightness=None, mode=MODE_NONE,
                color=None, kelvin=None, targets=None, devices=None,
                colors=None, cycle=0, actions=None, bar_brightness=None,
-               backlight_brightness=None):
+               backlight_brightness=None, strip_brightness=None):
     return {
         'name': name,
         'power': power,
         'brightness': brightness,
         'bar_brightness': bar_brightness,
         'backlight_brightness': backlight_brightness,
+        'strip_brightness': strip_brightness,
         'mode': mode,
         'color': list(color) if color else [255, 255, 255],
         'kelvin': kelvin or 2700,
@@ -306,6 +318,19 @@ def is_backlight(device):
     apply_scene settles that in the backlight's favour.
     """
     return BACKLIGHT_WORD in (getattr(device, 'name', '') or '').upper()
+
+
+def is_lightstrip(device):
+    """Whether `device` should take a scene's separate light strip brightness.
+
+    By name, like a backlight, and for the same reason: what makes a light a
+    strip is its shape, and the name is the only place that is recorded.
+
+    Deliberately the last of the three to be asked. A backlight is usually a
+    strip and a strip is sometimes a bar, so a name carrying two of these
+    words has to resolve the same way every time -- see apply_scene.
+    """
+    return STRIP_WORD in (getattr(device, 'name', '') or '').upper()
 
 
 def settings_for(scene, device_id):
@@ -581,6 +606,7 @@ def normalise(scene):
 
     bar_brightness = _normalise_level(scene.get('bar_brightness'))
     backlight_brightness = _normalise_level(scene.get('backlight_brightness'))
+    strip_brightness = _normalise_level(scene.get('strip_brightness'))
 
     try:
         cycle = max(0, int(scene.get('cycle') or 0))
@@ -598,6 +624,7 @@ def normalise(scene):
         'brightness': settings['brightness'],
         'bar_brightness': bar_brightness,
         'backlight_brightness': backlight_brightness,
+        'strip_brightness': strip_brightness,
         'mode': mode,
         'color': settings['color'],
         'kelvin': settings['kelvin'],
@@ -658,6 +685,8 @@ def describe(scene):
         bits.append('bars %d%%' % scene['bar_brightness'])
     if scene.get('backlight_brightness') is not None:
         bits.append('backlight %d%%' % scene['backlight_brightness'])
+    if scene.get('strip_brightness') is not None:
+        bits.append('strip %d%%' % scene['strip_brightness'])
     if scene.get('mode') == MODE_COLOR:
         color = scene.get('color') or [255, 255, 255]
         bits.append('RGB %d,%d,%d' % tuple(color[:3]))
@@ -799,6 +828,7 @@ def apply_scene(controller, scene, devices, log_func=None,
     per_device_map = scene.get('devices') or {}
     bar_brightness = scene.get('bar_brightness')
     backlight_brightness = scene.get('backlight_brightness')
+    strip_brightness = scene.get('strip_brightness')
     for index, device in enumerate(targets):
         # A few milliseconds between lights. Sending 25 lights' worth of
         # datagrams as fast as the loop runs is the shape of traffic consumer
@@ -811,16 +841,26 @@ def apply_scene(controller, scene, devices, log_func=None,
         # other scene falls back to its single uniform set.
         settings = settings_for(scene, device.device_id)
         # A lightbar puts out far more light than a bulb at the same
-        # percentage, so a scene can carry a second figure just for them, and
-        # a third for a backlight. Backlight is checked first: it is the more
-        # specific claim, so a backlight built out of a lightbar takes the
-        # backlight figure rather than the bar one.
+        # percentage, so a scene can carry a second figure just for them, a
+        # third for a backlight and a fourth for a light strip.
+        #
+        # The order is most specific first, and it matters because these
+        # names overlap in real rooms: a backlight is usually a strip, and a
+        # strip is sometimes a bar. "TV Backlight Strip" carries two of the
+        # three words and has to resolve the same way every time.
+        #
+        # Strip is last for a second reason. It was added after the other
+        # two, and going last means no device that already took a bar or
+        # backlight figure quietly started taking a different one.
         if backlight_brightness is not None and is_backlight(device):
             settings = dict(settings)
             settings['brightness'] = backlight_brightness
         elif bar_brightness is not None and is_lightbar(device):
             settings = dict(settings)
             settings['brightness'] = bar_brightness
+        elif strip_brightness is not None and is_lightstrip(device):
+            settings = dict(settings)
+            settings['brightness'] = strip_brightness
         if dealt is not None and device.device_id not in per_device_map:
             slot = dealt.get(device.device_id)
             if slot is not None:
