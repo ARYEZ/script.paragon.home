@@ -49,7 +49,49 @@ def copy(source, target):
     left, right = _real(source), _real(target)
     if not left or not right:
         return False
+    # Faithful to Kodi: copying into a folder that does not exist fails
+    # rather than creating it. The caller is expected to have made the tree.
+    if not os.path.isdir(os.path.dirname(right)):
+        return False
     shutil.copyfile(left, right)
+    return True
+
+
+def listdir(path):
+    """(dirs, files), as Kodi returns them: names only, not paths."""
+    real = _real(path)
+    if not real or not os.path.isdir(real):
+        return [], []
+    dirs, files = [], []
+    for name in sorted(os.listdir(real)):
+        if os.path.isdir(os.path.join(real, name)):
+            dirs.append(name)
+        else:
+            files.append(name)
+    return dirs, files
+
+
+def mkdirs(path):
+    real = _real(path)
+    if not real:
+        return False
+    if os.path.isdir(real):
+        return True
+    try:
+        os.makedirs(real)
+    except OSError:
+        return False
+    return True
+
+
+def rmdir(path):
+    real = _real(path)
+    if not real or not os.path.isdir(real):
+        return False
+    try:
+        os.rmdir(real)
+    except OSError:
+        return False
     return True
 
 

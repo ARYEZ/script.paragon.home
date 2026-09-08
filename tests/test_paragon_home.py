@@ -12537,5 +12537,372 @@ class TestTuningByNumber(unittest.TestCase):
         self.assertEqual(self.actions(), [])
         self.assertIn('not running', message)
 
+class TestDirectorySpeedDial(unittest.TestCase):
+    """places.py: the slots, and the guard on what a slot may point at."""
+
+    def setUp(self):
+        import places
+        self.places = places
+
+    def test_a_slot_may_not_climb_out_of_its_base(self):
+        """The whole reason a slot holds a rel and not a path.
+
+        A slot that could hold ".." would let a recursive overwrite reach
+        anywhere on the box, and everything above resources/ is credentials.
+        """
+        for bad in ('../tuya_keys.json', 'a/../../b', '..',
+                    'skin.paragon/../../../storage'):
+            self.assertIsNone(self.places.clean_rel(bad),
+                              '%r should be refused' % (bad,))
+
+    def test_a_slot_may_not_be_absolute_or_a_url(self):
+        for bad in ('/storage/.kodi', 'C:/Kodi', 'c:\\Kodi',
+                    'smb://box/share', 'special://home/'):
+            self.assertIsNone(self.places.clean_rel(bad),
+                              '%r should be refused' % (bad,))
+
+    def test_a_rel_is_rebuilt_rather_than_patched(self):
+        """Backslashes, doubled slashes and "." collapse to one clean form."""
+        self.assertEqual(
+            self.places.clean_rel('skin.paragon\\media'), 'skin.paragon/media')
+        self.assertEqual(
+            self.places.clean_rel('a//b/./c/'), 'a/b/c')
+        self.assertEqual(self.places.clean_rel('  addons  '), 'addons')
+
+    def test_empty_rel_means_the_base_itself(self):
+        """Distinct from None, which means the slot is not set at all."""
+        self.assertEqual(self.places.clean_rel(''), '')
+        self.assertIsNone(self.places.clean_rel(None))
+        self.assertEqual(self.places.join('smb://box/share/', ''),
+                         'smb://box/share/')
+
+    def test_join_keeps_a_url_a_url(self):
+        """os.path.join would put a backslash in this on Windows."""
+        self.assertEqual(
+            self.places.join('smb://10.0.0.99/Addons', 'skin.paragon'),
+            'smb://10.0.0.99/Addons/skin.paragon/')
+        self.assertIsNone(
+            self.places.join('smb://box/share/', '../secrets'))
+
+    def test_slots_are_always_four_long_so_pairing_cannot_shift(self):
+        """Slot N is index N-1 on every host, however the file was saved."""
+        host = self.places.normalise_host(
+            {'id': 'office', 'base': 'smb://box/share/',
+             'slots': [{'rel': 'skin.paragon'}]})
+        self.assertEqual(len(host['slots']), self.places.SLOT_COUNT)
+        self.assertIsNone(host['slots'][3])
+
+        crowded = self.places.normalise_host(
+            {'id': 'office', 'base': 'smb://box/share/',
+             'slots': [{'rel': 'a'}] * 9})
+        self.assertEqual(len(crowded['slots']), self.places.SLOT_COUNT)
+
+    def test_a_bad_slot_empties_its_place_rather_than_shifting_the_rest(self):
+        host = self.places.normalise_host({
+            'id': 'office', 'base': 'smb://box/share/',
+            'slots': [{'rel': 'first'}, {'rel': '../escape'},
+                      {'rel': 'third'}, None]})
+        self.assertEqual(host['slots'][0]['rel'], 'first')
+        self.assertIsNone(host['slots'][1])
+        self.assertEqual(host['slots'][2]['rel'], 'third')
+
+    def test_a_slot_names_itself_after_its_folder(self):
+        host = self.places.normalise_host(
+            {'id': 'x', 'base': '/a/', 'slots': [{'rel': 'addons/skin.paragon'}]})
+        self.assertEqual(host['slots'][0]['name'], 'skin.paragon')
+
+    def test_the_local_host_is_always_present_and_first(self):
+        hosts = self.places.normalise_all(
+            [{'id': 'office', 'base': 'smb://box/share/'}])
+        self.assertEqual(hosts[0]['id'], self.places.LOCAL_ID)
+
+        moved = self.places.normalise_all([
+            {'id': 'office', 'base': 'smb://box/share/'},
+            {'id': 'local', 'base': '/storage/'},
+        ])
+        self.assertEqual(moved[0]['id'], self.places.LOCAL_ID)
+        self.assertEqual(moved[0]['base'], '/storage/')
+        self.assertEqual(len(moved), 2)
+
+    def test_duplicate_and_junk_hosts_are_dropped(self):
+        hosts = self.places.normalise_all([
+            {'id': 'office', 'base': 'smb://box/share/'},
+            {'id': 'OFFICE', 'base': 'smb://other/share/'},
+            {'id': 'nobase'},
+            'not a dict',
+        ])
+        self.assertEqual([h['id'] for h in hosts], ['local', 'office'])
+        self.assertEqual(hosts[1]['base'], 'smb://box/share/')
+
+    def test_setting_and_reading_a_slot_round_trips(self):
+        host = self.places.normalise_host({'id': 'x', 'base': 'smb://b/s/'})
+        self.assertTrue(self.places.set_slot(host, 0, 'skin.paragon'))
+        self.assertEqual(self.places.slot_path(host, 0),
+                         'smb://b/s/skin.paragon/')
+
+        self.assertTrue(self.places.set_slot(host, 0, None))
+        self.assertIsNone(self.places.slot_path(host, 0))
+        self.assertEqual(len(host['slots']), self.places.SLOT_COUNT)
+
+        self.assertFalse(self.places.set_slot(host, 0, '../out'))
+        self.assertFalse(self.places.set_slot(host, 9, 'x'))
+
+    def test_pairs_skips_a_host_whose_slot_is_empty(self):
+        """A destination that was never set is not guessed at."""
+        hosts = self.places.normalise_all([
+            {'id': 'local', 'base': '/a/', 'slots': [{'rel': 'skin.paragon'}]},
+            {'id': 'office', 'base': 'smb://o/s/',
+             'slots': [{'rel': 'skin.paragon'}]},
+            {'id': 'bedroom', 'base': 'smb://b/s/', 'slots': []},
+        ])
+        found = self.places.pairs(hosts, 0, 'local')
+        self.assertEqual([dest['id'] for _src, dest in found], ['office'])
+
+        self.assertEqual(self.places.pairs(hosts, 3, 'local'), [])
+        self.assertEqual(self.places.pairs(hosts, 0, 'nosuch'), [])
+
+
+class TestFolderTransfer(unittest.TestCase):
+    """transfer.py: the copy, the extras report, and the guarded delete."""
+
+    def setUp(self):
+        import transfer
+        self.transfer = transfer
+        self.root = tempfile.mkdtemp()
+        self.source = os.path.join(self.root, 'source')
+        self.dest = os.path.join(self.root, 'dest')
+        self.build(self.source, {
+            'addon.xml': 'skin',
+            'media/icon.png': 'icon-bytes',
+            'media/deep/flag.txt': 'deep',
+            '720p/Home.xml': 'home',
+        })
+
+    def tearDown(self):
+        import xbmcvfs
+        xbmcvfs.SMB_ROOT = None
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def build(self, base, tree):
+        for rel, body in tree.items():
+            path = os.path.join(base, *rel.split('/'))
+            parent = os.path.dirname(path)
+            if not os.path.isdir(parent):
+                os.makedirs(parent)
+            handle = open(path, 'w')
+            handle.write(body)
+            handle.close()
+
+    def listing(self, base):
+        """Every file under `base`, as forward-slashed relative paths."""
+        found = set()
+        for where, _dirs, files in os.walk(base):
+            for name in files:
+                full = os.path.join(where, name)
+                found.add(os.path.relpath(full, base).replace(os.sep, '/'))
+        return found
+
+    def read(self, base, rel):
+        handle = open(os.path.join(base, *rel.split('/')))
+        try:
+            return handle.read()
+        finally:
+            handle.close()
+
+    # -- surveying ---------------------------------------------------------
+
+    def test_a_survey_finds_every_file_and_its_size(self):
+        plan = self.transfer.survey(self.source)
+        self.assertEqual(plan.rels(), {
+            'addon.xml', 'media/icon.png', 'media/deep/flag.txt',
+            '720p/Home.xml'})
+        self.assertEqual(plan.count, 4)
+        self.assertEqual(plan.total_bytes,
+                         len('skin') + len('icon-bytes') + len('deep')
+                         + len('home'))
+        self.assertIn('media/deep', plan.dirs)
+
+    def test_a_survey_of_a_missing_folder_says_so(self):
+        self.assertRaises(self.transfer.TransferError,
+                          self.transfer.survey,
+                          os.path.join(self.root, 'nowhere'))
+
+    def test_a_tree_deeper_than_the_cap_stops_instead_of_looping(self):
+        """xbmcvfs cannot report a symlink, so depth is the only defence."""
+        deep = os.path.join(self.root, 'deep')
+        os.makedirs(os.path.join(deep, *['x'] * (self.transfer.MAX_DEPTH + 3)))
+        plan = self.transfer.survey(deep)
+        self.assertTrue(any('nested deeper' in e for e in plan.errors))
+
+    # -- copying -----------------------------------------------------------
+
+    def test_a_copy_reproduces_the_whole_tree(self):
+        result = self.transfer.copy_tree(self.source, self.dest)
+        self.assertTrue(result.ok, result.failed)
+        self.assertEqual(result.done, 4)
+        self.assertEqual(self.listing(self.dest), self.listing(self.source))
+        self.assertEqual(self.read(self.dest, 'media/deep/flag.txt'), 'deep')
+
+    def test_a_copy_overwrites_what_is_already_there(self):
+        self.build(self.dest, {'addon.xml': 'STALE'})
+        self.transfer.copy_tree(self.source, self.dest)
+        self.assertEqual(self.read(self.dest, 'addon.xml'), 'skin')
+
+    def test_a_copy_never_deletes_what_it_did_not_bring(self):
+        """The safety property the whole design turns on.
+
+        This is the shape of the operation that destroyed a folder of weather
+        icons: a stale tree copied over a good one. Overwriting is asked for;
+        deleting is not, and must never happen as a side effect of a sync.
+        """
+        self.build(self.dest, {
+            'mine.txt': 'keep me',
+            'media/also-mine.png': 'keep me too',
+        })
+        self.transfer.copy_tree(self.source, self.dest)
+
+        self.assertEqual(self.read(self.dest, 'mine.txt'), 'keep me')
+        self.assertEqual(self.read(self.dest, 'media/also-mine.png'),
+                         'keep me too')
+
+    def test_a_copy_can_be_cancelled_part_way(self):
+        seen = []
+
+        def cancel():
+            seen.append(1)
+            return len(seen) > 3
+
+        result = self.transfer.copy_tree(self.source, self.dest,
+                                         should_cancel=cancel)
+        self.assertEqual(result.status, self.transfer.CANCELLED)
+        self.assertLess(len(self.listing(self.dest)), 4)
+
+    def test_progress_counts_towards_the_surveyed_total(self):
+        seen = []
+        self.transfer.copy_tree(
+            self.source, self.dest,
+            on_progress=lambda done, total, rel: seen.append((done, total)))
+        self.assertEqual(seen[-1], (4, 4))
+        self.assertEqual([done for done, _total in seen], [1, 2, 3, 4])
+
+    def test_a_copy_creates_a_destination_that_is_not_there_yet(self):
+        self.assertFalse(os.path.isdir(self.dest))
+        self.transfer.copy_tree(self.source, self.dest)
+        self.assertTrue(os.path.isdir(self.dest))
+
+    def test_a_copy_onto_a_share_goes_through_the_vfs(self):
+        """The destination is usually smb://, which os.path cannot see."""
+        import xbmcvfs
+        share = os.path.join(self.root, 'share')
+        os.makedirs(share)
+        xbmcvfs.SMB_ROOT = share
+
+        result = self.transfer.copy_tree(self.source,
+                                         'smb://10.0.0.99/Addons/')
+        self.assertTrue(result.ok, result.failed)
+        self.assertEqual(self.listing(share), self.listing(self.source))
+
+    # -- the guards --------------------------------------------------------
+
+    def test_a_copy_into_its_own_source_is_refused(self):
+        """It would grow the source as it walked it and never finish."""
+        inside = os.path.join(self.source, 'media')
+        self.assertRaises(self.transfer.TransferError,
+                          self.transfer.copy_tree, self.source, inside)
+        self.assertRaises(self.transfer.TransferError,
+                          self.transfer.copy_tree, inside, self.source)
+
+    def test_a_neighbour_with_a_shared_prefix_is_not_an_overlap(self):
+        self.assertFalse(self.transfer.overlaps(
+            '/a/skin.paragon/', '/a/skin.paragon2/'))
+        self.assertTrue(self.transfer.overlaps(
+            '/a/skin.paragon/', '/a/skin.paragon/media/'))
+
+    def test_a_copy_from_a_folder_that_is_not_there_is_refused(self):
+        self.assertRaises(self.transfer.TransferError,
+                          self.transfer.copy_tree,
+                          os.path.join(self.root, 'nowhere'), self.dest)
+
+    # -- extras, and the separate delete ------------------------------------
+
+    def test_extras_reports_only_what_the_source_lacks(self):
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {
+            'leftover.txt': 'old',
+            'media/gone.png': 'old',
+        })
+
+        found = self.transfer.extras(self.source, self.dest)
+        self.assertEqual(found, ['leftover.txt', 'media/gone.png'])
+
+    def test_extras_is_empty_after_a_clean_copy(self):
+        self.transfer.copy_tree(self.source, self.dest)
+        self.assertEqual(self.transfer.extras(self.source, self.dest), [])
+
+    def test_extras_reads_and_removes_nothing(self):
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {'leftover.txt': 'old'})
+        before = self.listing(self.dest)
+
+        self.transfer.extras(self.source, self.dest)
+        self.assertEqual(self.listing(self.dest), before)
+
+    def test_removing_takes_only_what_it_was_handed(self):
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {'leftover.txt': 'old', 'other.txt': 'old'})
+
+        result = self.transfer.remove(self.dest, ['leftover.txt'])
+        self.assertTrue(result.ok, result.failed)
+        self.assertEqual(result.done, 1)
+        self.assertNotIn('leftover.txt', self.listing(self.dest))
+        self.assertIn('other.txt', self.listing(self.dest))
+        self.assertIn('addon.xml', self.listing(self.dest))
+
+    def test_removing_refuses_a_path_that_climbs_out(self):
+        """remove() deletes, so it re-checks rather than trusting its caller.
+
+        The danger a rebuilt path leaves behind is not escape -- join() cannot
+        escape, because it assembles from a base rather than resolving what it
+        is handed. It is that an unrefused ".." *flattens*: "../keep.txt"
+        becomes "keep.txt", which is a real file here and not the one named.
+        So the test puts that file in the destination, where a flattened path
+        would hit it, and a refused one leaves it alone.
+        """
+        self.build(self.root, {'keep.txt': 'outside the destination'})
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {'keep.txt': 'inside, and not in the list'})
+
+        result = self.transfer.remove(
+            self.dest, ['../keep.txt', '/etc/passwd', 'C:/Windows'])
+
+        self.assertEqual(result.done, 0)
+        self.assertEqual(len(result.failed), 3)
+        self.assertIn('keep.txt', self.listing(self.dest))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, 'keep.txt')))
+
+    def test_removing_can_be_cancelled(self):
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {'a.txt': 'x', 'b.txt': 'x'})
+
+        result = self.transfer.remove(self.dest, ['a.txt', 'b.txt'],
+                                      should_cancel=lambda: True)
+        self.assertEqual(result.status, self.transfer.CANCELLED)
+        self.assertIn('a.txt', self.listing(self.dest))
+
+    # -- describing --------------------------------------------------------
+
+    def test_a_plan_describes_itself_for_the_confirmation(self):
+        plan = self.transfer.survey(self.source)
+        self.assertEqual(self.transfer.describe(plan), '4 files, 22 B')
+
+    def test_sizes_read_as_words_not_bytes(self):
+        self.assertEqual(self.transfer.describe_size(0), '0 B')
+        self.assertEqual(self.transfer.describe_size(512), '512 B')
+        self.assertEqual(self.transfer.describe_size(2048), '2.0 KB')
+        self.assertEqual(self.transfer.describe_size(5 * 1024 * 1024),
+                         '5.0 MB')
+        self.assertEqual(self.transfer.describe_size('nonsense'), '0 B')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
