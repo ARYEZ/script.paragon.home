@@ -22,16 +22,6 @@ NOTIFICATIONS = []
 OK_DIALOGS = []
 SELECT_CALLS = []
 PROGRESS_CALLS = []
-# Every yesno as (heading, line1, line2, line3). Recorded rather than just
-# answered because the wording is the safety feature on a folder copy: the
-# direction has to be readable, and a test should be able to say so.
-YESNO_CALLS = []
-
-# Dialog().browse -- Kodi's own file browser, the one "Add source" uses.
-# Queue a path to have it chosen; with the queue empty it returns the default
-# it was given, which is what the real dialog does when cancelled.
-BROWSE_QUEUE = []
-BROWSE_CALLS = []
 
 # When non-empty, DialogProgress.iscanceled() returns True once this many
 # update() calls have been made.
@@ -46,9 +36,6 @@ def reset():
     del OK_DIALOGS[:]
     del SELECT_CALLS[:]
     del PROGRESS_CALLS[:]
-    del YESNO_CALLS[:]
-    del BROWSE_QUEUE[:]
-    del BROWSE_CALLS[:]
     del CANCEL_AFTER[:]
 
 
@@ -70,17 +57,9 @@ class Dialog(object):
 
     def yesno(self, heading, line1, line2='', line3='', nolabel='',
               yeslabel=''):
-        YESNO_CALLS.append((heading, line1, line2, line3))
         if not YESNO_QUEUE:
             return False
         return YESNO_QUEUE.pop(0)
-
-    def browse(self, browse_type, heading, shares, mask='', useThumbs=False,
-               treatAsFolder=False, defaultt='', enableMultiple=False):
-        BROWSE_CALLS.append((browse_type, heading, shares, defaultt))
-        if not BROWSE_QUEUE:
-            return defaultt
-        return BROWSE_QUEUE.pop(0)
 
     def ok(self, heading, line1, line2='', line3=''):
         OK_DIALOGS.append((heading, line1))

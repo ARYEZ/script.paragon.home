@@ -1,3 +1,20 @@
+2.46.0 (Aryez - 2026)
+    Removed: Move files. It is now a separate add-on, Paragon Transit, at
+        github.com/Aryez/script.paragon.transit -- install that and the boxes
+        and slots set up here are carried over on its first run.
+    Moving folders between Kodi boxes has nothing to do with the lights, and
+        the add-on is worth having on a box with no lights at all. Nothing
+        had to be unpicked to separate them: places.py and transfer.py
+        imported nothing from the devices, the hub or the scenes, so both
+        moved across unchanged.
+    Everything else here is exactly as it was in v2.42.0. The removal was
+        checked by diffing every file it touched against that release: the
+        control panel, the session object, the tests and the Kodi stubs are
+        byte for byte identical, and the two modules are gone.
+    Your places.json is left in this add-on's saved data rather than deleted.
+        Nothing reads it here any more, and Paragon Transit copies it out on
+        first run.
+
 2.45.0 (Aryez - 2026)
     Added: Enter an address... Type a box's address -- 10.0.0.99 -- and walk
         down it, picking the share and then the folder from what is really

@@ -11,10 +11,7 @@ fake `smb://` scheme, mapped onto a real directory, which lets a test say
 import os
 import shutil
 
-# Set by a test to stand for one box: each directory directly inside it is a
-# share, so smb://box/ lists the shares and smb://box/Share/a resolves to
-# <SMB_ROOT>/Share/a. Modelled this way because listing the shares on a host
-# is a real thing the add-on does -- it is how a box's base is chosen.
+# Set by a test to make smb://<something>/rest resolve to a real directory.
 SMB_ROOT = None
 
 
@@ -26,10 +23,9 @@ def _real(path):
         if SMB_ROOT is None:
             return None
         rest = path[len('smb://'):]
-        # Drop the host. What is left is the share and the path inside it:
-        # smb://host/Share/a/b -> <SMB_ROOT>/Share/a/b, and smb://host/ ->
-        # <SMB_ROOT>, which lists the shares.
-        parts = [part for part in rest.split('/')[1:] if part]
+        # smb://host/share/a/b -> <SMB_ROOT>/a/b, so a test can drop files in
+        # one directory and address them as if they were on a server.
+        parts = rest.split('/')[2:]
         return os.path.join(SMB_ROOT, *parts) if parts else SMB_ROOT
     if '://' in path:
         return None
@@ -53,49 +49,7 @@ def copy(source, target):
     left, right = _real(source), _real(target)
     if not left or not right:
         return False
-    # Faithful to Kodi: copying into a folder that does not exist fails
-    # rather than creating it. The caller is expected to have made the tree.
-    if not os.path.isdir(os.path.dirname(right)):
-        return False
     shutil.copyfile(left, right)
-    return True
-
-
-def listdir(path):
-    """(dirs, files), as Kodi returns them: names only, not paths."""
-    real = _real(path)
-    if not real or not os.path.isdir(real):
-        return [], []
-    dirs, files = [], []
-    for name in sorted(os.listdir(real)):
-        if os.path.isdir(os.path.join(real, name)):
-            dirs.append(name)
-        else:
-            files.append(name)
-    return dirs, files
-
-
-def mkdirs(path):
-    real = _real(path)
-    if not real:
-        return False
-    if os.path.isdir(real):
-        return True
-    try:
-        os.makedirs(real)
-    except OSError:
-        return False
-    return True
-
-
-def rmdir(path):
-    real = _real(path)
-    if not real or not os.path.isdir(real):
-        return False
-    try:
-        os.rmdir(real)
-    except OSError:
-        return False
     return True
 
 
