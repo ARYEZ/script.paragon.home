@@ -1,3 +1,18 @@
+2.43.1 (Aryez - 2026)
+    Changed: setting a slot now offers the folders that are actually under
+        that box's base, instead of asking you to type the name. Typing a
+        path with a remote control is the thing the speed dial exists to
+        avoid, and making the setup do it four times per box was the step
+        that would have stopped anyone setting up the third box.
+    "Type it instead..." stays on the list, because the list is only one
+        level deep and a slot may want something nested -- skin.paragon/media
+        rather than skin.paragon.
+    Clearing a slot is its own row now. Backing out of the keyboard used to
+        read as "delete it", so cancelling destroyed the setting.
+    A box that cannot be reached offers typing on its own rather than an
+        error: an empty list is what an offline box looks like, and typing a
+        name is still a useful thing to do to one.
+
 2.43.0 (Aryez - 2026)
     Added: Move files. Four numbered directory slots per Kodi box, paired by
         number, so slot 1 here and slot 1 on the office box are the two ends

@@ -13101,22 +13101,97 @@ class TestMovingFiles(unittest.TestCase):
 
     # -- configuring -------------------------------------------------------
 
-    def test_a_slot_cannot_be_pointed_out_of_its_base(self):
+    def slot_rows(self, host_id, index):
+        """The labels the slot picker offers, without choosing one."""
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.panel().edit_slot(host_id, index)
+        labels = xbmcgui.SELECT_CALLS[-1][1]
+        xbmcgui.reset()
+        return labels
+
+    def pick_slot_row(self, host_id, index, label):
+        """Choose the picker row called `label`."""
+        labels = self.slot_rows(host_id, index)
+        self.assertIn(label, labels)
+        xbmcgui.SELECT_QUEUE.append(labels.index(label))
+        return labels
+
+    def test_the_slot_picker_offers_what_is_actually_under_the_base(self):
+        """Typing a path with a remote is what the speed dial exists to avoid."""
+        os.makedirs(os.path.join(self.here, 'script.paragontv'))
+        os.makedirs(os.path.join(self.here, 'script.paragon.home'))
+        self.write(self.here, 'loose.txt', 'not a folder')
+
+        labels = self.slot_rows('local', 1)
+
+        self.assertEqual(labels, ['script.paragon.home', 'script.paragontv',
+                                  'skin.paragon', 'Type it instead...'])
+        self.assertNotIn('loose.txt', labels)
+
+    def test_picking_a_folder_sets_the_slot(self):
         import places as places_lib
 
+        os.makedirs(os.path.join(self.here, 'script.paragontv'))
+        self.pick_slot_row('local', 1, 'script.paragontv')
+
+        self.panel().edit_slot('local', 1)
+
+        entry = places_lib.slot(self.app.local_host(), 1)
+        self.assertEqual(entry['rel'], 'script.paragontv')
+        self.assertEqual(entry['name'], 'script.paragontv')
+
+    def test_clearing_is_offered_only_for_a_slot_that_is_set(self):
+        self.assertIn('Clear this slot', self.slot_rows('local', 0))
+        self.assertNotIn('Clear this slot', self.slot_rows('local', 1))
+
+    def test_a_box_that_cannot_be_reached_can_still_be_typed_into(self):
+        self.app.save_host({'id': 'off', 'name': 'Off',
+                            'base': 'smb://10.9.9.9/nothing/', 'slots': []})
+        self.assertEqual(self.slot_rows('off', 0), ['Type it instead...'])
+
+    def test_a_typed_slot_cannot_be_pointed_out_of_its_base(self):
+        import places as places_lib
+
+        self.pick_slot_row('local', 1, 'Type it instead...')
         xbmcgui.INPUT_QUEUE.append('../../tuya_keys.json')
+
         self.panel().edit_slot('local', 1)
 
         self.assertIsNone(places_lib.slot(self.app.local_host(), 1))
         self.assertTrue(any('not a folder inside' in message
                             for _heading, message in xbmcgui.NOTIFICATIONS))
 
+    def test_a_typed_slot_may_be_nested(self):
+        """The one thing the list cannot offer: it is only one level deep."""
+        import places as places_lib
+
+        self.pick_slot_row('local', 1, 'Type it instead...')
+        xbmcgui.INPUT_QUEUE.append('skin.paragon/media')
+
+        self.panel().edit_slot('local', 1)
+
+        entry = places_lib.slot(self.app.local_host(), 1)
+        self.assertEqual(entry['rel'], 'skin.paragon/media')
+        self.assertEqual(entry['name'], 'media')
+
+    def test_backing_out_of_the_keyboard_keeps_the_slot(self):
+        """Cancelling must not read as "delete it" -- clearing has its own row."""
+        import places as places_lib
+
+        self.pick_slot_row('local', 0, 'Type it instead...')
+        xbmcgui.INPUT_QUEUE.append('')
+
+        self.panel().edit_slot('local', 0)
+
+        self.assertEqual(
+            places_lib.slot(self.app.local_host(), 0)['rel'], 'skin.paragon')
+
     def test_clearing_a_slot_leaves_the_others_numbered_as_they_were(self):
         import places as places_lib
 
         local = self.app.local_host()
         places_lib.set_slot(local, 2, 'script.paragontv')
-        xbmcgui.INPUT_QUEUE.append('')
+        self.pick_slot_row('local', 0, 'Clear this slot')
 
         self.panel().edit_slot('local', 0)
 

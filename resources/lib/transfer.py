@@ -202,6 +202,23 @@ def survey(root, should_cancel=None):
 # Guards
 # ---------------------------------------------------------------------------
 
+def folders(path):
+    """The folder names directly under `path`, sorted. Empty if unreadable.
+
+    For offering a slot's choices rather than asking the user to type one. An
+    unreachable box gives an empty list rather than an error: the menu can
+    still offer to type a name, which is the only useful thing to do when the
+    box is off.
+    """
+    if not path:
+        return []
+    try:
+        dirs, _files = _listdir(path)
+    except TransferError:
+        return []
+    return sorted(dirs)
+
+
 def overlaps(source, dest):
     """Whether one of these paths contains the other.
 

@@ -43,6 +43,12 @@ TEMP_PRESETS = [
 
 BACK = -1
 
+# Rows in the slot picker that are not folder names. Sentinels rather than
+# magic strings: a folder really could be called "Type it instead...", and an
+# identity check cannot be fooled by one that is.
+CLEAR_SLOT = object()
+TYPE_SLOT = object()
+
 # What a light is set to while the naming walkthrough is asking about it.
 # Full brightness magenta reads clearly against normal room lighting and
 # against the warm whites these bulbs usually sit at.
@@ -2974,21 +2980,50 @@ class ControlPanel(object):
                 return
 
     def edit_slot(self, host_id, index):
-        """Point one slot at a folder under its box's base."""
+        """Point one slot at a folder under its box's base.
+
+        Offers what is actually there rather than asking for a name. Typing a
+        path with a remote control is the thing the speed dial exists to
+        avoid, and making the setup do it once per slot per box is the step
+        that stops anyone from setting up the third box.
+
+        Typing stays available underneath, because the list is only one level
+        deep and a slot may want something nested -- skin.paragon/media, say.
+        """
         host = self.app.host_by_id(host_id)
         if host is None:
             return
         current = places_lib.slot(host, index)
-        value = _dialog().input(
-            'Slot %d on %s - folder under %s'
-            % (index + 1, host['name'], host['base']),
-            current['rel'] if current else '')
 
-        # An empty answer clears the slot. That is the only way to empty one,
-        # and it keeps the list four long so the pairing does not shift.
-        if not value:
+        rows = []
+        if current is not None:
+            rows.append(('Clear this slot', CLEAR_SLOT))
+        rows.extend((name, name) for name in transfer.folders(host['base']))
+        rows.append(('Type it instead...', TYPE_SLOT))
+
+        heading = 'Slot %d on %s' % (index + 1, host['name'])
+        choice = _select(heading, [label for label, _value in rows])
+        if choice == BACK:
+            return
+        value = rows[choice][1]
+
+        if value is CLEAR_SLOT:
             places_lib.set_slot(host, index, None)
-        elif not places_lib.set_slot(host, index, value):
+            self.app.save_host(host)
+            return
+
+        if value is TYPE_SLOT:
+            value = _dialog().input(
+                'Folder under %s' % host['base'],
+                current['rel'] if current else '')
+            # A cancelled keyboard leaves the slot as it was. Clearing one is
+            # its own row above, so there is no need to read an empty answer
+            # as "delete it" -- and doing so would make backing out of the
+            # keyboard destroy the setting.
+            if not value:
+                return
+
+        if not places_lib.set_slot(host, index, value):
             utils.force_notify('%s is not a folder inside %s'
                                % (value, host['base']))
             return
