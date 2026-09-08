@@ -18,6 +18,7 @@ import time
 
 import addon_utils as utils
 import palette as palette_lib
+import places as places_lib
 import reracks as rerack_lib
 import satellite as satellite_lib
 import sequences as sequence_lib
@@ -68,6 +69,7 @@ class ParagonHome(object):
         self._week_follows_tv = None
         self._phase_state = None
         self._palette = None
+        self._places = None
         # How many known lights failed to answer the last refresh, so the
         # control panel can say so rather than silently showing a short list.
         self.last_refresh_missing = 0
@@ -493,6 +495,62 @@ class ParagonHome(object):
             return False
         self._palette = palette_lib.default_palette()
         return self.save_palette()
+
+    # -- the directory speed dial ------------------------------------------
+    #
+    # Deliberately not in satellite.SHARED_FILES, and so deliberately without
+    # a _master_owns guard, which is the opposite of every other list here.
+    #
+    # The sync from a master is a plain overwrite of the whole file. For
+    # scenes that is right: the house has one set and editing them on a
+    # satellite loses the work. These are not that. A slot says where files
+    # live on *this* box and where to send them, so the box you are standing
+    # at is exactly the box whose slots you want to set -- and it is usually a
+    # satellite, because the master is the one in the cabinet. Sharing them
+    # would refuse the edit on every box that matters.
+
+    @property
+    def places(self):
+        """Hosts and their numbered directory slots, seeded on first read."""
+        if self._places is None:
+            raw = utils.read_json(places_lib.PLACES_FILE, default=None)
+            if raw is None:
+                self._places = places_lib.default_places()
+                self.save_places()
+            else:
+                self._places = places_lib.normalise_all(raw)
+        return self._places
+
+    def save_places(self):
+        return utils.write_json(places_lib.PLACES_FILE, self._places or [])
+
+    def host_by_id(self, host_id):
+        return places_lib.find_host(self.places, host_id)
+
+    def local_host(self):
+        return places_lib.find_host(self.places, places_lib.LOCAL_ID)
+
+    def save_host(self, host):
+        """Add or update one host, keeping the picker's order. True if saved."""
+        cleaned = places_lib.normalise_host(host)
+        if cleaned is None:
+            return False
+        existing = places_lib.find_host(self.places, cleaned['id'])
+        if existing is not None:
+            self._places[self._places.index(existing)] = cleaned
+        else:
+            self._places.append(cleaned)
+        return self.save_places()
+
+    def remove_host(self, host_id):
+        """Forget a host. The local one cannot be removed -- it is this box."""
+        if (host_id or '').strip().lower() == places_lib.LOCAL_ID:
+            return False
+        existing = places_lib.find_host(self.places, host_id)
+        if existing is None:
+            return False
+        self._places.remove(existing)
+        return self.save_places()
 
     # -- cycling -----------------------------------------------------------
     #

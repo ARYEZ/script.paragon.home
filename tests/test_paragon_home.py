@@ -12904,5 +12904,287 @@ class TestFolderTransfer(unittest.TestCase):
         self.assertEqual(self.transfer.describe_size('nonsense'), '0 B')
 
 
+class TestMovingFiles(unittest.TestCase):
+    """The menus over places.py and transfer.py."""
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'gui', 'places',
+                     'transfer'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+        self.root = tempfile.mkdtemp()
+        self.here = os.path.join(self.root, 'here')
+        self.there = os.path.join(self.root, 'there')
+        for base in (self.here, self.there):
+            os.makedirs(os.path.join(base, 'skin.paragon'))
+        self.write(self.here, 'skin.paragon/addon.xml', 'new')
+        self.write(self.here, 'skin.paragon/media/icon.png', 'new-icon')
+
+        from paragon_home import ParagonHome
+        import places as places_lib
+
+        self.app = ParagonHome()
+        self.app._places = places_lib.normalise_all([
+            {'id': 'local', 'name': 'This box', 'base': self.here,
+             'slots': [{'rel': 'skin.paragon'}]},
+            {'id': 'office', 'name': 'Office', 'base': self.there,
+             'slots': [{'rel': 'skin.paragon'}]},
+        ])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        clean_profile()
+
+    def write(self, base, rel, body):
+        path = os.path.join(base, *rel.split('/'))
+        if not os.path.isdir(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        handle = open(path, 'w')
+        handle.write(body)
+        handle.close()
+
+    def read(self, base, rel):
+        handle = open(os.path.join(base, *rel.split('/')))
+        try:
+            return handle.read()
+        finally:
+            handle.close()
+
+    def panel(self):
+        import gui
+        return gui.ControlPanel(self.app)
+
+    def office(self):
+        return self.app.host_by_id('office')
+
+    # -- the menu ----------------------------------------------------------
+
+    def test_moving_files_is_on_the_main_menu(self):
+        _row, labels = menu_row(self.panel().main_menu, 'Move files')
+        self.assertIn('Move files...', labels)
+
+    def test_a_slot_says_what_it_holds_and_where_it_goes(self):
+        _row, labels = menu_row(self.panel().transfer_menu, '1 ')
+        self.assertEqual(labels[0], '1  skin.paragon  to Office')
+        self.assertEqual(labels[1], '2  (not set)')
+
+    def test_a_slot_with_nowhere_to_send_says_so(self):
+        import places as places_lib
+
+        places_lib.set_slot(self.office(), 0, None)
+        _row, labels = menu_row(self.panel().transfer_menu, '1 ')
+        self.assertEqual(labels[0], '1  skin.paragon  (nowhere to send it)')
+
+    def test_several_destinations_are_counted(self):
+        self.app.save_host({'id': 'bed', 'name': 'Bedroom',
+                            'base': self.there, 'slots': [{'rel': 'x'}]})
+        _row, labels = menu_row(self.panel().transfer_menu, '1 ')
+        self.assertEqual(labels[0], '1  skin.paragon  to 2 boxes')
+
+    # -- the confirmation --------------------------------------------------
+
+    def test_the_confirmation_names_the_direction_in_words(self):
+        """An arrow is the easiest thing to read backwards.
+
+        Reading this one backwards overwrites the wrong box, so FROM and TO
+        are spelled out and the destination is named twice.
+        """
+        xbmcgui.YESNO_QUEUE.append(False)
+        self.panel().sync_slot(0, self.office())
+
+        _heading, line1, line2, line3 = xbmcgui.YESNO_CALLS[0]
+        self.assertEqual(line1, 'FROM  this box')
+        self.assertEqual(line2, 'TO  Office')
+        self.assertIn('2 files', line3)
+        self.assertIn('overwritten', line3)
+        self.assertIn('Office', line3)
+
+    def test_declining_the_confirmation_copies_nothing(self):
+        xbmcgui.YESNO_QUEUE.append(False)
+
+        self.assertFalse(self.panel().sync_slot(0, self.office()))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.there, 'skin.paragon', 'addon.xml')))
+
+    # -- the sync ----------------------------------------------------------
+
+    def test_a_confirmed_sync_copies_the_folder(self):
+        xbmcgui.YESNO_QUEUE.append(True)
+
+        self.assertTrue(self.panel().sync_slot(0, self.office()))
+        self.assertEqual(self.read(self.there, 'skin.paragon/addon.xml'),
+                         'new')
+        self.assertEqual(self.read(self.there, 'skin.paragon/media/icon.png'),
+                         'new-icon')
+
+    def test_a_sync_overwrites_a_stale_copy_but_keeps_the_rest(self):
+        self.write(self.there, 'skin.paragon/addon.xml', 'STALE')
+        self.write(self.there, 'skin.paragon/extra.xml', 'only there')
+        xbmcgui.YESNO_QUEUE.extend([True, False])
+
+        self.panel().sync_slot(0, self.office())
+
+        self.assertEqual(self.read(self.there, 'skin.paragon/addon.xml'),
+                         'new')
+        self.assertEqual(self.read(self.there, 'skin.paragon/extra.xml'),
+                         'only there')
+
+    def test_an_empty_slot_on_either_end_is_refused(self):
+        import places as places_lib
+
+        places_lib.set_slot(self.office(), 0, None)
+        self.assertFalse(self.panel().sync_slot(0, self.office()))
+        self.assertEqual(xbmcgui.YESNO_CALLS, [])
+
+    # -- extras ------------------------------------------------------------
+
+    def test_extras_are_offered_after_a_sync_and_not_deleted_by_it(self):
+        self.write(self.there, 'skin.paragon/gone.xml', 'stale')
+        # Yes to the copy, then no to the deletion.
+        xbmcgui.YESNO_QUEUE.extend([True, False])
+
+        self.panel().sync_slot(0, self.office())
+
+        offer = xbmcgui.YESNO_CALLS[1]
+        self.assertIn('1 file(s) only on Office', offer[0])
+        self.assertIn('gone.xml', offer[2])
+        self.assertEqual(self.read(self.there, 'skin.paragon/gone.xml'),
+                         'stale')
+
+    def test_extras_are_deleted_only_on_a_second_yes(self):
+        self.write(self.there, 'skin.paragon/gone.xml', 'stale')
+        xbmcgui.YESNO_QUEUE.extend([True, True])
+
+        self.panel().sync_slot(0, self.office())
+
+        self.assertFalse(os.path.exists(
+            os.path.join(self.there, 'skin.paragon', 'gone.xml')))
+        self.assertEqual(self.read(self.there, 'skin.paragon/addon.xml'),
+                         'new')
+
+    def test_nothing_is_offered_when_the_two_ends_match(self):
+        xbmcgui.YESNO_QUEUE.append(True)
+        self.panel().sync_slot(0, self.office())
+        self.assertEqual(len(xbmcgui.YESNO_CALLS), 1)
+
+    # -- everywhere --------------------------------------------------------
+
+    def test_sending_everywhere_asks_once_and_names_every_box(self):
+        third = os.path.join(self.root, 'third')
+        os.makedirs(os.path.join(third, 'skin.paragon'))
+        self.app.save_host({'id': 'bed', 'name': 'Bedroom', 'base': third,
+                            'slots': [{'rel': 'skin.paragon'}]})
+        xbmcgui.YESNO_QUEUE.append(False)
+
+        self.panel().sync_everywhere(0)
+
+        self.assertEqual(len(xbmcgui.YESNO_CALLS), 1)
+        self.assertIn('Office', xbmcgui.YESNO_CALLS[0][2])
+        self.assertIn('Bedroom', xbmcgui.YESNO_CALLS[0][2])
+
+    def test_sending_everywhere_copies_to_every_box(self):
+        third = os.path.join(self.root, 'third')
+        os.makedirs(os.path.join(third, 'skin.paragon'))
+        self.app.save_host({'id': 'bed', 'name': 'Bedroom', 'base': third,
+                            'slots': [{'rel': 'skin.paragon'}]})
+        xbmcgui.YESNO_QUEUE.append(True)
+
+        self.panel().sync_everywhere(0)
+
+        self.assertEqual(self.read(self.there, 'skin.paragon/addon.xml'),
+                         'new')
+        self.assertEqual(self.read(third, 'skin.paragon/addon.xml'), 'new')
+
+    # -- configuring -------------------------------------------------------
+
+    def test_a_slot_cannot_be_pointed_out_of_its_base(self):
+        import places as places_lib
+
+        xbmcgui.INPUT_QUEUE.append('../../tuya_keys.json')
+        self.panel().edit_slot('local', 1)
+
+        self.assertIsNone(places_lib.slot(self.app.local_host(), 1))
+        self.assertTrue(any('not a folder inside' in message
+                            for _heading, message in xbmcgui.NOTIFICATIONS))
+
+    def test_clearing_a_slot_leaves_the_others_numbered_as_they_were(self):
+        import places as places_lib
+
+        local = self.app.local_host()
+        places_lib.set_slot(local, 2, 'script.paragontv')
+        xbmcgui.INPUT_QUEUE.append('')
+
+        self.panel().edit_slot('local', 0)
+
+        local = self.app.local_host()
+        self.assertIsNone(places_lib.slot(local, 0))
+        self.assertEqual(places_lib.slot(local, 2)['name'],
+                         'script.paragontv')
+
+    def test_a_new_box_can_take_this_box_s_slots(self):
+        """The step that otherwise stops anyone setting up a third box."""
+        import places as places_lib
+
+        xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
+        xbmcgui.YESNO_QUEUE.append(True)
+
+        self.panel().add_host()
+
+        added = self.app.host_by_id('bedroom')
+        self.assertIsNotNone(added)
+        self.assertEqual(places_lib.slot(added, 0)['rel'], 'skin.paragon')
+
+    def test_a_new_box_can_decline_them(self):
+        import places as places_lib
+
+        xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
+        xbmcgui.YESNO_QUEUE.append(False)
+
+        self.panel().add_host()
+
+        self.assertIsNone(places_lib.slot(self.app.host_by_id('bedroom'), 0))
+
+    def test_the_local_box_cannot_be_forgotten(self):
+        self.assertFalse(self.app.remove_host('local'))
+        self.assertIsNotNone(self.app.local_host())
+        self.assertTrue(self.app.remove_host('office'))
+
+    # -- where the slots live ----------------------------------------------
+
+    def test_slots_are_not_shared_with_satellites(self):
+        """The box you are standing at is the one whose slots you want to set.
+
+        Everything in SHARED_FILES is overwritten from the master and refused
+        on a satellite. That is right for scenes and wrong for these: a slot
+        says where files live on *this* box, and the box you would configure
+        is usually a satellite, because the master is the one in the cabinet.
+        """
+        import places as places_lib
+        import satellite as satellite_lib
+
+        self.assertNotIn(places_lib.PLACES_FILE, satellite_lib.SHARED_FILES)
+
+    def test_slots_can_be_saved_on_a_satellite(self):
+        import places as places_lib
+
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        # Asserted, not assumed: without this the test would pass on a box
+        # that was never a satellite and prove nothing.
+        self.assertFalse(self.app.owns_data)
+        self.assertFalse(self.app.save_palette(),
+                         'a satellite should refuse a shared list')
+
+        local = self.app.local_host()
+        places_lib.set_slot(local, 3, 'script.paragon.home')
+        self.assertTrue(self.app.save_host(local))
+        self.assertEqual(
+            places_lib.slot(self.app.local_host(), 3)['name'],
+            'script.paragon.home')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

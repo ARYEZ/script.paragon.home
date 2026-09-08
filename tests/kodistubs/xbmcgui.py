@@ -22,6 +22,10 @@ NOTIFICATIONS = []
 OK_DIALOGS = []
 SELECT_CALLS = []
 PROGRESS_CALLS = []
+# Every yesno as (heading, line1, line2, line3). Recorded rather than just
+# answered because the wording is the safety feature on a folder copy: the
+# direction has to be readable, and a test should be able to say so.
+YESNO_CALLS = []
 
 # When non-empty, DialogProgress.iscanceled() returns True once this many
 # update() calls have been made.
@@ -36,6 +40,7 @@ def reset():
     del OK_DIALOGS[:]
     del SELECT_CALLS[:]
     del PROGRESS_CALLS[:]
+    del YESNO_CALLS[:]
     del CANCEL_AFTER[:]
 
 
@@ -57,6 +62,7 @@ class Dialog(object):
 
     def yesno(self, heading, line1, line2='', line3='', nolabel='',
               yeslabel=''):
+        YESNO_CALLS.append((heading, line1, line2, line3))
         if not YESNO_QUEUE:
             return False
         return YESNO_QUEUE.pop(0)

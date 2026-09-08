@@ -20,9 +20,11 @@ import xbmcgui
 
 import addon_utils as utils
 import palette as palette_lib
+import places as places_lib
 import reracks as rerack_lib
 import sequences as sequence_lib
 import scenes as scene_lib
+import transfer
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
                      CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
                      ControlError, DEFAULT_DRIVER, TRANSPORT_CLOUD)
@@ -185,6 +187,9 @@ class ControlPanel(object):
         else:
             rows.append(('Reracks...', self.rerack_menu))
         rows.extend([
+            # Not under a driver: this moves folders between Kodi boxes and
+            # has nothing to do with the lights.
+            ('Move files...', self.transfer_menu),
             # A satellite does not search: the master decides which devices
             # the house has, and this is the row that gets them.
             ('Refresh devices', self.refresh_devices)
@@ -2704,6 +2709,340 @@ class ControlPanel(object):
         if note:
             label = '%s (%s)' % (label, note)
         return rgb, label
+
+    # -- moving folders between boxes --------------------------------------
+    #
+    # Menus rather than a two-pane window, and the speed dial is why. A pane
+    # on each side is what you need when you are hunting for a folder; with
+    # four numbered slots there is nothing to hunt for, so the whole job is
+    # "which slot, and to which box" -- two questions, which is a menu. That
+    # also keeps this working under any skin, which a custom window would not.
+
+    def transfer_menu(self):
+        """The four slots, and where each one would send."""
+        local = self.app.local_host()
+        rows = []
+        for index in range(places_lib.SLOT_COUNT):
+            rows.append((self._slot_label(local, index),
+                         lambda i=index: self.slot_menu(i)))
+        rows.append(('Boxes and slots...', self.places_menu))
+
+        choice = _select('Move files', [label for label, _h in rows])
+        if choice == BACK:
+            return BACK
+        rows[choice][1]()
+        return None
+
+    def _slot_label(self, host, index):
+        entry = places_lib.slot(host, index)
+        if entry is None:
+            return '%d  (not set)' % (index + 1)
+        targets = places_lib.pairs(self.app.places, index,
+                                   places_lib.LOCAL_ID)
+        if not targets:
+            return '%d  %s  (nowhere to send it)' % (index + 1, entry['name'])
+        if len(targets) == 1:
+            return '%d  %s  to %s' % (index + 1, entry['name'],
+                                      targets[0][1]['name'])
+        return '%d  %s  to %d boxes' % (index + 1, entry['name'],
+                                        len(targets))
+
+    def slot_menu(self, index):
+        """What can be done with one slot number."""
+        while True:
+            local = self.app.local_host()
+            entry = places_lib.slot(local, index)
+            rows = []
+
+            if entry is not None:
+                targets = places_lib.pairs(self.app.places, index,
+                                           places_lib.LOCAL_ID)
+                for _source, dest in targets:
+                    rows.append(('Send to %s' % dest['name'],
+                                 lambda d=dest: self.sync_slot(index, d)))
+                if len(targets) > 1:
+                    rows.append(('Send to all %d boxes' % len(targets),
+                                 lambda: self.sync_everywhere(index)))
+                rows.append(('What is in it', lambda: self.show_slot(index)))
+
+            rows.append(('Set what slot %d points at here...' % (index + 1),
+                         lambda: self.edit_slot(places_lib.LOCAL_ID, index)))
+
+            heading = 'Slot %d%s' % (index + 1,
+                                     '' if entry is None
+                                     else ' - %s' % entry['name'])
+            choice = _select(heading, [label for label, _h in rows])
+            if choice == BACK:
+                return
+            rows[choice][1]()
+
+    # -- one sync ----------------------------------------------------------
+
+    def sync_slot(self, index, dest_host, confirm=True):
+        """Copy slot `index` from this box to `dest_host`. True if it ran."""
+        local = self.app.local_host()
+        source = places_lib.slot_path(local, index)
+        target = places_lib.slot_path(dest_host, index)
+        if source is None or target is None:
+            utils.force_notify('Slot %d is not set on both ends' % (index + 1))
+            return False
+
+        try:
+            transfer.check(source, target)
+            plan = transfer.survey(source)
+        except transfer.TransferError as exc:
+            utils.force_notify('%s' % exc)
+            return False
+
+        if not plan.count:
+            utils.force_notify('There is nothing in %s' % source)
+            return False
+
+        name = places_lib.slot(local, index)['name']
+        if confirm and not self._confirm_direction(name, dest_host, plan):
+            return False
+
+        result = self._run_copy(source, target, plan, name, dest_host['name'])
+        if result is None:
+            return False
+
+        self._report_transfer(result, name, dest_host['name'])
+        self._offer_extras(source, target, dest_host['name'])
+        return True
+
+    @staticmethod
+    def _confirm_direction(name, dest_host, plan):
+        """Ask, naming the direction in words rather than with an arrow.
+
+        The words are the point. On a screen showing two boxes, an arrow is
+        the easiest thing in the world to read backwards, and reading this one
+        backwards overwrites the wrong box -- so FROM and TO are spelled out,
+        on their own lines, with the destination named twice.
+        """
+        return _dialog().yesno(
+            'Copy %s' % name,
+            'FROM  this box',
+            'TO  %s' % dest_host['name'],
+            '%s. Files already on %s will be overwritten.'
+            % (transfer.describe(plan), dest_host['name']))
+
+    def _run_copy(self, source, target, plan, name, dest_name):
+        """Copy with a progress dialog. None if it could not start."""
+        progress = xbmcgui.DialogProgress()
+        progress.create('Copying %s' % name, 'to %s' % dest_name)
+
+        def on_progress(done, total, rel):
+            progress.update(int(100.0 * done / max(1, total)),
+                            'to %s' % dest_name, rel)
+
+        try:
+            return transfer.copy_tree(source, target, plan=plan,
+                                      on_progress=on_progress,
+                                      should_cancel=progress.iscanceled)
+        except transfer.TransferError as exc:
+            utils.force_notify('%s' % exc)
+            return None
+        finally:
+            progress.close()
+
+    @staticmethod
+    def _report_transfer(result, name, dest_name):
+        if result.status == transfer.CANCELLED:
+            utils.force_notify('Stopped after %d file(s)' % result.done)
+        elif result.failed:
+            utils.force_notify('%s: %d file(s) copied, %d failed'
+                               % (name, result.done, len(result.failed)))
+        else:
+            utils.notify('%s copied to %s (%d files)'
+                         % (name, dest_name, result.done))
+
+    def _offer_extras(self, source, target, dest_name):
+        """The "then report" half: show what is there that the source lacks.
+
+        Never deletes on its own. The list is shown, and removing it is a
+        second yes -- which is the whole reason a sync can be run without
+        thinking about it.
+        """
+        left_over = transfer.extras(source, target)
+        if not left_over:
+            return
+
+        shown = left_over[:12]
+        listing = '\n'.join(shown)
+        if len(left_over) > len(shown):
+            listing += '\n...and %d more' % (len(left_over) - len(shown))
+
+        if not _dialog().yesno(
+                '%d file(s) only on %s' % (len(left_over), dest_name),
+                'These are on %s and not here:' % dest_name,
+                listing,
+                'Delete them?', nolabel='Leave them', yeslabel='Delete'):
+            return
+
+        progress = xbmcgui.DialogProgress()
+        progress.create('Deleting from %s' % dest_name)
+        try:
+            result = transfer.remove(
+                target, left_over,
+                on_progress=lambda done, total, rel: progress.update(
+                    int(100.0 * done / max(1, total)), rel),
+                should_cancel=progress.iscanceled)
+        finally:
+            progress.close()
+
+        if result.failed:
+            utils.force_notify('Deleted %d, could not delete %d'
+                               % (result.done, len(result.failed)))
+        else:
+            utils.notify('Deleted %d file(s) from %s'
+                         % (result.done, dest_name))
+
+    def sync_everywhere(self, index):
+        """Send one slot to every box that has it set.
+
+        Confirmed once, naming every destination, rather than once per box:
+        the whole point of this row is not answering the same question three
+        times, and the list of names is what makes the one answer safe.
+        """
+        local = self.app.local_host()
+        entry = places_lib.slot(local, index)
+        targets = places_lib.pairs(self.app.places, index, places_lib.LOCAL_ID)
+        if entry is None or not targets:
+            utils.force_notify('Slot %d has nowhere to go' % (index + 1))
+            return
+
+        names = ', '.join(dest['name'] for _source, dest in targets)
+        if not _dialog().yesno(
+                'Copy %s' % entry['name'],
+                'FROM  this box',
+                'TO  %s' % names,
+                'Files already on those boxes will be overwritten.'):
+            return
+
+        for _source, dest in targets:
+            self.sync_slot(index, dest, confirm=False)
+
+    def show_slot(self, index):
+        """List what is in a slot, for checking before sending it."""
+        local = self.app.local_host()
+        source = places_lib.slot_path(local, index)
+        if source is None:
+            return
+        try:
+            plan = transfer.survey(source)
+        except transfer.TransferError as exc:
+            utils.force_notify('%s' % exc)
+            return
+        _select('%s - %s' % (source, transfer.describe(plan)),
+                sorted(plan.rels()) or ['(empty)'])
+
+    # -- configuring -------------------------------------------------------
+
+    def places_menu(self):
+        """The boxes, and the slots on each."""
+        while True:
+            hosts = self.app.places
+            rows = [('%s  -  %s' % (host['name'], host['base']),
+                     lambda h=host: self.host_menu(h['id']))
+                    for host in hosts]
+            rows.append(('Add a box...', self.add_host))
+
+            choice = _select('Boxes and slots', [label for label, _h in rows])
+            if choice == BACK:
+                return
+            rows[choice][1]()
+
+    def host_menu(self, host_id):
+        while True:
+            host = self.app.host_by_id(host_id)
+            if host is None:
+                return
+            rows = [(self._slot_label(host, index),
+                     lambda i=index: self.edit_slot(host_id, i))
+                    for index in range(places_lib.SLOT_COUNT)]
+            rows.append(('Change where it points (%s)' % host['base'],
+                         lambda: self.edit_base(host_id)))
+            if host_id != places_lib.LOCAL_ID:
+                rows.append(('Forget this box',
+                             lambda: self.app.remove_host(host_id)))
+
+            choice = _select(host['name'], [label for label, _h in rows])
+            if choice == BACK:
+                return
+            rows[choice][1]()
+            if self.app.host_by_id(host_id) is None:
+                return
+
+    def edit_slot(self, host_id, index):
+        """Point one slot at a folder under its box's base."""
+        host = self.app.host_by_id(host_id)
+        if host is None:
+            return
+        current = places_lib.slot(host, index)
+        value = _dialog().input(
+            'Slot %d on %s - folder under %s'
+            % (index + 1, host['name'], host['base']),
+            current['rel'] if current else '')
+
+        # An empty answer clears the slot. That is the only way to empty one,
+        # and it keeps the list four long so the pairing does not shift.
+        if not value:
+            places_lib.set_slot(host, index, None)
+        elif not places_lib.set_slot(host, index, value):
+            utils.force_notify('%s is not a folder inside %s'
+                               % (value, host['base']))
+            return
+        self.app.save_host(host)
+
+    def edit_base(self, host_id):
+        host = self.app.host_by_id(host_id)
+        if host is None:
+            return
+        value = _dialog().input('Where %s keeps its files' % host['name'],
+                                host['base'])
+        if not value:
+            return
+        host['base'] = value
+        if not self.app.save_host(host):
+            utils.force_notify('%s is not a folder Kodi can reach' % value)
+
+    def add_host(self):
+        """Add another box, by the path Kodi reaches it on."""
+        name = _dialog().input('What to call this box, e.g. Office')
+        if not name:
+            return
+        base = _dialog().input(
+            'Where it keeps its files, e.g. smb://10.0.0.99/Addons/')
+        if not base:
+            return
+
+        host_id = ''.join(c for c in name.lower() if c.isalnum()) or 'box'
+        if self.app.host_by_id(host_id) is not None:
+            utils.force_notify('There is already a box called %s' % name)
+            return
+        if not self.app.save_host({'id': host_id, 'name': name,
+                                   'base': base, 'slots': []}):
+            utils.force_notify('%s is not a folder Kodi can reach' % base)
+            return
+
+        # Offer the local slots straight away: a new box almost always wants
+        # the same four folders, and typing them again is the step that stops
+        # anyone from setting up the third box at all.
+        local = self.app.local_host()
+        filled = [i for i in range(places_lib.SLOT_COUNT)
+                  if places_lib.slot(local, i) is not None]
+        if not filled:
+            return
+        host = self.app.host_by_id(host_id)
+        if _dialog().yesno(name,
+                           'Give %s the same %d slot(s) as this box?'
+                           % (name, len(filled)),
+                           ', '.join(places_lib.slot(local, i)['name']
+                                     for i in filled)):
+            for i in filled:
+                entry = places_lib.slot(local, i)
+                places_lib.set_slot(host, i, entry['rel'], entry['name'])
+            self.app.save_host(host)
 
 
 def pick_scene_for_setting(app, setting_id):

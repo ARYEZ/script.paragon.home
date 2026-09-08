@@ -1,3 +1,37 @@
+2.43.0 (Aryez - 2026)
+    Added: Move files. Four numbered directory slots per Kodi box, paired by
+        number, so slot 1 here and slot 1 on the office box are the two ends
+        of one copy. Under "Move files..." on the main menu.
+    The job is pushing a folder to the boxes in the house -- a new
+        skin.paragon to three of them -- without scp-ing it three times. So
+        one row sends a slot to one box, and another sends it to every box
+        that has that slot set, asked once and naming each.
+    Menus rather than a two-pane window. A pane on each side is what you
+        need when you are hunting for a folder; with four numbered slots
+        there is nothing to hunt for, so the whole job is which slot and to
+        which box. That also keeps it working under any skin.
+    A copy overwrites and never deletes. Files the destination has and the
+        source does not are listed afterwards, and removing them is a
+        separate yes. A mirror that deletes as it walks is one wrong
+        direction away from destroying the destination, and on a screen
+        showing two boxes the direction is the easy thing to misread -- so
+        the confirmation spells FROM and TO out in words rather than drawing
+        an arrow, and names the destination twice.
+    A slot holds a path relative to its box's base, never a whole path, and
+        the full path is only ever rebuilt from the two. A slot able to hold
+        ".." would let a recursive overwrite reach anything on the box.
+    Refused rather than attempted: a destination inside its own source,
+        which would grow as it walked and never finish; a tree deeper than
+        24 folders, since Kodi cannot report a symlink and a loop is
+        otherwise indistinguishable from a deep tree; and one over 20,000
+        files, so a slot pointed at the root by accident stops.
+    Slots are not copied down to satellites, unlike scenes and the palette.
+        A slot says where files live on this box, so the box you are
+        standing at is the one whose slots you want to set -- and it is
+        usually a satellite, because the master is the one in the cabinet.
+    Everything goes through Kodi's virtual filesystem, so a destination can
+        be smb://box/share/... as easily as a local folder.
+
 2.42.0 (Aryez - 2026)
     Added: a scene can carry a separate brightness for light strips, beside
         the ones it already carries for lightbars and backlights. "Light
