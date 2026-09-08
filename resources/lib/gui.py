@@ -48,6 +48,14 @@ BACK = -1
 # identity check cannot be fooled by one that is.
 CLEAR_SLOT = object()
 TYPE_SLOT = object()
+BROWSE_BASE = object()
+
+# Dialog().browse's "show and get a directory" mode, with the share set Kodi's
+# own Add Source uses. Between them they give the file browser as it appears
+# under Settings - Media - Add source: local disks, and the network
+# neighbourhood with every share each box publishes.
+BROWSE_DIRECTORY = 0
+BROWSE_SHARES = 'files'
 
 # What a light is set to while the naming walkthrough is asking about it.
 # Full brightness magenta reads clearly against normal room lighting and
@@ -3029,25 +3037,74 @@ class ControlPanel(object):
             return
         self.app.save_host(host)
 
+    def ask_for_base(self, heading, current=''):
+        """Where a box keeps its files, browsed for or typed. None to cancel.
+
+        Browsing is Kodi's own file dialog -- the one behind Settings - Media
+        - Add source -- so it shows the network neighbourhood and every share
+        a box actually publishes. That is the point rather than a nicety: a
+        base typed from memory is a guess, and a wrong guess fails as
+        "Error getting smb://box/share/", which says nothing about the share
+        being called something else.
+
+        Typing stays for what browsing cannot reach: a box that is off, or a
+        path needing credentials in it.
+        """
+        rows = [('Browse for it...', BROWSE_BASE),
+                ('Type it instead...', TYPE_SLOT)]
+        choice = _select(heading, [label for label, _value in rows])
+        if choice == BACK:
+            return None
+
+        if rows[choice][1] is BROWSE_BASE:
+            # Kodi's browse hands back whatever default it was given when the
+            # user backs out, so a cancel and "picked the same folder" are the
+            # same answer here. They mean the same thing to the caller.
+            found = _dialog().browse(BROWSE_DIRECTORY, heading, BROWSE_SHARES,
+                                     '', False, False, current)
+            return found or None
+
+        typed = _dialog().input(heading, current)
+        return typed or None
+
+    @staticmethod
+    def _warn_if_unreachable(base):
+        """Say so now if Kodi cannot see the base, but keep it.
+
+        A wrong base used to save silently and fail later as "Error getting
+        smb://box/share/" during a copy, which points at the copy rather than
+        at the share name being wrong. Said here, it is next to the thing that
+        caused it.
+
+        Kept rather than refused, because a box that is switched off is
+        unreachable and its base is still right.
+        """
+        if not transfer.reachable(base):
+            utils.force_notify('Saved, but Kodi cannot see %s at the moment'
+                               % base)
+
     def edit_base(self, host_id):
         host = self.app.host_by_id(host_id)
         if host is None:
             return
-        value = _dialog().input('Where %s keeps its files' % host['name'],
-                                host['base'])
+        value = self.ask_for_base('Where %s keeps its files' % host['name'],
+                                  host['base'])
         if not value:
             return
+        was = host['base']
         host['base'] = value
         if not self.app.save_host(host):
-            utils.force_notify('%s is not a folder Kodi can reach' % value)
+            host['base'] = was
+            utils.force_notify('%s cannot be used as a folder' % value)
+            return
+        self._warn_if_unreachable(value)
 
     def add_host(self):
-        """Add another box, by the path Kodi reaches it on."""
+        """Add another box, browsing for it the way Add source does."""
         name = _dialog().input('What to call this box, e.g. Office')
         if not name:
             return
-        base = _dialog().input(
-            'Where it keeps its files, e.g. smb://10.0.0.99/Addons/')
+        base = self.ask_for_base('Where %s keeps its files' % name)
         if not base:
             return
 
@@ -3057,8 +3114,9 @@ class ControlPanel(object):
             return
         if not self.app.save_host({'id': host_id, 'name': name,
                                    'base': base, 'slots': []}):
-            utils.force_notify('%s is not a folder Kodi can reach' % base)
+            utils.force_notify('%s cannot be used as a folder' % base)
             return
+        self._warn_if_unreachable(base)
 
         # Offer the local slots straight away: a new box almost always wants
         # the same four folders, and typing them again is the step that stops

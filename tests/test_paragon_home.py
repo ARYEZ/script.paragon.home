@@ -13251,11 +13251,88 @@ class TestMovingFiles(unittest.TestCase):
         self.assertEqual(places_lib.slot(local, 2)['name'],
                          'script.paragontv')
 
+    def test_a_base_is_browsed_for_the_way_add_source_does(self):
+        """A base typed from memory is a guess, and a wrong guess fails late."""
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.assertIsNone(
+            self.panel().ask_for_base('Where Office keeps its files'))
+        self.assertEqual(xbmcgui.SELECT_CALLS[-1][1],
+                         ['Browse for it...', 'Type it instead...'])
+
+    def test_browsing_returns_what_was_picked(self):
+        xbmcgui.SELECT_QUEUE.append(0)          # Browse for it...
+        xbmcgui.BROWSE_QUEUE.append('smb://10.0.0.99/Home/addons/')
+
+        found = self.panel().ask_for_base('Where Office keeps its files')
+
+        self.assertEqual(found, 'smb://10.0.0.99/Home/addons/')
+        browse_type, _heading, shares, _default = xbmcgui.BROWSE_CALLS[0]
+        self.assertEqual(browse_type, 0)        # show and get a directory
+        self.assertEqual(shares, 'files')       # what Add source browses
+
+    def test_typing_a_base_still_works(self):
+        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
+        xbmcgui.INPUT_QUEUE.append('sftp://root@10.0.0.5/storage/')
+
+        self.assertEqual(self.panel().ask_for_base('Where'),
+                         'sftp://root@10.0.0.5/storage/')
+        self.assertEqual(xbmcgui.BROWSE_CALLS, [])
+
+    def test_backing_out_of_the_browser_changes_nothing(self):
+        """Kodi hands the default back on cancel, so it must read as no change."""
+        xbmcgui.SELECT_QUEUE.append(0)
+        # Nothing queued: the stub returns the default, as Kodi does.
+        found = self.panel().ask_for_base('Where', self.there)
+        self.assertEqual(found, self.there)
+
+    def test_adding_a_box_browses_for_it(self):
+        xbmcgui.INPUT_QUEUE.append('Bedroom')
+        xbmcgui.SELECT_QUEUE.append(0)
+        xbmcgui.BROWSE_QUEUE.append(self.there)
+        xbmcgui.YESNO_QUEUE.append(False)
+
+        self.panel().add_host()
+
+        added = self.app.host_by_id('bedroom')
+        self.assertIsNotNone(added)
+        self.assertEqual(added['base'], self.there + '/')
+
+    def test_a_base_kodi_cannot_see_is_kept_but_reported(self):
+        """A box that is switched off is unreachable and still correct."""
+        xbmcgui.SELECT_QUEUE.append(1)
+        xbmcgui.INPUT_QUEUE.append('smb://10.0.0.99/nosuchshare/')
+
+        self.panel().edit_base('office')
+
+        self.assertEqual(self.app.host_by_id('office')['base'],
+                         'smb://10.0.0.99/nosuchshare/')
+        self.assertTrue(any('cannot see' in message
+                            for _heading, message in xbmcgui.NOTIFICATIONS))
+
+    def test_a_reachable_base_is_saved_quietly(self):
+        xbmcgui.SELECT_QUEUE.append(0)
+        xbmcgui.BROWSE_QUEUE.append(self.there)
+
+        self.panel().edit_base('office')
+
+        self.assertFalse([m for _h, m in xbmcgui.NOTIFICATIONS
+                          if 'cannot see' in m])
+
+    def test_a_base_that_cannot_be_a_folder_leaves_the_old_one(self):
+        xbmcgui.SELECT_QUEUE.append(1)
+        xbmcgui.INPUT_QUEUE.append('   ')
+
+        self.panel().edit_base('office')
+
+        self.assertEqual(self.app.host_by_id('office')['base'],
+                         self.there + '/')
+
     def test_a_new_box_can_take_this_box_s_slots(self):
         """The step that otherwise stops anyone setting up a third box."""
         import places as places_lib
 
         xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
+        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
         xbmcgui.YESNO_QUEUE.append(True)
 
         self.panel().add_host()
@@ -13268,6 +13345,7 @@ class TestMovingFiles(unittest.TestCase):
         import places as places_lib
 
         xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
+        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
         xbmcgui.YESNO_QUEUE.append(False)
 
         self.panel().add_host()

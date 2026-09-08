@@ -237,6 +237,22 @@ def survey(root, should_cancel=None):
 # Guards
 # ---------------------------------------------------------------------------
 
+def reachable(path):
+    """Whether Kodi can see `path` right now.
+
+    For telling someone their box's base is wrong at the moment they set it,
+    rather than at the moment a copy fails. Not a reason to refuse the
+    setting: a box that is switched off is unreachable and its base is still
+    correct.
+    """
+    if not path:
+        return False
+    try:
+        return bool(xbmcvfs.exists(path))
+    except (IOError, OSError, ValueError):
+        return False
+
+
 def folders(path):
     """The folder names directly under `path`, sorted. Empty if unreadable.
 

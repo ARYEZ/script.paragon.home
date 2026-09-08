@@ -1,3 +1,23 @@
+2.44.0 (Aryez - 2026)
+    Added: a box's folder can now be browsed for instead of typed. "Add a
+        box" and "Change where it points" both offer Browse for it... first,
+        which opens Kodi's own file dialog -- the one behind Settings, Media,
+        Add source -- so it lists the network neighbourhood and every share a
+        box actually publishes.
+    This is what a wrong base costs otherwise: a share name typed from memory
+        is a guess, and a wrong guess surfaces much later as "Error getting
+        smb://box/share/", which points at the copy rather than at the share
+        being called something else.
+    Type it instead... stays for what browsing cannot reach: a box that is
+        switched off, or a path needing a user and password in it.
+    Added: a base Kodi cannot currently see is saved, and says so at the time
+        rather than failing during a copy later. Saved rather than refused,
+        because a box that is switched off is unreachable and its base is
+        still right.
+    Fixed: a base that could not be used at all left the bad value on the
+        host in memory even though it was never saved. The previous one is
+        put back.
+
 2.43.2 (Aryez - 2026)
     Fixed: a copy no longer takes .git with it. These add-ons are installed
         as git clones and updated with git pull, so copying one box's .git
