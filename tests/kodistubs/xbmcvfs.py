@@ -11,7 +11,10 @@ fake `smb://` scheme, mapped onto a real directory, which lets a test say
 import os
 import shutil
 
-# Set by a test to make smb://<something>/rest resolve to a real directory.
+# Set by a test to stand for one box: each directory directly inside it is a
+# share, so smb://box/ lists the shares and smb://box/Share/a resolves to
+# <SMB_ROOT>/Share/a. Modelled this way because listing the shares on a host
+# is a real thing the add-on does -- it is how a box's base is chosen.
 SMB_ROOT = None
 
 
@@ -23,9 +26,10 @@ def _real(path):
         if SMB_ROOT is None:
             return None
         rest = path[len('smb://'):]
-        # smb://host/share/a/b -> <SMB_ROOT>/a/b, so a test can drop files in
-        # one directory and address them as if they were on a server.
-        parts = rest.split('/')[2:]
+        # Drop the host. What is left is the share and the path inside it:
+        # smb://host/Share/a/b -> <SMB_ROOT>/Share/a/b, and smb://host/ ->
+        # <SMB_ROOT>, which lists the shares.
+        parts = [part for part in rest.split('/')[1:] if part]
         return os.path.join(SMB_ROOT, *parts) if parts else SMB_ROOT
     if '://' in path:
         return None

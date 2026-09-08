@@ -49,6 +49,14 @@ BACK = -1
 CLEAR_SLOT = object()
 TYPE_SLOT = object()
 BROWSE_BASE = object()
+ADDRESS_BASE = object()
+USE_HERE = object()
+GO_UP = object()
+
+# What an address becomes when it is given without one. SMB is the protocol
+# every Kodi box already publishes -- LibreELEC ships a samba.conf with a
+# dozen shares in it -- so a bare 10.0.0.99 means that.
+ADDRESS_PREFIX = 'smb://'
 
 # Dialog().browse's "show and get a directory" mode, with the share set Kodi's
 # own Add Source uses. Between them they give the file browser as it appears
@@ -3050,13 +3058,18 @@ class ControlPanel(object):
         Typing stays for what browsing cannot reach: a box that is off, or a
         path needing credentials in it.
         """
-        rows = [('Browse for it...', BROWSE_BASE),
-                ('Type it instead...', TYPE_SLOT)]
+        rows = [('Enter an address...', ADDRESS_BASE),
+                ('Browse for it...', BROWSE_BASE),
+                ('Type the whole path...', TYPE_SLOT)]
         choice = _select(heading, [label for label, _value in rows])
         if choice == BACK:
             return None
+        picked = rows[choice][1]
 
-        if rows[choice][1] is BROWSE_BASE:
+        if picked is ADDRESS_BASE:
+            return self.base_from_address(heading)
+
+        if picked is BROWSE_BASE:
             # Kodi's browse hands back whatever default it was given when the
             # user backs out, so a cancel and "picked the same folder" are the
             # same answer here. They mean the same thing to the caller.
@@ -3066,6 +3079,64 @@ class ControlPanel(object):
 
         typed = _dialog().input(heading, current)
         return typed or None
+
+    def base_from_address(self, heading):
+        """Ask for a box's address, then walk down it. None to cancel.
+
+        This is the step Kodi's own browse cannot do. That dialog shows the
+        sources Kodi already has and whatever its discovery happens to find,
+        and there is no way to type an address into it -- the "Add network
+        location" entry in Add source is part of a window Python cannot open.
+        So a box that is not already a source is unreachable through it, which
+        is every box the first time.
+
+        An address without a scheme is taken as SMB. Anything with one is used
+        as given, so sftp://root@box and nfs://box still work.
+        """
+        address = _dialog().input('Address of the box, e.g. 10.0.0.99')
+        if not address:
+            return None
+        address = address.strip()
+        root = address if '://' in address else ADDRESS_PREFIX + address
+        if not root.endswith('/'):
+            root += '/'
+        return self.drill_down(root, heading)
+
+    def drill_down(self, start, heading=''):
+        """Pick a folder by walking down from `start`. None to cancel.
+
+        A listdir walk rather than Kodi's file dialog, for the same reason the
+        slot picker is one: listdir reaches anything the virtual filesystem
+        can read, with nothing to configure first. Asked of an SMB root it
+        answers with the box's share list -- which is exactly what was missing
+        when a share name had to be guessed.
+
+        The heading is the path itself, so the current position is always on
+        screen. There is no way past `start`: this is choosing a base, and a
+        walk that could climb above the address it was given would be
+        answering a different question.
+        """
+        here = start
+        while True:
+            rows = [('Use this folder', USE_HERE)]
+            if len(here) > len(start):
+                rows.append(('Go back up', GO_UP))
+            rows.extend((name, name) for name in transfer.folders(here))
+
+            if len(rows) == 1 and not transfer.reachable(here):
+                utils.force_notify('Kodi cannot see %s' % here)
+
+            choice = _select(here, [label for label, _value in rows])
+            if choice == BACK:
+                return None
+            picked = rows[choice][1]
+
+            if picked is USE_HERE:
+                return here
+            if picked is GO_UP:
+                here = here.rstrip('/').rsplit('/', 1)[0] + '/'
+            else:
+                here = here + picked + '/'
 
     @staticmethod
     def _warn_if_unreachable(base):

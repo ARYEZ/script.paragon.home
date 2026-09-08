@@ -1,3 +1,22 @@
+2.45.0 (Aryez - 2026)
+    Added: Enter an address... Type a box's address -- 10.0.0.99 -- and walk
+        down it, picking the share and then the folder from what is really
+        there. This is the step that was missing: Kodi's own browse dialog
+        shows the sources it already has and whatever its discovery happens
+        to find, and there is no way to type an address into it, so a box
+        that is not already a source could not be reached through it at all.
+    An address with no scheme is taken as SMB, because that is what a Kodi
+        box publishes. Anything with one is used as given, so
+        sftp://root@box and nfs://box still work.
+    The walk uses the same directory listing the slot picker does, so it
+        reaches anything Kodi's virtual filesystem can read with nothing to
+        configure first. Asked of a bare box address it answers with that
+        box's share list.
+    It will not climb above the address it was given: this is choosing a
+        base, not roaming the network.
+    Browse for it... is still there, for a box already set up as a source,
+        and Type the whole path... for anything neither reaches.
+
 2.44.0 (Aryez - 2026)
     Added: a box's folder can now be browsed for instead of typed. "Add a
         box" and "Change where it points" both offer Browse for it... first,

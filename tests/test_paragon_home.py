@@ -12844,14 +12844,15 @@ class TestFolderTransfer(unittest.TestCase):
     def test_a_copy_onto_a_share_goes_through_the_vfs(self):
         """The destination is usually smb://, which os.path cannot see."""
         import xbmcvfs
-        share = os.path.join(self.root, 'share')
-        os.makedirs(share)
-        xbmcvfs.SMB_ROOT = share
+        box = os.path.join(self.root, 'box')
+        landing = os.path.join(box, 'Addons')
+        os.makedirs(landing)
+        xbmcvfs.SMB_ROOT = box
 
         result = self.transfer.copy_tree(self.source,
                                          'smb://10.0.0.99/Addons/')
         self.assertTrue(result.ok, result.failed)
-        self.assertEqual(self.listing(share), self.listing(self.source))
+        self.assertEqual(self.listing(landing), self.listing(self.source))
 
     # -- the guards --------------------------------------------------------
 
@@ -13251,16 +13252,102 @@ class TestMovingFiles(unittest.TestCase):
         self.assertEqual(places_lib.slot(local, 2)['name'],
                          'script.paragontv')
 
+    def base_row(self, label):
+        """Queue the base-menu row called `label`, by looking it up.
+
+        Not a hardcoded index: a row was added above these once already and
+        every positional test broke at once, which is what menu_row's own
+        docstring warns about.
+        """
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.panel().ask_for_base('probe')
+        labels = xbmcgui.SELECT_CALLS[-1][1]
+        xbmcgui.reset()
+        self.assertIn(label, labels)
+        xbmcgui.SELECT_QUEUE.append(labels.index(label))
+
     def test_a_base_is_browsed_for_the_way_add_source_does(self):
         """A base typed from memory is a guess, and a wrong guess fails late."""
         xbmcgui.SELECT_QUEUE.append(-1)
         self.assertIsNone(
             self.panel().ask_for_base('Where Office keeps its files'))
         self.assertEqual(xbmcgui.SELECT_CALLS[-1][1],
-                         ['Browse for it...', 'Type it instead...'])
+                         ['Enter an address...', 'Browse for it...',
+                          'Type the whole path...'])
+
+    def test_an_address_lists_the_shares_on_that_box(self):
+        """What Kodi's own browse cannot do: reach a box that is not a source.
+
+        The share list is precisely what was missing when a name had to be
+        guessed, and listdir on an SMB root is what answers with it.
+        """
+        import xbmcvfs
+
+        share_root = os.path.join(self.root, 'shares')
+        for name in ('Home', 'Userdata', 'Videos'):
+            os.makedirs(os.path.join(share_root, name))
+        os.makedirs(os.path.join(share_root, 'Home', 'addons'))
+        xbmcvfs.SMB_ROOT = share_root
+
+        # Enter an address..., type the box, then walk the shares:
+        # Home (row 1), addons (row 2, after "Go back up"), Use this folder.
+        self.base_row('Enter an address...')
+        xbmcgui.INPUT_QUEUE.append('10.0.0.99')
+        xbmcgui.SELECT_QUEUE.extend([1, 2, 0])
+
+        found = self.panel().ask_for_base('Where Office keeps its files')
+
+        offered = [labels for _heading, labels in xbmcgui.SELECT_CALLS]
+        self.assertIn('Home', offered[1])
+        self.assertIn('Userdata', offered[1])
+        self.assertEqual(found, 'smb://10.0.0.99/Home/addons/')
+
+    def test_a_bare_address_is_taken_as_smb(self):
+        self.base_row('Enter an address...')
+        xbmcgui.SELECT_QUEUE.append(0)
+        xbmcgui.INPUT_QUEUE.append('10.0.0.99')
+        self.assertEqual(self.panel().ask_for_base('Where'),
+                         'smb://10.0.0.99/')
+
+    def test_an_address_with_a_scheme_is_used_as_given(self):
+        self.base_row('Enter an address...')
+        xbmcgui.SELECT_QUEUE.append(0)
+        xbmcgui.INPUT_QUEUE.append('sftp://root@10.0.0.5/storage')
+        self.assertEqual(self.panel().ask_for_base('Where'),
+                         'sftp://root@10.0.0.5/storage/')
+
+    def test_the_walk_cannot_climb_above_the_address(self):
+        """Choosing a base, not roaming the network."""
+        import xbmcvfs
+
+        share_root = os.path.join(self.root, 'shares')
+        os.makedirs(os.path.join(share_root, 'Home'))
+        xbmcvfs.SMB_ROOT = share_root
+
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.panel().drill_down('smb://10.0.0.99/')
+        top = xbmcgui.SELECT_CALLS[-1][1]
+        self.assertNotIn('Go back up', top)
+
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.extend([1, -1])   # into Home, then look
+        self.panel().drill_down('smb://10.0.0.99/')
+        self.assertIn('Go back up', xbmcgui.SELECT_CALLS[-1][1])
+
+    def test_going_back_up_returns_to_the_level_above(self):
+        import xbmcvfs
+
+        share_root = os.path.join(self.root, 'shares')
+        os.makedirs(os.path.join(share_root, 'Home', 'addons'))
+        xbmcvfs.SMB_ROOT = share_root
+
+        # Into Home, back up, then use the root.
+        xbmcgui.SELECT_QUEUE.extend([1, 1, 0])
+        self.assertEqual(self.panel().drill_down('smb://10.0.0.99/'),
+                         'smb://10.0.0.99/')
 
     def test_browsing_returns_what_was_picked(self):
-        xbmcgui.SELECT_QUEUE.append(0)          # Browse for it...
+        self.base_row('Browse for it...')
         xbmcgui.BROWSE_QUEUE.append('smb://10.0.0.99/Home/addons/')
 
         found = self.panel().ask_for_base('Where Office keeps its files')
@@ -13271,7 +13358,7 @@ class TestMovingFiles(unittest.TestCase):
         self.assertEqual(shares, 'files')       # what Add source browses
 
     def test_typing_a_base_still_works(self):
-        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
+        self.base_row('Type the whole path...')
         xbmcgui.INPUT_QUEUE.append('sftp://root@10.0.0.5/storage/')
 
         self.assertEqual(self.panel().ask_for_base('Where'),
@@ -13280,14 +13367,14 @@ class TestMovingFiles(unittest.TestCase):
 
     def test_backing_out_of_the_browser_changes_nothing(self):
         """Kodi hands the default back on cancel, so it must read as no change."""
-        xbmcgui.SELECT_QUEUE.append(0)
+        self.base_row('Browse for it...')
         # Nothing queued: the stub returns the default, as Kodi does.
         found = self.panel().ask_for_base('Where', self.there)
         self.assertEqual(found, self.there)
 
     def test_adding_a_box_browses_for_it(self):
+        self.base_row('Browse for it...')
         xbmcgui.INPUT_QUEUE.append('Bedroom')
-        xbmcgui.SELECT_QUEUE.append(0)
         xbmcgui.BROWSE_QUEUE.append(self.there)
         xbmcgui.YESNO_QUEUE.append(False)
 
@@ -13299,7 +13386,7 @@ class TestMovingFiles(unittest.TestCase):
 
     def test_a_base_kodi_cannot_see_is_kept_but_reported(self):
         """A box that is switched off is unreachable and still correct."""
-        xbmcgui.SELECT_QUEUE.append(1)
+        self.base_row('Type the whole path...')
         xbmcgui.INPUT_QUEUE.append('smb://10.0.0.99/nosuchshare/')
 
         self.panel().edit_base('office')
@@ -13310,7 +13397,7 @@ class TestMovingFiles(unittest.TestCase):
                             for _heading, message in xbmcgui.NOTIFICATIONS))
 
     def test_a_reachable_base_is_saved_quietly(self):
-        xbmcgui.SELECT_QUEUE.append(0)
+        self.base_row('Browse for it...')
         xbmcgui.BROWSE_QUEUE.append(self.there)
 
         self.panel().edit_base('office')
@@ -13319,7 +13406,7 @@ class TestMovingFiles(unittest.TestCase):
                           if 'cannot see' in m])
 
     def test_a_base_that_cannot_be_a_folder_leaves_the_old_one(self):
-        xbmcgui.SELECT_QUEUE.append(1)
+        self.base_row('Type the whole path...')
         xbmcgui.INPUT_QUEUE.append('   ')
 
         self.panel().edit_base('office')
@@ -13331,8 +13418,8 @@ class TestMovingFiles(unittest.TestCase):
         """The step that otherwise stops anyone setting up a third box."""
         import places as places_lib
 
+        self.base_row('Type the whole path...')
         xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
-        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
         xbmcgui.YESNO_QUEUE.append(True)
 
         self.panel().add_host()
@@ -13344,8 +13431,8 @@ class TestMovingFiles(unittest.TestCase):
     def test_a_new_box_can_decline_them(self):
         import places as places_lib
 
+        self.base_row('Type the whole path...')
         xbmcgui.INPUT_QUEUE.extend(['Bedroom', self.there])
-        xbmcgui.SELECT_QUEUE.append(1)          # Type it instead...
         xbmcgui.YESNO_QUEUE.append(False)
 
         self.panel().add_host()
