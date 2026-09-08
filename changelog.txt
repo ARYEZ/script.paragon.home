@@ -1,3 +1,20 @@
+2.43.2 (Aryez - 2026)
+    Fixed: a copy no longer takes .git with it. These add-ons are installed
+        as git clones and updated with git pull, so copying one box's .git
+        onto another repointed that clone at the source's HEAD, refs and
+        branch -- the next pull on the destination would have been against a
+        history it was never on. The folder that keeps a box updatable was
+        the one folder the copy should never have touched.
+    .svn, __pycache__, .pyo and .pyc are skipped too. Kodi regenerates the
+        compiled Python, and a copied .py lands with a current timestamp so
+        anything stale beside it is rebuilt anyway.
+    Skipped files are counted and the confirmation says so -- "689 files,
+        41.2 MB (1204 skipped)". Leaving .git behind is right; leaving it
+        behind silently is not.
+    The same rule applies to both ends, so a destination's own .git is
+        invisible to the tool rather than being offered for deletion as a
+        file the source does not have.
+
 2.43.1 (Aryez - 2026)
     Changed: setting a slot now offers the folders that are actually under
         that box's base, instead of asking you to type the name. Typing a

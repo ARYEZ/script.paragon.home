@@ -58,6 +58,31 @@ MAX_DEPTH = 24
 # somewhere it should not be.
 MAX_FILES = 20000
 
+# Never copied, whatever a slot points at.
+#
+# .git is the one that matters. These add-ons are installed as git clones and
+# updated with `git pull`, so copying one box's .git onto another does not
+# merely waste time on a few thousand small files -- it repoints that clone at
+# the source's HEAD, refs and branch, and the next pull there is against a
+# history the box was never on. The folder that keeps the destination
+# updatable is the one folder a copy must not touch.
+#
+# The compiled Python goes for a smaller reason: Kodi regenerates it, a copied
+# .py lands with a current timestamp so the stale .pyo beside it is recompiled
+# anyway, and they are the files this project untracked from git for the same
+# reason.
+SKIP_FOLDERS = ('.git', '.svn', '__pycache__')
+SKIP_SUFFIXES = ('.pyo', '.pyc')
+
+
+def is_skipped_folder(name):
+    return name in SKIP_FOLDERS
+
+
+def is_skipped_file(name):
+    return name.endswith(SKIP_SUFFIXES)
+
+
 # What a copy reports back. `failed` holds (rel, reason) rather than raising,
 # because one unreadable file out of six hundred should leave the other five
 # hundred and ninety-nine copied and say so.
@@ -84,6 +109,10 @@ class Survey(object):
         self.total_bytes = 0
         self.errors = []
         self.stopped = False  # hit a cap or was cancelled part-way
+        # Files and folders passed over as SKIP_FOLDERS/SKIP_SUFFIXES.
+        # Counted rather than merely dropped so the confirmation can say a
+        # copy is leaving something behind instead of quietly doing it.
+        self.skipped = 0
 
     @property
     def count(self):
@@ -166,6 +195,9 @@ def survey(root, should_cancel=None):
             continue
 
         for name in files:
+            if is_skipped_file(name):
+                found.skipped += 1
+                continue
             child = ('%s/%s' % (rel, name)) if rel else name
             if clean_rel(child) is None:
                 # A name the filesystem allows but a relative path cannot
@@ -188,6 +220,9 @@ def survey(root, should_cancel=None):
             continue
 
         for name in dirs:
+            if is_skipped_folder(name):
+                found.skipped += 1
+                continue
             child = ('%s/%s' % (rel, name)) if rel else name
             if clean_rel(child) is None:
                 found.errors.append('%s has an unusable name' % child)
@@ -413,8 +448,16 @@ def describe_size(total):
 
 
 def describe(plan):
-    """"689 files, 41.2 MB" for a surveyed tree."""
+    """"689 files, 41.2 MB" for a surveyed tree.
+
+    Says so when something was passed over. A copy that silently leaves .git
+    behind is the right copy, but it should not be a silent one -- the whole
+    confirmation exists so that what is about to happen is on the screen.
+    """
     if plan is None:
         return 'nothing'
     files = '%d file%s' % (plan.count, '' if plan.count == 1 else 's')
-    return '%s, %s' % (files, describe_size(plan.total_bytes))
+    described = '%s, %s' % (files, describe_size(plan.total_bytes))
+    if plan.skipped:
+        described += ' (%d skipped)' % plan.skipped
+    return described

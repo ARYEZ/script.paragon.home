@@ -12722,6 +12722,57 @@ class TestFolderTransfer(unittest.TestCase):
                          + len('home'))
         self.assertIn('media/deep', plan.dirs)
 
+    def test_a_repository_is_never_copied(self):
+        """The one folder a copy must not touch.
+
+        These add-ons are installed as git clones and updated with git pull.
+        Copying one box's .git onto another repoints that clone at the
+        source's HEAD and refs, so the next pull there is against a history
+        the box was never on -- the folder that keeps the destination
+        updatable would be the thing the copy broke.
+        """
+        self.build(self.source, {
+            '.git/HEAD': 'ref: refs/heads/main',
+            '.git/objects/ab/cdef': 'blob',
+            'media/.git/HEAD': 'a nested one counts too',
+        })
+        plan = self.transfer.survey(self.source)
+
+        self.assertFalse([rel for rel in plan.rels() if '.git' in rel],
+                         plan.rels())
+        self.assertTrue(plan.skipped)
+
+        self.transfer.copy_tree(self.source, self.dest)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, '.git')))
+
+    def test_compiled_python_is_not_copied(self):
+        self.build(self.source, {'addon.pyo': 'x', 'lib/thing.pyc': 'x',
+                                 '__pycache__/thing.pyc': 'x'})
+        plan = self.transfer.survey(self.source)
+
+        self.assertEqual([rel for rel in plan.rels()
+                          if rel.endswith(('.pyo', '.pyc'))], [])
+        self.assertNotIn('__pycache__', plan.dirs)
+
+    def test_a_skipped_folder_is_not_offered_for_deletion(self):
+        """Excluded from both surveys, so it cannot show up as an extra.
+
+        Otherwise a sync would finish by offering to delete the destination's
+        own .git -- which is worse than having copied one.
+        """
+        self.transfer.copy_tree(self.source, self.dest)
+        self.build(self.dest, {'.git/HEAD': 'the destination has its own'})
+
+        self.assertEqual(self.transfer.extras(self.source, self.dest), [])
+
+    def test_the_confirmation_says_when_something_was_skipped(self):
+        self.build(self.source, {'.git/HEAD': 'x'})
+        plan = self.transfer.survey(self.source)
+        self.assertIn('skipped', self.transfer.describe(plan))
+
+        clean = self.transfer.survey(os.path.join(self.source, 'media'))
+        self.assertNotIn('skipped', self.transfer.describe(clean))
+
     def test_a_survey_of_a_missing_folder_says_so(self):
         self.assertRaises(self.transfer.TransferError,
                           self.transfer.survey,
