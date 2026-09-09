@@ -202,12 +202,23 @@ class BroadlinkDriver(object):
         except BroadlinkError:
             return False
 
-    def start_rf_capture(self, device):
-        """Having found the frequency, listen for the code itself."""
+    def start_rf_capture(self, device, frequency=None):
+        """Listen for the code, on `frequency` in MHz if one is given.
+
+        A frequency skips the sweep, which is the pass that needs the button
+        held down beside the blaster. Only the RM4-class units accept one, so
+        a refusal is reported as False rather than raised: the caller can then
+        sweep instead, which every RF blaster can do. A refusal with no
+        frequency asked for is a real failure and still raises.
+        """
         session = self._session(device)
         try:
-            session.find_rf_packet()
+            session.find_rf_packet(frequency)
         except BroadlinkError as exc:
+            if frequency:
+                self._log('%s would not take a frequency directly (%s); '
+                          'sweeping instead' % (device.name, exc))
+                return False
             raise ControlError('%s: %s' % (device.name, exc))
         return True
 

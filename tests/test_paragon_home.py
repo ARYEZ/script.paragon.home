@@ -3458,6 +3458,11 @@ class FakeRM(object):
         # waiting rather than only the happy first poll.
         self.has_radio = True
         self.sweeping = False
+        # What arrived on the RF-code verb, and whether this device will take
+        # a frequency there at all. An older Pro answers the bare form only.
+        self.rf_code_data = b''
+        self.takes_frequency = True
+        self.refuse_rf_code = False
         self.sweeps = 0
         self.cancels = 0
         self.holds_before_lock = 0
@@ -3595,6 +3600,13 @@ class FakeRM(object):
                     payload[0] = 1
                 self.sock.sendto(self._reply(payload), sender)
             elif verb == self.bl.DATA_LEARN_RF_CODE:
+                if self.refuse_rf_code:
+                    self._refuse(sender, code=0xFFF9)
+                    continue
+                if any(data) and not self.takes_frequency:
+                    self._refuse(sender, code=0xFFF9)
+                    continue
+                self.rf_code_data = bytes(data)
                 self.learning = True
                 self.sock.sendto(self._reply(bytearray(16)), sender)
             elif verb == self.bl.DATA_CANCEL_RF_SWEEP:
@@ -3765,6 +3777,43 @@ class TestBroadlinkProtocol(unittest.TestCase):
 
         self.assertIsNotNone(learned)
         self.assertTrue(learned.startswith(b'\x26\x00'))
+
+    def test_a_frequency_goes_on_the_wire_as_kilohertz(self):
+        """433.92 MHz is 433920 kHz, little-endian, on the RF-code verb.
+
+        The unit is the whole risk here: sent as megahertz the device would
+        be told to listen on 433 kHz, and nothing about the failure would say
+        so -- it would simply never hear the remote.
+        """
+        import struct as _struct
+
+        session = self.session()
+        session.find_rf_packet(433.92)
+
+        # Padded out to the cipher's block size after the four bytes, which
+        # is what python-broadlink puts on the wire too.
+        self.assertEqual(self.device.rf_code_data[:4],
+                         _struct.pack('<I', 433920))
+
+    def test_no_frequency_sends_the_bare_form(self):
+        """Which is the second half of a sweep, and every RF blaster takes it.
+
+        Nothing but padding, so the bare form and a frequency of zero are the
+        same thing on the wire. They never collide because a zero is not a
+        frequency and is never sent as one.
+        """
+        session = self.session()
+        session.find_rf_packet()
+
+        self.assertFalse(any(self.device.rf_code_data))
+
+    def test_a_blaster_that_only_takes_the_bare_form_refuses(self):
+        self.device.takes_frequency = False
+        session = self.session()
+
+        self.assertRaises(self.bl.BroadlinkError,
+                          session.find_rf_packet, 433.92)
+        self.assertTrue(session.find_rf_packet())
 
     def test_the_sweep_answers_not_yet_rather_than_erroring(self):
         """Unlike the infrared check, which errors while it waits."""
@@ -3956,6 +4005,29 @@ class TestBroadlinkDriver(unittest.TestCase):
         return Device('FF:EE:DD:CC:BB:AA', name='Lounge RM',
                       driver='broadlink', ip='127.0.0.1', lan=True,
                       devtype=0x27c2)
+
+    def test_a_frequency_reaches_the_blaster(self):
+        import struct as _struct
+
+        driver, device = self.driver(), self.device()
+
+        self.assertTrue(driver.start_rf_capture(device, 433.92))
+        self.assertEqual(self.rm.rf_code_data[:4],
+                         _struct.pack('<I', 433920))
+
+    def test_a_blaster_refusing_a_frequency_reports_rather_than_raises(self):
+        """So the caller can sweep instead, which every RF blaster can do."""
+        self.rm.takes_frequency = False
+        driver, device = self.driver(), self.device()
+
+        self.assertFalse(driver.start_rf_capture(device, 433.92))
+
+    def test_a_refusal_with_no_frequency_asked_for_is_a_real_failure(self):
+        """Nothing to fall back to there, so it raises rather than lying."""
+        self.rm.refuse_rf_code = True
+        driver, device = self.driver(), self.device()
+
+        self.assertRaises(ControlError, driver.start_rf_capture, device)
 
     def test_an_rm_claims_commands_and_nothing_else(self):
         from devices import CAP_COLOR, CAP_COMMANDS, CAP_POWER
@@ -9836,9 +9908,14 @@ class TestControlPanel(unittest.TestCase):
                     return False
                 return True
 
-            def start_rf_capture(self, device):
-                calls.append('capture')
-                return True
+            takes_frequency = True
+
+            def start_rf_capture(self, device, frequency=None):
+                if frequency is None:
+                    calls.append('capture')
+                    return True
+                calls.append('capture@%g' % frequency)
+                return self.takes_frequency
 
             def cancel_rf_sweep(self, device):
                 calls.append('cancel')
@@ -9858,10 +9935,30 @@ class TestControlPanel(unittest.TestCase):
         self.app._devices = [device]
         return device, emitter, calls
 
+    def rf_index(self, prefix):
+        """Index of a row on the "how should the frequency be found?" question.
+
+        Clears the queues as it probes, so call it before queuing anything
+        the test itself needs.
+        """
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.panel()._ask_rf_frequency()
+        labels = xbmcgui.SELECT_CALLS[-1][1]
+        xbmcgui.reset()
+        matches = [i for i, label in enumerate(labels)
+                   if label.startswith(prefix)]
+        assert matches, 'no row starting "%s" among %r' % (prefix, labels)
+        return matches[0]
+
+    def rf_row(self, prefix):
+        """Answer that question with the row called `prefix`."""
+        xbmcgui.SELECT_QUEUE.append(self.rf_index(prefix))
+
     def test_learning_an_rf_command_sweeps_then_captures(self):
         """Two passes: find the frequency, then listen on it."""
         device, _emitter, calls = self._rm()
 
+        self.rf_row('Sweep')
         xbmcgui.INPUT_QUEUE.append('Blinds Open')
         self.panel().learn_rf_command(device, sleep_func=lambda s: None)
 
@@ -9871,6 +9968,7 @@ class TestControlPanel(unittest.TestCase):
 
     def test_the_sweep_is_polled_until_it_locks_on(self):
         device, emitter, calls = self._rm()
+        self.rf_row('Sweep')
         emitter.found_after = 3
 
         xbmcgui.INPUT_QUEUE.append('Blinds Shut')
@@ -9883,6 +9981,7 @@ class TestControlPanel(unittest.TestCase):
         """A blaster left sweeping stays deaf, so the next ordinary command
         would look broken rather than the learn looking failed."""
         device, emitter, calls = self._rm()
+        self.rf_row('Sweep')
         emitter.found_after = 10 ** 6      # never
 
         self.panel().learn_rf_command(device, sleep_func=lambda s: None)
@@ -9893,6 +9992,7 @@ class TestControlPanel(unittest.TestCase):
 
     def test_a_frequency_found_but_no_code_is_cancelled_too(self):
         device, emitter, calls = self._rm()
+        self.rf_row('Sweep')
         emitter.code = None
 
         self.panel().learn_rf_command(device, sleep_func=lambda s: None)
@@ -9904,6 +10004,7 @@ class TestControlPanel(unittest.TestCase):
     def test_naming_nothing_cancels_rather_than_saving(self):
         device, _emitter, calls = self._rm()
 
+        self.rf_row('Sweep')
         xbmcgui.INPUT_QUEUE.append('')
         self.panel().learn_rf_command(device, sleep_func=lambda s: None)
 
@@ -9912,6 +10013,7 @@ class TestControlPanel(unittest.TestCase):
 
     def test_a_blaster_with_no_radio_says_so_and_stops(self):
         device, emitter, calls = self._rm()
+        self.rf_row('Sweep')
         emitter.sweep_raises = ('Hall RM would not start an RF sweep. Only '
                                 'the Pro blasters have a radio')
 
@@ -9932,11 +10034,91 @@ class TestControlPanel(unittest.TestCase):
         self.assertIn('Learn an RF command...', labels)
         self.assertIn('Test connection', labels)
 
+
+    # -- giving it the frequency instead of sweeping -----------------------
+
+    def test_a_known_frequency_skips_the_sweep(self):
+        """The sweep is the pass that needs the button held down.
+
+        A shade remote has its frequency printed on the back, so being able
+        to say 433.92 turns a hold-then-press into one press.
+        """
+        device, _emitter, calls = self._rm()
+
+        self.rf_row('433.92')
+        xbmcgui.INPUT_QUEUE.append('Shade Open')
+        self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+        self.assertEqual(calls, ['capture@433.92', 'collect',
+                                 'save:Shade Open'])
+        self.assertNotIn('sweep', calls)
+
+    def test_315_is_offered_too(self):
+        device, _emitter, calls = self._rm()
+
+        self.rf_row('315')
+        xbmcgui.INPUT_QUEUE.append('Garage')
+        self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+        self.assertIn('capture@315', calls)
+
+    def test_a_frequency_can_be_typed(self):
+        device, _emitter, calls = self._rm()
+
+        self.rf_row('Type the frequency')
+        xbmcgui.INPUT_QUEUE.extend(['868.35', 'Awning'])
+        self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+        self.assertIn('capture@868.35', calls)
+
+    def test_nonsense_and_out_of_range_frequencies_are_refused(self):
+        """The guard is for a slip of the keyboard, not for unusual remotes.
+
+        433920 is the same frequency in kilohertz, which is the mistake worth
+        catching -- it would otherwise be sent as 433 gigahertz.
+        """
+        for typed in ('433920', '0.43392', 'four thirty three', ''):
+            device, _emitter, calls = self._rm()
+            self.rf_row('Type the frequency')
+            xbmcgui.INPUT_QUEUE.append(typed)
+
+            self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+            self.assertEqual(calls, [], '%r should have been refused' % typed)
+
+    def test_backing_out_of_the_question_sends_nothing(self):
+        device, _emitter, calls = self._rm()
+
+        xbmcgui.SELECT_QUEUE.append(-1)
+        self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+        self.assertEqual(calls, [])
+
+    def test_a_blaster_that_will_not_take_one_falls_back_to_sweeping(self):
+        """An older Pro answers the bare form only, and sweeping still works.
+
+        Reported once and carried on with, rather than making the user start
+        again from the menu.
+        """
+        device, emitter, calls = self._rm()
+        emitter.takes_frequency = False
+
+        self.rf_row('433.92')
+        xbmcgui.INPUT_QUEUE.append('Shade Open')
+        self.panel().learn_rf_command(device, sleep_func=lambda s: None)
+
+        self.assertEqual(calls, ['capture@433.92', 'sweep', 'check',
+                                 'capture', 'collect', 'save:Shade Open'])
+        self.assertTrue(any('Sweeping for it' in message
+                            for _heading, message in xbmcgui.NOTIFICATIONS))
+
     def test_the_menu_rows_after_the_codes_do_what_they_say(self):
         """They used to be found by subtracting from the code count, and
         every version of that broke the first time a row was added."""
         device, _emitter, calls = self._rm()
         self.app.controller.commands = lambda d: ['TV Power', 'Volume Up']
+
+        sweep = self.rf_index('Sweep')
 
         xbmcgui.SELECT_QUEUE.extend([-1])
         self.panel().command_menu(device)
@@ -9945,7 +10127,7 @@ class TestControlPanel(unittest.TestCase):
 
         row = labels.index('Learn an RF command...')
         xbmcgui.INPUT_QUEUE.append('Blinds Open')
-        xbmcgui.SELECT_QUEUE.extend([row, -1])
+        xbmcgui.SELECT_QUEUE.extend([row, sweep, -1])
         self.panel().command_menu(device)
 
         self.assertIn('save:Blinds Open', calls)

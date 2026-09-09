@@ -62,6 +62,17 @@ IDENTIFY_GAP = 0.4
 
 # How long to wait for a remote button press when learning a code. Thirty
 # seconds is long enough to find the right button on an unfamiliar remote.
+# Offered before a sweep, because a shade or blind remote usually has its
+# frequency printed on the back and these two cover nearly all of them.
+RF_PRESETS = (('433.92', 433.92), ('315', 315.0))
+TYPE_FREQUENCY = object()
+
+# What an RM4 will accept at all. Wider than the two presets on purpose: the
+# point of the guard is to catch a kilohertz or a hertz typed in by mistake,
+# not to argue with an unusual remote.
+RF_MIN_MHZ = 280.0
+RF_MAX_MHZ = 960.0
+
 LEARN_ATTEMPTS = 30
 LEARN_POLL = 1.0
 
@@ -2076,23 +2087,90 @@ class ControlPanel(object):
         rows[choice][1]()
 
     def learn_rf_command(self, device, sleep_func=None):
-        """Learn a radio code, which takes two passes rather than one.
+        """Learn a radio code.
 
-        The blaster does not know which frequency to listen on, so it sweeps
-        for one while the button is held down, and only then listens for the
-        code. That is why this asks for two presses where infrared asks for
-        one, and why the first is a hold rather than a tap -- a sweep needs
-        something to find.
+        Two passes by default, because the blaster does not know which
+        frequency to listen on: it sweeps for one while the button is held
+        down, and only then listens for the code. That is why this asks for
+        two presses where infrared asks for one, and why the first is a hold
+        rather than a tap -- a sweep needs something to find.
+
+        Given the frequency, the first pass is skipped and one press does it.
+        Blind and shade remotes print theirs on the back, and 433.92 MHz is
+        most of them.
         """
         import time
 
         sleep = sleep_func or time.sleep
+        frequency = self._ask_rf_frequency()
+        if frequency is BACK:
+            return
 
+        if frequency is not None:
+            try:
+                taken = self.app.start_rf_capture(device, frequency)
+            except ControlError as exc:
+                utils.force_notify(str(exc))
+                return
+            if taken:
+                self._rf_capture_code(device, sleep)
+                return
+            # An older Pro will not take one. Sweeping still works, so say so
+            # once and carry on rather than making the user start again.
+            utils.force_notify('%s cannot be told the frequency. Sweeping '
+                               'for it instead.' % device.name)
+
+        if not self._rf_sweep(device, sleep):
+            return
+        try:
+            self.app.start_rf_capture(device)
+        except ControlError as exc:
+            self.app.cancel_rf_sweep(device)
+            utils.force_notify(str(exc))
+            return
+        self._rf_capture_code(device, sleep)
+
+    def _ask_rf_frequency(self):
+        """The frequency to listen on: a number in MHz, None to sweep, or BACK.
+
+        Offered before anything is sent, because knowing the frequency changes
+        what the user is about to be asked to do -- one press rather than a
+        hold and a press.
+        """
+        rows = [('Sweep for it (hold the button down)', None)]
+        rows.extend((('%s MHz' % text, value) for text, value in RF_PRESETS))
+        rows.append(('Type the frequency...', TYPE_FREQUENCY))
+
+        choice = _select('How should the frequency be found?',
+                         [label for label, _value in rows])
+        if choice == BACK:
+            return BACK
+        picked = rows[choice][1]
+        if picked is not TYPE_FREQUENCY:
+            return picked
+
+        typed = _dialog().input('Frequency in MHz, e.g. 433.92')
+        if not typed:
+            return BACK
+        try:
+            value = float(typed.strip())
+        except (TypeError, ValueError):
+            utils.force_notify('%s is not a frequency in MHz' % typed)
+            return BACK
+        if not RF_MIN_MHZ <= value <= RF_MAX_MHZ:
+            utils.force_notify('%s MHz is outside what these blasters can '
+                               'reach (%g to %g)'
+                               % (typed, RF_MIN_MHZ, RF_MAX_MHZ))
+            return BACK
+        return value
+
+    def _rf_sweep(self, device, sleep):
+        """Hunt for the frequency while the button is held. True if found."""
         try:
             self.app.start_rf_sweep(device)
         except ControlError as exc:
             utils.force_notify(str(exc))
-            return
+            return False
 
         found = False
         progress = xbmcgui.DialogProgress()
@@ -2122,20 +2200,15 @@ class ControlPanel(object):
                          'a foot of %s.\n\nIf this blaster is a Mini it has '
                          'no radio at all and can learn infrared only.'
                          % device.name)
-            return
+        return found
 
-        try:
-            self.app.start_rf_capture(device)
-        except ControlError as exc:
-            self.app.cancel_rf_sweep(device)
-            utils.force_notify(str(exc))
-            return
-
+    def _rf_capture_code(self, device, sleep):
+        """Listen for the code and save it under a name the user gives."""
         code = None
         progress = xbmcgui.DialogProgress()
         progress.create(utils.ADDON_NAME,
-                        'Frequency found. Now press the same button again.',
-                        'A single press this time.')
+                        'Press the button on your remote.',
+                        'A single press, close to %s.' % device.name)
         try:
             for step in range(LEARN_ATTEMPTS):
                 progress.update(int(step * 100.0 / LEARN_ATTEMPTS))
@@ -2151,12 +2224,11 @@ class ControlPanel(object):
         if not code:
             self.app.cancel_rf_sweep(device)
             _dialog().ok(utils.ADDON_NAME,
-                         'The frequency was found but no code came through.'
-                         '\n\nTry again and press the button firmly while '
-                         'the dialog is open.\n\nSome remotes change their '
-                         'code on every press for security. Those cannot be '
-                         'replayed by anything, and this will never capture '
-                         'one.')
+                         'No code came through.\n\nTry again and press the '
+                         'button firmly while the dialog is open.\n\nSome '
+                         'remotes change their code on every press for '
+                         'security. Those cannot be replayed by anything, '
+                         'and this will never capture one.')
             return
 
         name = _dialog().input('Name for this RF command', '')

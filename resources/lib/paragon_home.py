@@ -197,8 +197,13 @@ class ParagonHome(object):
     def rf_frequency_found(self, device):
         return self._emitter(device).rf_frequency_found(device)
 
-    def start_rf_capture(self, device):
-        return self._emitter(device).start_rf_capture(device)
+    def start_rf_capture(self, device, frequency=None):
+        """Listen for an RF code, on `frequency` in MHz if one is given.
+
+        False when the blaster will not be told a frequency, so the caller
+        can sweep for it instead.
+        """
+        return self._emitter(device).start_rf_capture(device, frequency)
 
     def cancel_rf_sweep(self, device):
         return self._emitter(device).cancel_rf_sweep(device)

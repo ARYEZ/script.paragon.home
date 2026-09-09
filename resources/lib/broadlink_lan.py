@@ -417,9 +417,24 @@ class Session(object):
         payload = bytearray(self.data_command(DATA_CHECK_RF_FOUND))
         return bool(payload) and payload[0] == 1
 
-    def find_rf_packet(self):
-        """Having found the frequency, listen for the code on it."""
-        self.data_command(DATA_LEARN_RF_CODE)
+    def find_rf_packet(self, frequency=None):
+        """Listen for a code, on `frequency` in MHz if one is given.
+
+        With no frequency this is the second half of a sweep: the blaster has
+        already locked on and simply listens. With one, the sweep is skipped
+        entirely -- which is worth having, because the sweep is the pass that
+        needs the button held down next to the blaster, and a shade remote
+        whose frequency is printed on it does not need finding.
+
+        The number goes on the wire as kilohertz in four little-endian bytes,
+        so 433.92 MHz is 433920. Only the RM4-class blasters read it; an
+        older Pro answers the bare form and refuses this one, which is a
+        BroadlinkError like any other and is what the caller falls back on.
+        """
+        data = b''
+        if frequency:
+            data = struct.pack('<I', int(round(float(frequency) * 1000)))
+        self.data_command(DATA_LEARN_RF_CODE, data)
         return True
 
     def cancel_sweep(self):

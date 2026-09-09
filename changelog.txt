@@ -1,3 +1,23 @@
+2.47.0 (Aryez - 2026)
+    Added: an RF command can now be learned by giving the frequency instead
+        of sweeping for it. "Learn an RF command..." asks first: sweep for
+        it, 433.92 MHz, 315 MHz, or type one.
+    The sweep is the pass that needs the button held down beside the blaster,
+        so knowing the frequency turns a hold and a press into a single
+        press. A blind or shade remote usually has its frequency printed on
+        the back, and 433.92 is most of them.
+    The number goes on the wire as kilohertz in four little-endian bytes, so
+        433.92 MHz is 433920. That unit is the whole risk: sent as megahertz
+        the blaster would listen on 433 kHz and simply never hear the remote,
+        with nothing about the failure saying so.
+    Only the RM4-class blasters read a frequency. An older Pro refuses it, so
+        that is reported and the sweep runs instead rather than making anyone
+        start again from the menu.
+    A typed frequency is checked against 280-960 MHz. The guard is for a slip
+        of the keyboard -- 433920 is the same frequency in kilohertz and
+        would otherwise be sent as 433 gigahertz -- not to argue with an
+        unusual remote.
+
 2.46.0 (Aryez - 2026)
     Removed: Move files. It is now a separate add-on, Paragon Transit, at
         github.com/Aryez/script.paragon.transit -- install that and the boxes
