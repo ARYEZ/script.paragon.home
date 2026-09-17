@@ -37,7 +37,7 @@ hardware says they do and do not depend on this comment being right.
 """
 
 from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
-                     CAP_STATE, ControlError, Device)
+                     CAP_STATE, CAP_UNLOCK, ControlError, Device)
 from switchbot_cloud import CloudError
 
 # What this driver will adopt. Everything else on the account -- bots,
@@ -83,9 +83,10 @@ LOCK_STATES = {
     'jammed': 'jammed',
 }
 
-# The one command this driver will send a lock. There is no unlock here, and
-# that absence is the feature -- see Hub.lock.
+# The two commands this driver will send a lock. They are not equals: locking
+# is always allowed and unlocking is gated on the box -- see Hub.unlock.
 LOCK_COMMAND = 'lock'
+UNLOCK_COMMAND = 'unlock'
 
 
 def is_lock(device):
@@ -225,9 +226,11 @@ class SwitchBotDriver(object):
         if is_lock(device):
             # Deliberately short. No CAP_POWER, so no "switch everything off"
             # and no scene ever reaches a deadbolt; no CAP_POSITION, because a
-            # door is not ajar by a percentage; no CAP_COMMANDS, because the
-            # named-command path would be a way to send "unlock" by typing it.
-            return set([CAP_LOCK, CAP_STATE])
+            # door is not ajar by a percentage; no CAP_COMMANDS, because a
+            # named command is a free-text field and this hardware's vocabulary
+            # includes "unlock" -- that path would go round the gate rather
+            # than through it.
+            return set([CAP_LOCK, CAP_UNLOCK, CAP_STATE])
         return set([CAP_POSITION, CAP_STATE, CAP_POWER, CAP_COMMANDS])
 
     @staticmethod
@@ -282,7 +285,7 @@ class SwitchBotDriver(object):
             self._send(device, 'setPosition', '0,ff,%d' % position)
 
     def lock(self, device):
-        """Throw the bolt. There is no counterpart and there will not be one.
+        """Throw the bolt.
 
         Safe to send at a bolt that is already thrown, which is why nothing
         here reads the state first: the right thing to do is the same either
@@ -292,6 +295,18 @@ class SwitchBotDriver(object):
         if not is_lock(device):
             raise ControlError('%s is not a lock' % device.name)
         return self._send(device, LOCK_COMMAND)
+
+    def unlock(self, device):
+        """Withdraw the bolt.
+
+        Reached only through Hub.unlock, which is where the box's permission is
+        checked. Nothing calls this directly, and the check is not repeated
+        here on purpose: two copies of a rule are two chances for them to
+        differ, and the Hub is the one every caller goes through.
+        """
+        if not is_lock(device):
+            raise ControlError('%s is not a lock' % device.name)
+        return self._send(device, UNLOCK_COMMAND)
 
     def turn(self, device, on):
         """Open or shut, for callers that only know how to switch things.

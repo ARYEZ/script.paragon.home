@@ -51,7 +51,7 @@ import tv
 from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
                     same_secret, to_bytes, to_text)
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP, CAP_COMMANDS,
-                     CAP_LOCK, CAP_POSITION, CAP_POWER, CAP_STATE)
+                     CAP_LOCK, CAP_POSITION, CAP_POWER, CAP_STATE, CAP_UNLOCK)
 
 # Where the API token is kept. Not in settings.xml: it is not something anyone
 # types, and Kodi rewrites settings.xml on exit -- which is exactly the race
@@ -107,12 +107,12 @@ COOKIE_NAME = 'paragon_remote'
 # Actions the remote accepts, and whether the phone waits for the answer.
 # Sequences and discovery are not waited on: a sequence can hold an hour of
 # pauses, and the phone wants to know it started, not sit there until it ends.
-# 'lock' is here and 'unlock' is not, and never will be. Paragon Home can lock
-# a door and cannot open one -- there is no unlock verb in any driver or in the
-# Hub for this to route to, so the absence is structural rather than a name
-# left off a list.
+# 'unlock' routes to Hub.unlock, which refuses unless this box is allowed to
+# open doors. Listing it here does not grant it -- the gate is one method deep
+# and every caller in the add-on arrives at the same one.
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
-             'command', 'position', 'states', 'cancel_sequence', 'lock')
+             'command', 'position', 'states', 'cancel_sequence', 'lock',
+             'unlock')
 # A satellite copying from its master reads five files over SSH, each with its
 # own timeout, so a master that is off can take longer than a handler is
 # willing to wait. Discovery is the same shape.
@@ -622,6 +622,18 @@ def perform(app, action, params, sleep_func=None, on_step=None):
         app.controller.lock(device)
         return {'ok': True, 'message': '%s locked' % device.name}
 
+    if action == 'unlock':
+        device = app.device_by_id(params.get('target'))
+        if device is None:
+            return {'ok': False, 'message': 'No such device'}
+        if CAP_UNLOCK not in app.controller.capabilities(device):
+            return {'ok': False,
+                    'message': '%s cannot be unlocked' % device.name}
+        # No check of allow_unlock here on purpose: Hub.unlock raises with the
+        # reason, and a second copy of the rule is a second thing to keep true.
+        app.controller.unlock(device)
+        return {'ok': True, 'message': '%s UNLOCKED' % device.name}
+
     if action == 'cancel_sequence':
         name = params.get('name') or params.get('value') or ''
         if app.cancel_pending(name):
@@ -763,6 +775,9 @@ def snapshot(app, states=None, allow_sequences=True):
             'master': app.master_ip if app.satellite_mode else '',
         },
         'allow_sequences': bool(allow_sequences),
+        # So the page can leave the button off rather than show one that always
+        # answers with a refusal.
+        'allow_unlock': bool(getattr(app.controller, 'allow_unlock', False)),
         'drivers': [{'id': driver, 'label': _driver_label(app, driver),
                      'count': counts[driver]} for driver in counts],
         'devices': devices,
@@ -1800,6 +1815,9 @@ button.tile .sub {
 .card.dev.jammed::before { background: #ff5f5f; opacity: 1; }
 .card.dev.jammed .state { color: #ff5f5f; }
 .lockbtn { font-weight: 700; }
+/* Not styled as a warning -- it is a thing you meant to press -- but set apart
+   from Lock so the two are not two identical buttons a letter apart. */
+.unlockbtn { font-weight: 700; border-color: var(--live-ink); }
 
 /* The marker on a number we set rather than read. Quiet enough not to compete
    with the number, present enough to stop it reading as measured fact. */
@@ -2987,6 +3005,21 @@ function deviceCard(device) {
       act('lock', {target: device.id});
     });
     controls.appendChild(bolting);
+  }
+
+  /* Only where the box will take one. Absent rather than present and refusing:
+     a button that says no every time is a button people learn to press twice.
+     It asks first, and says what it is about to do rather than which word is
+     on it -- "Lock" and "Unlock" are a letter apart on a phone held at arm's
+     length. */
+  if (caps.indexOf('unlock') >= 0 && state.allow_unlock) {
+    var opening = el('button', 'unlockbtn', 'Unlock');
+    opening.addEventListener('click', function () {
+      if (!window.confirm('Open ' + device.name
+                          + '?\n\nThis withdraws the bolt.')) { return; }
+      act('unlock', {target: device.id});
+    });
+    controls.appendChild(opening);
   }
 
   if (caps.indexOf('power') >= 0) {

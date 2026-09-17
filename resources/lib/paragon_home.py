@@ -55,6 +55,7 @@ class ParagonHome(object):
         settings['kasa_password'] = utils.get_setting('kasa_password')
         settings['switchbot_token'] = utils.get_setting('switchbot_token')
         settings['switchbot_secret'] = utils.get_setting('switchbot_secret')
+        settings['allow_unlock'] = utils.get_bool('allow_unlock', False)
         self.controller = build_hub(settings)
         self._devices = None
         self._scenes = None

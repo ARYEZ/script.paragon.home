@@ -50,7 +50,7 @@ import govee_lan  # noqa: E402
 import scenes as scene_lib  # noqa: E402
 from devices import (CAP_BRIGHTNESS, CAP_COLOR,  # noqa: E402
                      CAP_COLOR_TEMP, CAP_COMMANDS, CAP_LOCK, CAP_POSITION,
-                     CAP_POWER, CAP_STATE, ControlError, Device,
+                     CAP_POWER, CAP_STATE, CAP_UNLOCK, ControlError, Device,
                      GoveeController)
 
 PROFILE = xbmcaddon._PROFILE
@@ -2473,32 +2473,156 @@ class TestTheLockCannotUnlock(unittest.TestCase):
             finally:
                 handle.close()
 
-    def test_no_module_defines_an_unlock(self):
-        offenders = []
+    def test_only_two_modules_define_an_unlock(self):
+        """The Hub's gate and the driver it guards. A third would be a way round.
+
+        Whatever called a third one would not pass the box's permission on the
+        way. The scan is here rather than left to a review, because "somebody
+        added a helper" is exactly how a gate stops being one.
+        """
+        found = []
         for name, source in self.sources():
             if re.search(r'def\s+unlock\s*\(', source):
-                offenders.append(name)
-        self.assertEqual(offenders, [], 'something grew an unlock verb')
+                found.append(name)
+        self.assertEqual(sorted(found), ['hub.py', 'switchbot_driver.py'])
 
-    def test_nothing_sends_the_unlock_command(self):
-        """The API takes the word "unlock"; nothing here may put it on the wire."""
-        offenders = []
-        for name, source in self.sources():
-            # The word appears in prose and in the state vocabulary, which is
-            # fine -- reading that a door is unlocked is not opening one. What
-            # must not appear is it being sent or called.
-            for hit in re.findall(r"^.*['\"]unlock['\"].*$", source,
-                                  re.MULTILINE):
-                if re.search(r'(_send|command|lock)\s*\(\s*[^)]*'
-                             r"['\"]unlock['\"]", hit):
-                    offenders.append('%s: %s' % (name, hit.strip()))
-        self.assertEqual(offenders, [])
+    def test_the_gate_lives_in_the_hub_and_nowhere_else(self):
+        """One copy of the rule. Two would be two chances for them to differ."""
+        sources = dict(self.sources())
+        self.assertIn('allow_unlock', sources['hub.py'])
+        self.assertNotIn('allow_unlock', sources['switchbot_driver.py'])
 
-    def test_the_remote_has_no_unlock_action(self):
+    def test_the_remote_routes_unlock_rather_than_deciding_it(self):
         import remote as remote_lib
 
         self.assertIn('lock', remote_lib.ACTIONS)
-        self.assertNotIn('unlock', remote_lib.ACTIONS)
+        self.assertIn('unlock', remote_lib.ACTIONS)
+
+    # -- the gate ----------------------------------------------------------
+
+    def hub_for(self, allow_unlock):
+        import hub as hub_lib
+        import switchbot_driver
+
+        driver = switchbot_driver.SwitchBotDriver()
+        self.sent = []
+        driver._send = lambda d, c, **kw: self.sent.append(c)
+        return hub_lib.Hub([driver], allow_unlock=allow_unlock)
+
+    def test_a_box_that_is_not_allowed_to_will_not_open_a_door(self):
+        hub = self.hub_for(False)
+
+        self.assertRaises(ControlError, hub.unlock, self.a_lock())
+        self.assertEqual(self.sent, [], 'a bolt was withdrawn anyway')
+
+    def test_a_box_that_is_allowed_to_opens_the_door(self):
+        hub = self.hub_for(True)
+
+        hub.unlock(self.a_lock())
+
+        self.assertEqual(self.sent, ['unlock'])
+
+    def test_locking_is_never_gated(self):
+        """A door can always be locked. That is the asymmetry, kept."""
+        hub = self.hub_for(False)
+
+        hub.lock(self.a_lock())
+
+        self.assertEqual(self.sent, ['lock'])
+
+    def test_the_refusal_says_where_to_switch_it_on(self):
+        hub = self.hub_for(False)
+        try:
+            hub.unlock(self.a_lock())
+            self.fail('it opened')
+        except ControlError as exc:
+            self.assertIn('Settings', str(exc))
+
+    def test_a_box_is_not_allowed_to_unless_it_has_been_told(self):
+        """Off by default. A house runs several boxes off one front door."""
+        import hub as hub_lib
+
+        self.assertFalse(hub_lib.Hub([]).allow_unlock)
+
+    def test_unlocking_something_that_is_not_a_lock_is_refused(self):
+        hub = self.hub_for(True)
+        blind = Device('BT01', name='Blinds', driver='switchbot',
+                       model='Blind Tilt')
+
+        self.assertRaises(ControlError, hub.unlock, blind)
+        self.assertEqual(self.sent, [])
+
+    def test_the_hub_checks_for_itself_that_it_is_a_lock(self):
+        """Its own guard, not the driver's, so a driver cannot be the exception.
+
+        The double here says yes to anything, which is the case the Hub's check
+        exists for: a driver that would open whatever it was handed.
+        """
+        import hub as hub_lib
+
+        class WouldOpenAnything(object):
+            DRIVER_ID = 'anything'
+            DRIVER_LABEL = 'Anything'
+            opened = []
+
+            @staticmethod
+            def capabilities(device):
+                return set([CAP_POWER])
+
+            @staticmethod
+            def commands(device):
+                return []
+
+            def unlock(self, device):
+                WouldOpenAnything.opened.append(device.device_id)
+
+        hub = hub_lib.Hub([WouldOpenAnything()], allow_unlock=True)
+        plug = Device('WP1', name='Amp', driver='anything')
+
+        self.assertRaises(ControlError, hub.unlock, plug)
+        self.assertEqual(WouldOpenAnything.opened, [])
+
+    def test_the_driver_checks_for_itself_that_it_is_a_lock(self):
+        """Its own guard, reached without the Hub's. Two guards, tested apart."""
+        sent = []
+        driver = self.driver().SwitchBotDriver()
+        driver._send = lambda d, c, **kw: sent.append(c)
+        blind = Device('BT01', name='Blinds', driver='switchbot',
+                       model='Blind Tilt')
+
+        self.assertRaises(ControlError, driver.unlock, blind)
+        self.assertEqual(sent, [])
+
+    # -- the setting behind the gate ---------------------------------------
+
+    def test_a_fresh_box_is_not_allowed_to_open_doors(self):
+        """No setting, no unlocking. The default is the whole safety net."""
+        clean_profile()
+        xbmcaddon.reset()
+        # devices and hub are deliberately not reloaded. Reimporting devices
+        # makes a second ControlError class, and every assertRaises in this
+        # file is holding the first one.
+        for name in ('addon_utils', 'paragon_home'):
+            if name in sys.modules:
+                del sys.modules[name]
+        from paragon_home import ParagonHome
+
+        self.assertFalse(ParagonHome().controller.allow_unlock)
+        clean_profile()
+
+    def test_the_setting_is_what_opens_the_gate(self):
+        """And it has to reach the Hub, which is three files away from it."""
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcaddon.SETTINGS['allow_unlock'] = 'true'
+        for name in ('addon_utils', 'paragon_home'):
+            if name in sys.modules:
+                del sys.modules[name]
+        from paragon_home import ParagonHome
+
+        self.assertTrue(ParagonHome().controller.allow_unlock)
+        xbmcaddon.reset()
+        clean_profile()
 
     # -- a lock is not a switch --------------------------------------------
 
@@ -2511,11 +2635,16 @@ class TestTheLockCannotUnlock(unittest.TestCase):
         return Device('LK1', name='Front Door', driver='switchbot',
                       model=model, cloud=True)
 
-    def test_a_lock_offers_only_locking_and_reporting(self):
-        """No power, so no "switch everything off" ever sees a door."""
+    def test_a_lock_offers_only_its_two_verbs_and_reporting(self):
+        """No power, so no "switch everything off" ever sees a door.
+
+        And no named commands, which matters more now than when it was written:
+        a command is free text, this hardware's vocabulary includes "unlock",
+        and that path would go round the gate rather than through it.
+        """
         caps = self.driver().SwitchBotDriver.capabilities(self.a_lock())
 
-        self.assertEqual(caps, set([CAP_LOCK, CAP_STATE]))
+        self.assertEqual(caps, set([CAP_LOCK, CAP_UNLOCK, CAP_STATE]))
         self.assertNotIn(CAP_POWER, caps)
         self.assertNotIn(CAP_POSITION, caps)
         self.assertNotIn(CAP_COMMANDS, caps)
@@ -2703,6 +2832,92 @@ class TestTheLockCannotUnlock(unittest.TestCase):
 
         self.assertEqual(self.recorder.calls, [('lock', 'LK1')])
 
+    # -- every way in arrives at the same gate -----------------------------
+
+    def gated_house(self, allow_unlock):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {CAP_LOCK, CAP_UNLOCK, CAP_STATE}
+        self.recorder.allow_unlock = allow_unlock
+        self.recorder.lock = lambda d: self.recorder.calls.append(
+            ('lock', d.device_id))
+
+        def _unlock(device):
+            # Stands in for Hub.unlock, gate and all, because the point of
+            # these is that the callers reach a gate -- not which object it
+            # happens to live on.
+            if not allow_unlock:
+                raise ControlError('Unlocking is switched off on this box. '
+                                   'Settings -> ...')
+            self.recorder.calls.append(('unlock', device.device_id))
+        self.recorder.unlock = _unlock
+
+        app.controller = self.recorder
+        app._devices = [Device('LK1', name='Front Door', driver='switchbot',
+                               model='Lock Vision', cloud=True)]
+        app._scenes = []
+        return app
+
+    def test_a_sequence_cannot_open_a_door_the_box_may_not_open(self):
+        """The path with no PIN and no person: a schedule, at four in the morning."""
+        import sequences as sequence_lib
+
+        app = self.gated_house(allow_unlock=False)
+        app._sequences = [sequence_lib.make_sequence('Let them in', [
+            {'kind': 'unlock', 'driver': 'switchbot', 'target': 'Front Door'},
+        ])]
+
+        app.run_sequence_by_name('Let them in', announce=False)
+
+        self.assertEqual(self.recorder.calls, [], 'a schedule opened the door')
+
+    def test_a_sequence_opens_it_where_the_box_is_allowed_to(self):
+        import sequences as sequence_lib
+
+        app = self.gated_house(allow_unlock=True)
+        app._sequences = [sequence_lib.make_sequence('Let them in', [
+            {'kind': 'unlock', 'driver': 'switchbot', 'target': 'Front Door'},
+        ])]
+
+        app.run_sequence_by_name('Let them in', announce=False)
+
+        self.assertEqual(self.recorder.calls, [('unlock', 'LK1')])
+
+    def test_an_unlock_step_is_never_skipped_as_already_done(self):
+        """Same reason a lock is not, in the direction that matters more."""
+        import sequences as sequence_lib
+
+        step = sequence_lib.normalise_step(
+            {'kind': 'unlock', 'target': 'Front Door'})
+
+        self.assertFalse(sequence_lib.checkable(step))
+        self.assertIsNone(
+            sequence_lib.already_there(step, {'lock': 'unlocked'}))
+
+    def test_an_unlock_step_shouts_in_a_sequence_listing(self):
+        """A listing is read at a glance; this is the step that opens a door."""
+        import sequences as sequence_lib
+
+        step = sequence_lib.normalise_step(
+            {'kind': 'unlock', 'target': 'Front Door'})
+
+        self.assertEqual(sequence_lib.describe_step(step),
+                         'Front Door: UNLOCK')
+
+    def test_lock_and_unlock_are_two_kinds_rather_than_a_direction(self):
+        """So a lock step cannot become an unlock by one word changing."""
+        import sequences as sequence_lib
+
+        self.assertNotEqual(sequence_lib.KIND_LOCK, sequence_lib.KIND_UNLOCK)
+        locking = sequence_lib.normalise_step(
+            {'kind': 'lock', 'target': 'Front Door', 'action': 'unlock'})
+
+        self.assertEqual(locking['kind'], sequence_lib.KIND_LOCK)
+        self.assertEqual(sequence_lib.describe_step(locking),
+                         'Front Door: Lock')
+
     # -- what the bolt says ------------------------------------------------
 
     def test_a_bolt_reports_locked_unlocked_and_jammed(self):
@@ -2784,13 +2999,15 @@ class TestTheLockCannotUnlock(unittest.TestCase):
         self.assertEqual([d.device_id for d in found], ['LV1'])
         self.assertEqual(warnings, [])
         self.assertEqual(driver.capabilities(found[0]),
-                         set([CAP_LOCK, CAP_STATE]))
+                         set([CAP_LOCK, CAP_UNLOCK, CAP_STATE]))
 
         sent = []
         driver._send = lambda d, c, **kw: sent.append(c)
         driver.lock(found[0])
         self.assertEqual(sent, ['lock'])
-        # And the rule holds on it like any other lock.
+        # And the rule holds on it like any other lock. This one matters more
+        # than it reads: "turnOn" at this hardware is an open front door, and
+        # it would not pass the gate on the way there.
         self.assertRaises(ControlError, driver.turn, found[0], True)
 
     def test_a_lock_on_the_account_is_adopted(self):
@@ -13827,6 +14044,64 @@ class TestWebRemote(unittest.TestCase):
         # And the lit edge is dropped on both, because the whole tile is the
         # signal once it is filled.
         self.assertIn('button.tile.waiting::before { display: none; }', page)
+
+    def test_a_box_that_may_not_unlock_shows_no_unlock_button(self):
+        """Absent, not present and refusing. A button that always says no is a
+        button people learn to press twice."""
+        self.app._devices = [Device('LK1', name='Front Door',
+                                    driver='switchbot', model='Lock Vision')]
+        self.recorder.capabilities = lambda d: {'lock', 'unlock', 'state'}
+        self.recorder.allow_unlock = False
+        client = self.signed_in()
+
+        self.assertFalse(client.state()['data']['allow_unlock'])
+
+    def test_a_box_that_may_unlock_says_so_to_the_page(self):
+        self.app._devices = [Device('LK1', name='Front Door',
+                                    driver='switchbot', model='Lock Vision')]
+        self.recorder.capabilities = lambda d: {'lock', 'unlock', 'state'}
+        self.recorder.allow_unlock = True
+        client = self.signed_in()
+
+        self.assertTrue(client.state()['data']['allow_unlock'])
+
+    def test_the_page_hides_the_unlock_button_unless_the_box_allows_it(self):
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        self.assertIn("caps.indexOf('unlock') >= 0 && state.allow_unlock",
+                      page)
+        # And asks before it opens anything.
+        self.assertIn('window.confirm', page)
+
+    def test_unlocking_through_the_remote_reaches_the_gate(self):
+        """The remote does not decide; it routes and reports what came back."""
+        refused = []
+        self.app._devices = [Device('LK1', name='Front Door',
+                                    driver='switchbot', model='Lock Vision')]
+        self.recorder.capabilities = lambda d: {'lock', 'unlock', 'state'}
+        self.recorder.allow_unlock = False
+
+        def _unlock(device):
+            refused.append(device.device_id)
+            raise ControlError('Unlocking is switched off on this box.')
+        self.recorder.unlock = _unlock
+        client = self.signed_in()
+
+        answer = client.act('unlock', target='LK1')
+
+        self.assertFalse(answer['data']['ok'])
+        self.assertIn('switched off', answer['data']['message'])
+        self.assertEqual(refused, ['LK1'], 'the remote answered for the gate')
+
+    def test_unlocking_something_that_is_not_a_lock_is_refused(self):
+        self.app._devices = [Device('AA:BB', name='Lamp', lan=True)]
+        client = self.signed_in()
+
+        answer = client.act('unlock', target='AA:BB')
+
+        self.assertFalse(answer['data']['ok'])
+        self.assertIn('cannot be unlocked', answer['data']['message'])
 
     def test_a_waiting_sequence_says_what_it_is_waiting_on(self):
         """So the phone can show a brew in progress rather than a resting tile."""

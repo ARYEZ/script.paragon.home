@@ -37,12 +37,15 @@ CAP_COLOR_TEMP = 'color_temp'
 CAP_STATE = 'state'        # can report what it is currently doing
 CAP_COMMANDS = 'commands'  # emits named commands, e.g. a learned IR code
 CAP_POSITION = 'position'  # opens and closes to a percentage, e.g. a blind
-# Throws a deadbolt. One direction only, and that is the whole of the design:
-# there is no CAP_UNLOCK and no unlock verb anywhere in this add-on, so no
-# sequence, no scene, no phone on the network and no mistake in this code can
-# open a door. Withdrawing the bolt stays with the key, the keypad and the
-# vendor's own app.
+# Throws a deadbolt.
 CAP_LOCK = 'lock'
+# Withdraws one. Separate from CAP_LOCK rather than folded into it, because the
+# two are not the same permission: locking a door is always safe and unlocking
+# one is the single most consequential thing this add-on can do. Kept apart so
+# that "can this be locked" and "may this be unlocked" are different questions
+# with different answers, and so the second can be switched off per box while
+# the first stays on.
+CAP_UNLOCK = 'unlock'
 
 # Devices cached before drivers existed have no driver recorded; they are all
 # Govee, because that is all there was.
@@ -579,4 +582,8 @@ def build_hub(settings):
             save_codes=settings.get('save_broadlink_codes'),
             log_func=settings.get('log_func')))
 
-    return Hub(drivers=drivers, log_func=settings.get('log_func'))
+    # Off unless this box has been told otherwise. A house has several Kodi
+    # boxes and they all show the same menus, so the question is not "may this
+    # house unlock the front door" but "may it be unlocked from this room".
+    return Hub(drivers=drivers, log_func=settings.get('log_func'),
+               allow_unlock=bool(settings.get('allow_unlock', False)))

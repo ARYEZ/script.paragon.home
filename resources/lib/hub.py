@@ -32,7 +32,7 @@ it has and reports the rest as absent.
 import time
 
 from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
-                     CAP_STATE, ControlError, DEFAULT_DRIVER)
+                     CAP_STATE, CAP_UNLOCK, ControlError, DEFAULT_DRIVER)
 
 # What a power-only device is allowed to be asked for. Switching, and saying
 # what it is doing -- everything about how it looks is somebody else's job.
@@ -57,7 +57,12 @@ def narrow(capabilities, device):
 class Hub(object):
     """The set of drivers, addressed as one device layer."""
 
-    def __init__(self, drivers=None, log_func=None):
+    def __init__(self, drivers=None, log_func=None, allow_unlock=False):
+        # Whether this box may open a door. One flag, checked in one place, so
+        # that the menus, the web remote and a sequence are all answered the
+        # same way and none of them can be the exception. Off unless the box
+        # has been told otherwise -- see unlock().
+        self.allow_unlock = bool(allow_unlock)
         self.drivers = {}
         for driver in drivers or []:
             self.drivers[driver.DRIVER_ID] = driver
@@ -222,23 +227,41 @@ class Hub(object):
         return answer
 
     def lock(self, device):
-        """Throw a deadbolt. There is deliberately no counterpart to this.
+        """Throw a deadbolt.
 
-        Paragon Home can lock a door and cannot open one. Not by refusing at
-        the door -- by there being no unlock verb here, in any driver, or
-        anywhere above this. A sequence cannot call one, the web remote cannot
-        ask for one, and a mistake in any of that code cannot become an open
-        front door. Withdrawing the bolt is the key's job, and the keypad's,
-        and the vendor app's.
-
-        Locking is also safe to repeat: a bolt already thrown stays thrown, so
-        nothing here has to know the state to do the right thing.
+        Always allowed, and safe to repeat: a bolt already thrown stays thrown,
+        so nothing here has to know the state to do the right thing. Locking a
+        door is the one action in this add-on that cannot be a mistake.
         """
         driver = self._require(device)
         if CAP_LOCK not in driver.capabilities(device):
             raise ControlError('%s is not a lock' % device.name)
         answer = driver.lock(device)
         self._remember(device, lock='locked')
+        return answer
+
+    def unlock(self, device):
+        """Withdraw a deadbolt, if this box is allowed to.
+
+        The single most consequential thing here, so it is gated in exactly one
+        place: every caller -- the menus, the web remote, a sequence step --
+        arrives at this method, and none of them can be the exception.
+
+        Off unless the box has been told otherwise. Not because the owner has
+        not decided -- they have -- but because a house runs several Kodi boxes
+        off one set of menus, and "this house may unlock the front door" and
+        "the spare room may unlock the front door" are different sentences.
+        Switched on per box under Settings.
+        """
+        driver = self._require(device)
+        if CAP_UNLOCK not in driver.capabilities(device):
+            raise ControlError('%s cannot be unlocked' % device.name)
+        if not self.allow_unlock:
+            raise ControlError(
+                'Unlocking is switched off on this box. Settings -> Devices -> '
+                'Let this box unlock doors.')
+        answer = driver.unlock(device)
+        self._remember(device, lock='unlocked')
         return answer
 
     @staticmethod

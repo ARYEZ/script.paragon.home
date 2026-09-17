@@ -535,14 +535,33 @@ list of model names. Smart Lock, Smart Lock Pro, Lock Ultra, Lock Vision and
 whatever ships next are all recognised without a code change. Nothing else in
 the catalogue carries the word; the Keypad is the nearest miss and does not.
 
-It comes with one deliberate limit:
+**Locking is always allowed. Unlocking is off until a box is told otherwise** —
+Settings → Devices → **Let this box unlock doors**, per box, default off.
 
-> **Paragon Home can lock a door. It cannot open one.**
+Not because the owner has not decided, but because a house runs several Kodi
+boxes off one set of menus and *"this house may unlock the front door"* and
+*"the spare room may unlock the front door"* are different sentences. Switch it
+on where you want it and leave it off everywhere else.
 
-Not "asks first", and not "only from the menus". There is no unlock verb in the
-driver, in the Hub, in a sequence step, or in the web remote's action list. No
-scene, no schedule, no phone on the network and no mistake in this code can
-withdraw a bolt. That stays with your key, your keypad and the SwitchBot app.
+The gate is **one method deep**. Every way in — the menus, the web remote, a
+sequence step — arrives at `Hub.unlock`, and none of them can be the exception.
+Nothing re-implements the check, because two copies of a rule are two chances
+for them to differ.
+
+Two things follow from that, and both are load-bearing:
+
+* **A lock reports no power and no named commands.** Not because those paths
+  would refuse it, but because `turnOn` at this hardware is an open front door
+  and a named command is a free-text field whose vocabulary includes `unlock` —
+  either would go *round* the gate rather than through it. The driver refuses
+  both outright as well.
+* **An unlock is never skipped and never quiet.** It shouts in a sequence
+  listing (`Front Door: UNLOCK`), asks before it acts in both the menus and the
+  page, and the notification is the kind that does not fade.
+
+Where the box is not allowed, the button and the menu row are **absent** rather
+than present and refusing — a control that always says no is one people learn to
+press twice.
 
 The lock takes a short capability set for the same reason — **lock and report,
 nothing else**. No power, so *"switch everything off"* and every scene pass over

@@ -26,7 +26,7 @@ import sequences as sequence_lib
 import scenes as scene_lib
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
                      CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
-                     CAP_STATE,
+                     CAP_STATE, CAP_UNLOCK,
                      ControlError, DEFAULT_DRIVER, TRANSPORT_CLOUD,
                      describe_state)
 
@@ -440,11 +440,15 @@ class ControlPanel(object):
                                      '%s off' % heading)),
                 ])
             if CAP_LOCK in capabilities:
-                # One row, and no counterpart. Paragon Home can lock a door
-                # and cannot open one -- there is no unlock verb anywhere
-                # below this to call.
                 rows.append(('Lock',
                              lambda: self._lock_them(targets, heading)))
+            # Only where the box is allowed to. Absent rather than present and
+            # refusing: a row that says no every time is a row that teaches
+            # people to press it and wait for the notification.
+            if (CAP_UNLOCK in capabilities
+                    and getattr(self.app.controller, 'allow_unlock', False)):
+                rows.append(('Unlock',
+                             lambda: self._unlock_them(targets, heading)))
             if CAP_BRIGHTNESS in capabilities:
                 rows.append(('Brightness...',
                              lambda: self.brightness_menu(targets, heading)))
@@ -2676,6 +2680,31 @@ class ControlPanel(object):
         elif locked:
             utils.notify('%s locked' % heading)
 
+    def _unlock_them(self, targets, heading):
+        """Withdraw the bolts. Named in the question, because a door is a door.
+
+        Asked more plainly than the lock is: "Unlock?" beside "Lock?" on a
+        remote control, half-read from a sofa, is two words a letter apart.
+        """
+        if not _dialog().yesno(
+                utils.ADDON_NAME,
+                'Open %s?\n\nThis withdraws the bolt. Anyone at the door can '
+                'walk in.' % heading):
+            return
+        opened, problems = 0, []
+        for device in targets:
+            try:
+                self.app.controller.unlock(device)
+                opened += 1
+            except Exception as exc:
+                problems.append('%s: %s' % (device.name, exc))
+        if problems:
+            utils.force_notify(problems[0])
+        elif opened:
+            # Forced, not the quiet kind. An unlocked door is worth a
+            # notification that does not fade behind whatever is playing.
+            utils.force_notify('%s UNLOCKED' % heading)
+
     def _step_sequence(self, sequence):
         """Run another sequence's steps here, in place of retyping them."""
         choices = self._nestable(sequence)
@@ -2732,6 +2761,9 @@ class ControlPanel(object):
                            for name in self.app.controller.commands(device))
         if CAP_LOCK in capabilities:
             actions.append(('Lock', sequence_lib.KIND_LOCK, ''))
+        if (CAP_UNLOCK in capabilities
+                and getattr(self.app.controller, 'allow_unlock', False)):
+            actions.append(('Unlock', sequence_lib.KIND_UNLOCK, ''))
         if device is not None and CAP_POSITION in capabilities:
             actions.extend(('Position %d%%' % step,
                             sequence_lib.KIND_POSITION, str(step))

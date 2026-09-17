@@ -53,6 +53,8 @@ the add-on ships a single locale.
                  label="SwitchBot token" default=""/>
         <setting id="switchbot_secret" type="text" option="hidden"
                  label="SwitchBot secret" default=""/>
+        <setting id="allow_unlock" type="bool"
+                 label="Let this box unlock doors" default="false"/>
     </category>
 
     <category label="Playback lighting">
