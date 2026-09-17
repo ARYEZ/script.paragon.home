@@ -510,8 +510,10 @@ scheduler would put a five-second gap where a one-second one was asked for.
 
 While a sequence is waiting:
 
-* **It says so.** The tile on the phone shows the wait and turns teal; the
-  menus say how long is left when you open it.
+* **It says so.** The tile on the phone shows the wait and lights up in the
+  same ember as the channel you are watching in the television half — both
+  mean *this is the one that is going right now*. The menus say how long is
+  left when you open it.
 * **Pressing it stops it** rather than starting it again — the half that has
   already run must not run twice, and one tail must not be owed to two
   openings. On the phone, press the tile; in the menus, answer the prompt.

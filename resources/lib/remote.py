@@ -1739,12 +1739,24 @@ button.tile .sub {
   color: var(--sub);
   margin-top: 5px;
 }
-/* A sequence part way through a long pause. The teal edge is the one colour
-   on the page that is not the ember band, so a waiting sequence reads as a
-   different thing from a resting one at a glance across the room, and its
-   wait is spelled out underneath rather than left to the colour alone. */
-button.tile.waiting::before { background: var(--teal); opacity: 1; }
-button.tile.waiting .sub { color: var(--teal); }
+/* A sequence part way through a long pause: the same filled ember the live
+   channel wears in the television half. The two mean the same thing -- this
+   is the one that is going right now -- so they are drawn the same way, and
+   the lit edge is dropped because the whole tile is the signal. The wait is
+   spelled out underneath rather than left to the colour alone.
+
+   Ink inverted to the same near-black the lit channel card uses. Measured on
+   this gradient rather than assumed: white is 2.9:1 at the orange end, under
+   the floor even for large text, where #1c0a04 is 6.7:1. At the red end the
+   two swap, 4.8:1 against 4.0:1 -- so the sub line is short of 4.5:1 where the
+   gradient is reddest. Nothing fixes that by ink alone: pure black only
+   reaches 4.4:1 there. Left as it is so this reads as one thing with the lit
+   channel card, which makes exactly the same trade, and because the wait is
+   also written in the menus and logged. */
+button.tile.waiting { background-image: var(--hot); }
+button.tile.waiting::before { display: none; }
+button.tile.waiting,
+button.tile.waiting .sub { color: #1c0a04; }
 
 input[type=password] {
   width: 100%;
@@ -2813,7 +2825,8 @@ function renderSequences() {
     var waiting = sequence.waiting || 0;
     /* A sequence in the middle of a long pause says what it is waiting on and
        stops on a press instead of starting again -- pressing it twice must not
-       leave one tail owed to two openings. */
+       leave one tail owed to two openings. It takes the lit ember the live
+       channel wears, because it means the same thing. */
     var sub = waiting
       ? 'Waiting ' + saidWait(waiting) + ' - press to stop'
       : sequence.steps + ' step(s) - ' + sequence.schedule;

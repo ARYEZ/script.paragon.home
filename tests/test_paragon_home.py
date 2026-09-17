@@ -12172,6 +12172,31 @@ class TestWebRemote(unittest.TestCase):
         self.assertIsNotNone(self.app.pending_for('Coffee'),
                              'the phone slept through the brew')
 
+    def test_a_waiting_sequence_is_lit_like_the_channel_that_is_on(self):
+        """Both mean "this is the one that is going", so both are drawn alike.
+
+        Compared against each other rather than against a colour written down
+        here: the point is that the two agree, not that either is orange today.
+        """
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        def fill(selector):
+            found = re.search(
+                re.escape(selector) + r'\s*\{[^}]*background-image:\s*([^;]+);',
+                page)
+            self.assertIsNotNone(found, 'no fill for %s' % selector)
+            return found.group(1).strip()
+
+        self.assertEqual(fill('button.tile.waiting'),
+                         fill('#tvPanel .card.lit'),
+                         'the waiting tile and the live channel have drifted')
+        # And the lit edge is dropped on both, because the whole tile is the
+        # signal once it is filled.
+        self.assertIn('button.tile.waiting::before { display: none; }', page)
+
     def test_a_waiting_sequence_says_what_it_is_waiting_on(self):
         """So the phone can show a brew in progress rather than a resting tile."""
         import sequences as sequence_lib
