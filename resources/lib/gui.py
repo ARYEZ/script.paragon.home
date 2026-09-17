@@ -1816,6 +1816,9 @@ class ControlPanel(object):
                              lambda: self._show_used_by(sequence)))
             rows.append(('Runs: %s' % sequence_lib.describe_schedule(sequence),
                          lambda: self.schedule_sequence(sequence)))
+            rows.append(('Skip what is already done: %s'
+                         % ('yes' if sequence.get('skip_done') else 'no'),
+                         lambda: self._toggle_skip_done(sequence)))
             rows.append(('Run it now', lambda: self.run_sequence(sequence)))
             rows.append(('Rename', lambda: self._rename_sequence(sequence)))
             rows.append(('Duplicate...',
@@ -1932,6 +1935,29 @@ class ControlPanel(object):
             utils.notify('Copied to "%s"' % name)
         self.edit_sequence(copied)
         return False
+
+    def _toggle_skip_done(self, sequence):
+        """Ask the devices where they are, and leave alone what is already there.
+
+        Off by default, and said plainly when it is turned on, because it rests
+        on devices telling the truth about themselves. Some do not -- that is
+        what Check status reporting exists to find out -- and a blind left open
+        because a plug lied is worse than a motor running for two seconds.
+        """
+        turning_on = not sequence.get('skip_done')
+        if turning_on and not _dialog().yesno(
+                utils.ADDON_NAME,
+                'Before each step, ask the device where it is, and skip the '
+                'step if it is already there.\n\n'
+                'This asks over the network, so the sequence starts a moment '
+                'later, and it trusts what each device reports.\n\n'
+                'Turn it on for "%s"?' % sequence['name']):
+            return
+        sequence['skip_done'] = turning_on
+        self.app.save_sequence(sequence)
+        utils.notify('%s: %s already-done steps'
+                     % (sequence['name'],
+                        'skipping' if turning_on else 'no longer skipping'))
 
     def _rename_sequence(self, sequence):
         name = _dialog().input('Sequence name', sequence['name'])

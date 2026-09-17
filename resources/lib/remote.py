@@ -607,7 +607,7 @@ def perform(app, action, params, sleep_func=None, on_step=None):
                         name,
                         sequence_lib.describe_wait(max(0, waiting['at'] - time.time())))}
         return {'ok': bool(ran),
-                'message': name if ran else '%s has no steps yet' % name}
+                'message': name if ran else '%s had nothing to do' % name}
 
     if action == 'cancel_sequence':
         name = params.get('name') or params.get('value') or ''

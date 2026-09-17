@@ -865,10 +865,21 @@ class ParagonHome(object):
         # wait behave the way editing the host already does.
         flat = dict(sequence,
                     steps=sequence_lib.expand(sequence, self.sequences))
+
+        skipped = []
+        states = self.states_for_skipping(flat) \
+            if sequence.get('skip_done') else None
+
+        def _skipped(index, step):
+            skipped.append(index)
+            # What the step would have reached is already where it wants it, so
+            # nothing about the room changed and the reading still stands.
+
         done, errors = sequence_lib.run(self, flat, log_func=utils.log,
                                       sleep_func=sleep_func, on_step=on_step,
                                       start=start,
-                                      defer=_defer if defer else None)
+                                      defer=_defer if defer else None,
+                                      states=states, on_skip=_skipped)
         if announce:
             if waited:
                 # Said out loud because the sequence is not over and the room
@@ -878,15 +889,56 @@ class ParagonHome(object):
                              % (name,
                                 sequence_lib.describe_wait(waited[0][1])))
             elif done and not errors:
-                utils.notify('%s: %d step(s) done' % (name, done))
+                utils.notify('%s: %d step(s) done%s'
+                             % (name, done, self._also_skipped(skipped)))
             elif done:
                 utils.force_notify('%s: %d done, %d failed'
                                    % (name, done, len(errors)))
             elif errors:
                 utils.force_notify(errors[0])
+            elif skipped:
+                # The whole point of asking: everything it would have done was
+                # already done, so say that rather than "no steps yet".
+                utils.notify('%s: nothing to do' % name)
             else:
                 utils.force_notify('%s has no steps yet' % name)
-        return done > 0
+        # Skipped counts as having run. A sequence that found everything
+        # already done did exactly what it was asked, and a caller told
+        # otherwise says "has no steps yet" about a sequence full of steps.
+        return done > 0 or bool(skipped)
+
+    @staticmethod
+    def _also_skipped(skipped):
+        if not skipped:
+            return ''
+        return ', %d already done' % len(skipped)
+
+    def states_for_skipping(self, sequence):
+        """What every device this sequence could skip over is doing now.
+
+        One read before anything runs, batched per driver by the Hub, rather
+        than a read per step: five blinds is five cloud round trips either way,
+        but one pass keeps them together and out of the middle of the run.
+
+        Only the devices of steps that could ever be skipped. A step that fires
+        an infrared code or applies a scene can never be skipped, so reading
+        what its devices are doing would be a request spent on nothing.
+        """
+        devices = {}
+        for step in sequence.get('steps') or []:
+            if not sequence_lib.checkable(step):
+                continue
+            for device in sequence_lib.resolve_targets(step, self.devices):
+                devices[device.device_id] = device
+        if not devices:
+            return {}
+        try:
+            return self.controller.get_states(list(devices.values()))
+        except Exception as exc:
+            # Nothing is skipped when nothing is known, which is the safe way
+            # round: the sequence runs in full, as it did before.
+            utils.log('Could not read what is already done: %s' % exc)
+            return {}
 
     # -- sequences part way through a long pause ----------------------------
     #

@@ -2073,6 +2073,285 @@ class TestNestedSequences(unittest.TestCase):
         self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Alpha phase 1'])
 
 
+class TestSkippingWhatIsDone(unittest.TestCase):
+    """Closing blinds that are already closed is a motor running for nothing."""
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.sequences = sequences
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self, skip_done=True):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {'power', 'state', 'position'}
+        app.controller = self.recorder
+        app._devices = [
+            Device('BLIND#1', name='Blind One', driver='switchbot'),
+            Device('BLIND#2', name='Blind Two', driver='switchbot'),
+            Device('WP9ABC#1', name='Amp', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+        ]
+        app._scenes = []
+        app._sequences = [self.closing(skip_done)]
+        return app
+
+    def closing(self, skip_done=True):
+        return self.sequences.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0'},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ], skip_done=skip_done)
+
+    def shut(self, *device_ids):
+        for device_id in device_ids:
+            self.recorder.states[device_id] = {'position': 0}
+
+    def open_at(self, device_id, percent):
+        self.recorder.states[device_id] = {'position': percent}
+
+    # -- the comparison itself ---------------------------------------------
+
+    def test_a_blind_where_it_was_asked_to_be_is_already_there(self):
+        step = self.sequences.normalise_step(
+            {'kind': 'position', 'target': 'Blind One', 'action': '0'})
+
+        self.assertIs(self.sequences.already_there(step, {'position': 0}), True)
+        self.assertIs(self.sequences.already_there(step, {'position': 60}),
+                      False)
+
+    def test_a_blind_a_percent_or_two_out_counts_as_there(self):
+        """A cover told to shut reports 0 most of the time and 1 sometimes."""
+        step = self.sequences.normalise_step(
+            {'kind': 'position', 'target': 'Blind One', 'action': '0'})
+        edge = self.sequences.POSITION_TOLERANCE
+
+        self.assertIs(self.sequences.already_there(step, {'position': edge}),
+                      True)
+        self.assertIs(self.sequences.already_there(step, {'position': edge + 1}),
+                      False)
+
+    def test_a_plug_already_off_is_already_there(self):
+        step = self.sequences.normalise_step(
+            {'kind': 'power', 'target': 'Amp', 'action': 'off'})
+
+        self.assertIs(self.sequences.already_there(step, {'power': 'off'}), True)
+        self.assertIs(self.sequences.already_there(step, {'power': 'on'}), False)
+
+    def test_what_cannot_be_answered_is_never_a_yes(self):
+        """A blind left open because a bulb lied is the thing to avoid."""
+        cases = [
+            # A toggle is asking for the other one, whatever it is now.
+            ({'kind': 'power', 'target': 'Amp', 'action': 'toggle'},
+             {'power': 'off'}),
+            # Infrared is never confirmable.
+            ({'kind': 'command', 'target': 'Amp', 'action': 'TV power'},
+             {'power': 'off'}),
+            # A scene is a judgement, not a comparison.
+            ({'kind': 'scene', 'target': 'All Off'}, {'power': 'off'}),
+            # Nothing was read.
+            ({'kind': 'power', 'target': 'Amp', 'action': 'off'}, None),
+            # Read, but says nothing about power.
+            ({'kind': 'power', 'target': 'Amp', 'action': 'off'},
+             {'battery': 90}),
+            # A position step against a device that reports no position.
+            ({'kind': 'position', 'target': 'Blind One', 'action': '0'},
+             {'power': 'off'}),
+        ]
+        for raw, state in cases:
+            step = self.sequences.normalise_step(raw)
+            self.assertIsNone(self.sequences.already_there(step, state),
+                              'answered for %r against %r' % (raw, state))
+
+    def test_only_a_step_that_could_be_skipped_is_checkable(self):
+        def step(raw):
+            return self.sequences.normalise_step(raw)
+
+        self.assertTrue(self.sequences.checkable(
+            step({'kind': 'position', 'target': 'B', 'action': '0'})))
+        self.assertTrue(self.sequences.checkable(
+            step({'kind': 'power', 'target': 'B', 'action': 'off'})))
+        self.assertFalse(self.sequences.checkable(
+            step({'kind': 'power', 'target': 'B', 'action': 'toggle'})))
+        self.assertFalse(self.sequences.checkable(
+            step({'kind': 'scene', 'target': 'All Off'})))
+        self.assertFalse(self.sequences.checkable(
+            step({'kind': 'command', 'target': 'B', 'action': 'TV power'})))
+
+    # -- running with it on ------------------------------------------------
+
+    def test_blinds_already_shut_are_left_alone(self):
+        app = self.app()
+        self.shut('BLIND#1', 'BLIND#2')
+
+        ran = app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual([c for c in self.recorder.calls
+                          if c[0] == 'position'], [],
+                         'ran the motors on blinds that were already shut')
+        self.assertTrue(ran, 'reported as though it had no steps')
+
+    def test_the_one_still_open_is_the_one_that_moves(self):
+        app = self.app()
+        self.shut('BLIND#1')
+        self.open_at('BLIND#2', 80)
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual([c[:3] for c in self.recorder.calls
+                          if c[0] == 'position'],
+                         [('position', 'BLIND#2', 0)])
+
+    def test_a_blind_that_will_not_say_is_closed_anyway(self):
+        """Not knowing is not the same as knowing it is shut."""
+        app = self.app()
+        self.shut('BLIND#1')
+        # BLIND#2 answers nothing at all.
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual([c[:3] for c in self.recorder.calls
+                          if c[0] == 'position'],
+                         [('position', 'BLIND#2', 0)])
+
+    def test_one_step_over_several_devices_narrows_to_what_is_left(self):
+        app = self.app()
+        app._sequences = [self.sequences.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot',
+             'target': self.sequences.TARGET_ALL, 'action': '0'},
+        ], skip_done=True)]
+        self.shut('BLIND#1')
+        self.open_at('BLIND#2', 55)
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual([c[:3] for c in self.recorder.calls
+                          if c[0] == 'position'],
+                         [('position', 'BLIND#2', 0)])
+
+    def test_a_skipped_step_does_not_pause_after_itself(self):
+        """The pause is there to let an action land, and none happened."""
+        app = self.app()
+        app._sequences = [self.sequences.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0', 'pause': 8},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ], skip_done=True)]
+        self.shut('BLIND#1')
+        self.open_at('BLIND#2', 90)
+        slept = []
+
+        app.run_sequence(app.sequence_by_name('Blinds Down'), announce=False,
+                         sleep_func=slept.append)
+
+        self.assertEqual(slept, [], 'waited out a step that did not happen')
+
+    def test_a_skipped_step_is_not_counted_as_done(self):
+        app = self.app()
+        self.shut('BLIND#1')
+        self.open_at('BLIND#2', 90)
+        flat = app.sequence_by_name('Blinds Down')
+
+        done, errors = self.sequences.run(
+            app, flat, states=self.recorder.states)
+
+        self.assertEqual((done, errors), (1, []))
+
+    # -- running with it off -----------------------------------------------
+
+    def test_with_it_off_nothing_is_read_and_everything_runs(self):
+        """The reading costs a round trip per device; do not spend it unasked."""
+        app = self.app(skip_done=False)
+        self.shut('BLIND#1', 'BLIND#2')
+        asked = []
+        real = self.recorder.get_states
+        self.recorder.get_states = lambda devices, timeout=3.0: (
+            asked.append(list(devices)) or real(devices, timeout))
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual(asked, [], 'read the devices without being asked to')
+        self.assertEqual(len([c for c in self.recorder.calls
+                              if c[0] == 'position']), 2)
+
+    def test_only_the_devices_of_skippable_steps_are_read(self):
+        """A request spent asking about an infrared blaster buys nothing."""
+        app = self.app()
+        app._devices.append(Device('EE:FF', name='Blaster',
+                                   driver='broadlink', lan=True))
+        sequence = self.sequences.make_sequence('Mixed', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0'},
+            {'kind': 'command', 'driver': 'broadlink', 'target': 'Blaster',
+             'action': 'TV power'},
+        ], skip_done=True)
+
+        asked = app.states_for_skipping(sequence)
+
+        self.assertEqual(sorted(asked), ['BLIND#1'])
+
+    def test_a_reading_that_fails_leaves_the_sequence_running_in_full(self):
+        app = self.app()
+        self.shut('BLIND#1', 'BLIND#2')
+
+        def explode(devices, timeout=3.0):
+            raise RuntimeError('the cloud is down')
+        self.recorder.get_states = explode
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        self.assertEqual(len([c for c in self.recorder.calls
+                              if c[0] == 'position']), 2,
+                         'a failed reading stopped the sequence doing its job')
+
+    # -- what it says ------------------------------------------------------
+
+    def test_the_flag_survives_being_saved_and_read_back(self):
+        app = self.app()
+        app.save_sequence(self.closing(skip_done=True))
+
+        from paragon_home import ParagonHome
+        after_restart = ParagonHome()
+
+        self.assertTrue(
+            after_restart.sequence_by_name('Blinds Down')['skip_done'],
+            'the flag was dropped on the way to disk and back')
+
+    def test_a_sequence_with_nothing_to_do_says_so(self):
+        app = self.app()
+        self.shut('BLIND#1', 'BLIND#2')
+        xbmcgui.reset()
+
+        app.run_sequence_by_name('Blinds Down', announce=True)
+
+        said = ' '.join(str(note) for note in xbmcgui.NOTIFICATIONS)
+        self.assertIn('nothing to do', said.lower())
+
+    def test_a_partly_skipped_sequence_says_how_much_it_left_alone(self):
+        app = self.app()
+        self.shut('BLIND#1')
+        self.open_at('BLIND#2', 90)
+        xbmcgui.reset()
+
+        app.run_sequence_by_name('Blinds Down', announce=True)
+
+        said = ' '.join(str(note) for note in xbmcgui.NOTIFICATIONS)
+        self.assertIn('1 already done', said)
+
+
 class TestLongPauses(unittest.TestCase):
     """A twelve-minute brew must not be twelve minutes nothing else can run.
 

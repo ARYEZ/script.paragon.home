@@ -80,6 +80,11 @@ MAX_PAUSE = 3600
 MAX_NESTING = 5
 MAX_EXPANDED_STEPS = 200
 
+# How near a blind counts as already being where a step wants it. A cover told
+# to shut reports 0 most of the time and 1 or 2 sometimes, and running the
+# motor to take two percent off is the noise this exists to avoid.
+POSITION_TOLERANCE = 2
+
 # A pause longer than this is not waited out in place. The sequence writes down
 # where it got to and returns, and the service carries it on when the wait is
 # over -- so a coffee maker brewing for twelve minutes is twelve minutes this
@@ -285,10 +290,12 @@ def empty_step():
             'pause': 0}
 
 
-def make_sequence(name, steps=None, time=None, days=None, phase=None):
+def make_sequence(name, steps=None, time=None, days=None, phase=None,
+                  skip_done=False):
     """A sequence with its full complement of slots, however few are filled."""
     return normalise({'name': name, 'steps': list(steps or []),
-                      'time': time, 'days': days, 'phase': phase})
+                      'time': time, 'days': days, 'phase': phase,
+                      'skip_done': skip_done})
 
 
 def _clean_int(value, low, high, default=0):
@@ -413,6 +420,7 @@ def normalise(raw):
             'time': parse_time(raw.get('time')),
             'days': clean_days(raw.get('days')),
             'phase': clean_phase(raw.get('phase')),
+            'skip_done': bool(raw.get('skip_done')),
             'steps': steps}
 
 
@@ -649,6 +657,69 @@ def work_left(steps, index):
     return False
 
 
+def already_there(step, state):
+    """Whether `state` says this step's device is already as the step wants.
+
+    None means the question cannot be answered, which is not the same as no:
+    a device that does not report, a state that failed to read, an infrared
+    command that nothing can confirm, a toggle that has no target state at all.
+    Everything that cannot be answered is done rather than skipped, because a
+    blind left open because a bulb lied is worse than a motor running for two
+    seconds.
+    """
+    if not isinstance(state, dict):
+        return None
+
+    kind = step.get('kind')
+    if kind == KIND_POSITION:
+        where = state.get('position')
+        if not isinstance(where, (int, float)) or isinstance(where, bool):
+            return None
+        try:
+            wanted = int(step.get('action'))
+        except (TypeError, ValueError):
+            return None
+        return abs(float(where) - wanted) <= POSITION_TOLERANCE
+
+    if kind == KIND_POWER:
+        action = step.get('action')
+        if action not in (ACTION_ON, ACTION_OFF):
+            # A toggle is asking for the other one, whatever it is now.
+            return None
+        power = state.get('power')
+        if power not in (ACTION_ON, ACTION_OFF):
+            return None
+        return power == action
+
+    # A scene sets several lights to a colour and a brightness; "already there"
+    # is a judgement rather than a comparison, and getting it wrong leaves the
+    # room wrong. Infrared is never confirmable at all.
+    return None
+
+
+def still_needed(step, targets, states):
+    """The targets a step still has work to do on.
+
+    `states` maps device id to what it last said, or None where nothing is
+    known. A device that cannot be asked is always included: see already_there.
+    """
+    if not states:
+        return list(targets)
+    remaining = []
+    for device in targets:
+        if already_there(step, states.get(device.device_id)) is not True:
+            remaining.append(device)
+    return remaining
+
+
+def checkable(step):
+    """Whether this kind of step could ever be skipped as already done."""
+    if step.get('kind') == KIND_POSITION:
+        return True
+    return (step.get('kind') == KIND_POWER
+            and step.get('action') in (ACTION_ON, ACTION_OFF))
+
+
 def resolve_targets(step, devices):
     """Which devices a step acts on. Empty means the step cannot run.
 
@@ -671,7 +742,7 @@ def resolve_targets(step, devices):
 
 
 def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
-        start=0, defer=None):
+        start=0, defer=None, states=None, on_skip=None):
     """Run one sequence from `start` on. Returns (steps done, [failures]).
 
     One step failing does not stop the rest. A sequence is a list of separate
@@ -688,6 +759,12 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
     `start` skips the steps already done. It is an index into the whole slot
     list, not a count of the filled ones, so it survives an empty slot in the
     middle.
+
+    Pass `states` -- {device id: what it last said} -- to have a step leave
+    alone whatever is already as it wants it. A step with nothing left to do is
+    not done, it is skipped: `on_skip` hears about it, it does not count toward
+    the total, and its pause does not happen either, because that pause is
+    there to let an action land and no action happened.
     """
     from devices import ControlError
 
@@ -707,7 +784,13 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
             break
 
         try:
-            _run_step(app, step)
+            if _run_step(app, step, states) is False:
+                if on_skip is not None:
+                    on_skip(index, step)
+                log('Sequence "%s" step %d: already done'
+                    % (sequence.get('name'), index + 1))
+                # No pause either: it is there to let an action land.
+                continue
             done += 1
         except ControlError as exc:
             errors.append('Step %d: %s' % (index + 1, exc))
@@ -741,8 +824,12 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
     return done, errors
 
 
-def _run_step(app, step):
-    """Carry out one step, raising ControlError if it cannot be done."""
+def _run_step(app, step, states=None):
+    """Carry out one step. False if there was nothing left to do.
+
+    Raises ControlError if it cannot be done. False is not a failure: it is the
+    blind that was already shut, and the caller counts it apart from both.
+    """
     from devices import ControlError
 
     kind = step.get('kind')
@@ -768,6 +855,13 @@ def _run_step(app, step):
     targets = resolve_targets(step, app.devices)
     if not targets:
         raise ControlError('Nothing matches "%s"' % step.get('target'))
+
+    # Narrowed rather than all-or-nothing: with four plugs already off and one
+    # on, the step is for that one. An empty list is the whole step skipped.
+    wanted = still_needed(step, targets, states)
+    if not wanted:
+        return False
+    targets = wanted
 
     if kind == KIND_POWER:
         action = step.get('action')

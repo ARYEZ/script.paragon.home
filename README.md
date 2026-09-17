@@ -485,6 +485,44 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### Skipping what is already done
+
+**Skip what is already done** in the sequence editor, off by default. With it
+on, the sequence asks each device where it is before it starts, and leaves alone
+anything already as a step wants it. Press *Blinds Down* with the blinds already
+shut and nothing moves; the notification says **nothing to do**.
+
+It narrows rather than skipping whole steps. One step aimed at all five blinds
+with four already shut moves the fifth, and only the fifth.
+
+Only two kinds of step can be skipped, because only two can be checked:
+
+| Step | Skippable | Why |
+|---|---|---|
+| Blind to a percentage | yes | it reports where it is (±2%) |
+| Plug or light **On** / **Off** | yes | it reports on or off |
+| **Toggle** | no | asking for the other one, whatever it is now |
+| Scene | no | several lights, a colour and a brightness — a judgement, not a comparison |
+| Infrared command | no | a blaster never hears anything back |
+
+**Anything that cannot be answered is done, not skipped.** A device that does
+not report, a reading that failed, a cloud that is down — all of them run the
+step. A blind left open because a plug lied is worse than a motor running for
+two seconds.
+
+Two costs worth knowing before you turn it on:
+
+* **It asks over the network.** One read per device, batched per driver, before
+  the first step. On SwitchBot that is a cloud round trip each, so the sequence
+  starts a moment later than it used to. The reads are only spent on devices of
+  steps that could be skipped — nothing is asked about a blaster.
+* **It trusts what each device reports.** Some hardware does not report
+  honestly; **Check status reporting** under a device's menu is there to find
+  out which. Off by default for that reason.
+
+A skipped step does not pause after itself either — that pause is there to let
+an action land, and no action happened.
+
 ### A sequence can run another sequence
 
 A step can name another sequence instead of a device, and its steps run in that
