@@ -670,11 +670,34 @@ def _device_entry(app, device, state):
         'power': None,
         'brightness': None,
         'position': None,
+        # Where these numbers came from: 'read' is what the device said when it
+        # was last asked, 'told' is what we last set it to and never heard back
+        # about, absent is nothing known at all. The page says which, because a
+        # number with no provenance shown is a number read as fact.
+        'from': None,
     }
     if state:
         entry['power'] = state.get('power')
         entry['brightness'] = state.get('brightness')
         entry['position'] = state.get('position')
+        entry['from'] = 'read'
+        if any(entry[key] is not None
+               for key in ('power', 'brightness', 'position')):
+            return entry
+
+    # Nothing was read, or what was read said nothing useful. What we last told
+    # it is better than a made-up number and much better than a blank card --
+    # but it is labelled, because it is what we said rather than what it is.
+    told = getattr(app.controller, 'last_told', None) or {}
+    remembered = told.get(device.device_id)
+    if not remembered:
+        return entry
+    for key in ('power', 'brightness', 'position'):
+        if entry.get(key) is None and remembered.get(key) is not None:
+            entry[key] = remembered[key]
+            entry['from'] = 'told'
+    if entry['from'] == 'told':
+        entry['told_at'] = remembered.get('at')
     return entry
 
 
@@ -1753,6 +1776,19 @@ button.tile .sub {
    reaches 4.4:1 there. Left as it is so this reads as one thing with the lit
    channel card, which makes exactly the same trade, and because the wait is
    also written in the menus and logged. */
+/* The marker on a number we set rather than read. Quiet enough not to compete
+   with the number, present enough to stop it reading as measured fact. */
+.stat .told {
+  font-family: var(--display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-left: 5px;
+  vertical-align: 2px;
+}
+
 button.tile.waiting { background-image: var(--hot); }
 button.tile.waiting::before { display: none; }
 button.tile.waiting,
@@ -2806,6 +2842,26 @@ function tile(label, sub, handler) {
   return node;
 }
 
+/* Say where a number came from. A reading is the device's own answer and
+   needs no qualifier. "Told" is what we last set it to and never heard back
+   about -- true of every blind and bulb until somebody pulls to refresh -- and
+   showing that as though the device had said it is how a made-up 60% came to
+   look like a fact. Nothing is marked when nothing is known: the readout
+   already says "--". */
+function markSource(node, source, when) {
+  if (source !== 'told') { return; }
+  var note = el('span', 'told', ' set');
+  if (when) {
+    var at = new Date(when * 1000);
+    note.title = 'What Paragon Home last set, at '
+      + at.toLocaleTimeString() + '. The device has not been asked since.';
+  } else {
+    note.title = 'What Paragon Home last set. The device has not been asked '
+      + 'since.';
+  }
+  node.appendChild(note);
+}
+
 function renderScenes() {
   var box = document.getElementById('scenes');
   box.textContent = '';
@@ -2920,11 +2976,18 @@ function deviceCard(device) {
   card.appendChild(controls);
 
   if (caps.indexOf('brightness') >= 0) {
-    var start = device.brightness || 60;
+    /* Unknown is shown as unknown. It used to sit at 60 whatever the bulb was
+       doing, which is a number nobody chose being read across the room as the
+       brightness -- and it never moved, because state is only read when you
+       pull to refresh. The slider still has to stand somewhere; the readout is
+       what says whether that somewhere means anything. */
+    var known = device.brightness !== null && device.brightness !== undefined;
+    var start = known ? device.brightness : 60;
     var dim = el('div', 'dim');
     var readout = el('span', 'stat');
-    readout.appendChild(document.createTextNode(String(start)));
-    readout.appendChild(el('span', 'unit', '%'));
+    readout.appendChild(document.createTextNode(known ? String(start) : '--'));
+    readout.appendChild(el('span', 'unit', known ? '%' : ''));
+    markSource(readout, known && device.from, device.told_at);
 
     var slider = el('input');
     slider.type = 'range';
@@ -2947,12 +3010,14 @@ function deviceCard(device) {
   }
 
   if (caps.indexOf('position') >= 0) {
-    var where = (device.position === null || device.position === undefined)
-      ? 50 : device.position;
+    /* Same as brightness: it used to read 50 on every blind in the house. */
+    var placed = device.position !== null && device.position !== undefined;
+    var where = placed ? device.position : 50;
     var openness = el('div', 'dim');
     var mark = el('span', 'stat');
-    mark.appendChild(document.createTextNode(String(where)));
-    mark.appendChild(el('span', 'unit', '%'));
+    mark.appendChild(document.createTextNode(placed ? String(where) : '--'));
+    mark.appendChild(el('span', 'unit', placed ? '%' : ''));
+    markSource(mark, placed && device.from, device.told_at);
 
     var travel = el('input');
     travel.type = 'range';

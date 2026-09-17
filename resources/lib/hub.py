@@ -29,6 +29,8 @@ for something with no colour -- a plug, an IR blaster -- implements the verbs
 it has and reports the rest as absent.
 """
 
+import time
+
 from devices import (CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
                      ControlError, DEFAULT_DRIVER)
 
@@ -60,6 +62,29 @@ class Hub(object):
         for driver in drivers or []:
             self.drivers[driver.DRIVER_ID] = driver
         self._log = log_func or (lambda message: None)
+        # What we last told each device, by device id, with the time we said
+        # it. Kept here because this is the one thing every write passes
+        # through -- the menus, the web remote, scenes and sequences all
+        # arrive at these verbs.
+        #
+        # It is what we said, not what the device is doing, and the two are
+        # different things: a blind can be pulled by hand, moved from the
+        # SwitchBot app, or simply not have heard us. So it is shown as what
+        # it is and never used to decide that a step can be skipped -- see
+        # already_there in sequences.py, which takes a reading or nothing.
+        #
+        # In memory rather than on disk, deliberately. After a restart we
+        # genuinely do not know what happened while Kodi was off, and a
+        # remembered position surviving that would be a guess wearing the
+        # clothes of a fact.
+        self.last_told = {}
+
+    def _remember(self, device, **what):
+        """Note what a device was just told, after it accepted it."""
+        entry = self.last_told.setdefault(device.device_id, {})
+        entry.update(what)
+        entry['at'] = time.time()
+        return entry
 
     # -- driver lookup -----------------------------------------------------
 
@@ -158,12 +183,19 @@ class Hub(object):
     # -- state verbs -------------------------------------------------------
 
     def turn(self, device, on):
-        return self._require(device).turn(device, on)
+        answer = self._require(device).turn(device, on)
+        # After the driver, never before: a write that raised is not something
+        # the device was told, and remembering it would be remembering a
+        # failure as a success.
+        self._remember(device, power='on' if on else 'off')
+        return answer
 
     def set_brightness(self, device, percent):
         if self._look_only(device):
             return None
-        return self._require(device).set_brightness(device, percent)
+        answer = self._require(device).set_brightness(device, percent)
+        self._remember(device, brightness=percent)
+        return answer
 
     def set_color(self, device, red, green, blue):
         if self._look_only(device):
@@ -185,7 +217,9 @@ class Hub(object):
         driver = self._require(device)
         if CAP_POSITION not in driver.capabilities(device):
             raise ControlError('%s cannot be opened or closed' % device.name)
-        return driver.set_position(device, percent)
+        answer = driver.set_position(device, percent)
+        self._remember(device, position=percent)
+        return answer
 
     @staticmethod
     def _look_only(device):

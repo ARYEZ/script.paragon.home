@@ -47,8 +47,8 @@ import govee_cloud  # noqa: E402
 import govee_lan  # noqa: E402
 import scenes as scene_lib  # noqa: E402
 from devices import (CAP_BRIGHTNESS, CAP_COLOR,  # noqa: E402
-                     CAP_COLOR_TEMP, CAP_COMMANDS, CAP_POWER, CAP_STATE,
-                     ControlError, Device, GoveeController)
+                     CAP_COLOR_TEMP, CAP_COMMANDS, CAP_POSITION, CAP_POWER,
+                     CAP_STATE, ControlError, Device, GoveeController)
 
 PROFILE = xbmcaddon._PROFILE
 
@@ -2073,6 +2073,134 @@ class TestNestedSequences(unittest.TestCase):
         self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Alpha phase 1'])
 
 
+class TestWhatWeLastTold(unittest.TestCase):
+    """The page showed 60% on every bulb and 50% on every blind.
+
+    Not stale data -- invented data. State is only read when somebody pulls to
+    refresh, so until then the sliders stood at a number nobody had chosen and
+    it read across the room as the brightness.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'hub'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def hub(self):
+        import hub as hub_lib
+
+        self.driver = RecordingDriver()
+        return hub_lib.Hub([self.driver])
+
+    # -- the Hub remembering -----------------------------------------------
+
+    def test_a_blind_told_to_shut_is_remembered_as_shut(self):
+        hub = self.hub()
+        blind = Device('BLIND#1', name='Blind One', driver='recorder')
+
+        hub.set_position(blind, 0)
+
+        self.assertEqual(hub.last_told['BLIND#1']['position'], 0)
+        self.assertAlmostEqual(hub.last_told['BLIND#1']['at'], time.time(),
+                               delta=5)
+
+    def test_a_plug_told_to_switch_is_remembered_either_way(self):
+        hub = self.hub()
+        plug = Device('PLUG#1', name='Amp', driver='recorder')
+
+        hub.turn(plug, True)
+        self.assertEqual(hub.last_told['PLUG#1']['power'], 'on')
+        hub.turn(plug, False)
+        self.assertEqual(hub.last_told['PLUG#1']['power'], 'off')
+
+    def test_a_brightness_is_remembered(self):
+        hub = self.hub()
+        bulb = Device('BULB#1', name='Lamp', driver='recorder')
+
+        hub.set_brightness(bulb, 35)
+
+        self.assertEqual(hub.last_told['BULB#1']['brightness'], 35)
+
+    def test_a_write_that_failed_is_not_remembered_as_having_happened(self):
+        """Remembering a failure as a success is the one thing it must not do."""
+        hub = self.hub()
+        blind = Device('BLIND#1', name='Blind One', driver='recorder')
+        self.driver.fail = True
+
+        self.assertRaises(ControlError, hub.set_position, blind, 0)
+        self.assertNotIn('BLIND#1', hub.last_told)
+
+    def test_the_latest_word_replaces_the_one_before_it(self):
+        hub = self.hub()
+        blind = Device('BLIND#1', name='Blind One', driver='recorder')
+
+        hub.set_position(blind, 0)
+        hub.set_position(blind, 100)
+
+        self.assertEqual(hub.last_told['BLIND#1']['position'], 100)
+
+    def test_one_device_keeps_several_kinds_of_word_at_once(self):
+        hub = self.hub()
+        bulb = Device('BULB#1', name='Lamp', driver='recorder')
+
+        hub.turn(bulb, True)
+        hub.set_brightness(bulb, 20)
+
+        self.assertEqual(hub.last_told['BULB#1']['power'], 'on')
+        self.assertEqual(hub.last_told['BULB#1']['brightness'], 20)
+
+
+class RecordingDriver(object):
+    """The smallest driver the Hub will talk to, for the remembering tests."""
+
+    DRIVER_ID = 'recorder'
+    DRIVER_LABEL = 'Recorder'
+
+    def __init__(self):
+        self.fail = False
+        self.calls = []
+
+    @staticmethod
+    def capabilities(device):
+        return set([CAP_POWER, CAP_BRIGHTNESS, CAP_POSITION, CAP_STATE])
+
+    @staticmethod
+    def commands(device):
+        return []
+
+    def _do(self, name, device, value):
+        if self.fail:
+            raise ControlError('%s would not take it' % device.name)
+        self.calls.append((name, device.device_id, value))
+
+    def turn(self, device, on):
+        self._do('turn', device, on)
+
+    def set_brightness(self, device, percent):
+        self._do('brightness', device, percent)
+
+    def set_position(self, device, percent):
+        self._do('position', device, percent)
+
+    def set_color(self, device, r, g, b):
+        self._do('color', device, (r, g, b))
+
+    def set_color_temp(self, device, kelvin):
+        self._do('temp', device, kelvin)
+
+    def get_state(self, device):
+        return None
+
+    def get_states(self, devices, timeout=3.0):
+        return dict((d.device_id, None) for d in devices)
+
+
 class TestSkippingWhatIsDone(unittest.TestCase):
     """Closing blinds that are already closed is a motor running for nothing."""
 
@@ -2316,6 +2444,31 @@ class TestSkippingWhatIsDone(unittest.TestCase):
         self.assertEqual(len([c for c in self.recorder.calls
                               if c[0] == 'position']), 2,
                          'a failed reading stopped the sequence doing its job')
+
+    def test_a_blind_that_will_not_answer_is_named_with_what_we_told_it(self):
+        """"It did not answer" alone leaves nothing to go on."""
+        app = self.app()
+        self.shut('BLIND#1')
+        app.controller.last_told = {
+            'BLIND#2': {'position': 0, 'at': time.time()}}
+        del xbmc.LOG_LINES[:]
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        logged = '\n'.join(message for _level, message in xbmc.LOG_LINES)
+        self.assertIn('Could not read Blind Two', logged)
+        self.assertIn('position 0', logged)
+
+    def test_a_blind_with_nothing_told_to_it_says_that_instead(self):
+        app = self.app()
+        self.shut('BLIND#1')
+        app.controller.last_told = {}
+        del xbmc.LOG_LINES[:]
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        logged = '\n'.join(message for _level, message in xbmc.LOG_LINES)
+        self.assertIn('nothing has been set on it this session', logged)
 
     # -- what it says ------------------------------------------------------
 
@@ -12807,6 +12960,82 @@ class TestWebRemote(unittest.TestCase):
         failure = re.search(r'\.status\.bad \{([^}]*)\}', page)
         self.assertIsNotNone(failure)
         self.assertNotIn('var(--orange)', failure.group(1))
+
+    def test_a_device_nothing_is_known_about_carries_no_numbers(self):
+        """It used to say 60% on every bulb and 50% on every blind."""
+        client = self.signed_in()
+
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'AA:BB'][0]
+
+        self.assertIsNone(entry['brightness'])
+        self.assertIsNone(entry['position'])
+        self.assertIsNone(entry['from'])
+
+    def test_the_page_shows_a_dash_rather_than_a_number_it_made_up(self):
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        # The number the slider stands at when nothing is known is still 60,
+        # because the control has to be somewhere -- but the readout says so.
+        self.assertIn("known ? String(start) : '--'", page)
+        self.assertIn("placed ? String(where) : '--'", page)
+        # And the old unconditional invention is gone.
+        self.assertNotIn('device.brightness || 60', page)
+
+    def test_what_we_last_set_is_shown_and_labelled_as_that(self):
+        """Move a blind from the phone and the tile stops lying until refresh."""
+        self.app._devices = [Device('BLIND#1', name='Blind One',
+                                    driver='switchbot')]
+        self.recorder.capabilities = lambda d: {'position', 'state'}
+        self.recorder.last_told = {'BLIND#1': {'position': 0, 'at': 1000.0}}
+        client = self.signed_in()
+
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BLIND#1'][0]
+
+        self.assertEqual(entry['position'], 0)
+        self.assertEqual(entry['from'], 'told')
+        self.assertEqual(entry['told_at'], 1000.0)
+
+    def test_a_card_never_mixes_what_was_read_with_what_was_told(self):
+        """One card carries one label, so it must carry one kind of number.
+
+        A bulb that answers about its power but says nothing about brightness
+        would otherwise show a read power beside a remembered brightness under
+        a single "read", which is a lie about half the card.
+        """
+        self.app._devices = [Device('BULB#1', name='Lamp', lan=True)]
+        self.recorder.capabilities = lambda d: {'power', 'brightness', 'state'}
+        self.recorder.last_told = {'BULB#1': {'brightness': 15, 'at': 1000.0}}
+        self.recorder.states = {'BULB#1': {'power': 'on'}}
+        client = self.signed_in()
+        client.act('states')
+
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BULB#1'][0]
+
+        self.assertEqual(entry['power'], 'on')
+        self.assertEqual(entry['from'], 'read')
+        self.assertIsNone(entry['brightness'],
+                          'a remembered number was passed off as a reading')
+
+    def test_what_the_device_said_wins_over_what_we_told_it(self):
+        """A reading is the device's own answer; our memory is only a memory."""
+        self.app._devices = [Device('BLIND#1', name='Blind One',
+                                    driver='switchbot')]
+        self.recorder.capabilities = lambda d: {'position', 'state'}
+        self.recorder.last_told = {'BLIND#1': {'position': 0, 'at': 1000.0}}
+        self.recorder.states = {'BLIND#1': {'position': 70}}
+        client = self.signed_in()
+        client.act('states')
+
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BLIND#1'][0]
+
+        self.assertEqual(entry['position'], 70)
+        self.assertEqual(entry['from'], 'read')
+        self.assertNotIn('told_at', entry)
 
     def test_a_waiting_sequence_is_lit_like_the_channel_that_is_on(self):
         """Both mean "this is the one that is going", so both are drawn alike.

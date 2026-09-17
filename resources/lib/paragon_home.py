@@ -933,12 +933,44 @@ class ParagonHome(object):
         if not devices:
             return {}
         try:
-            return self.controller.get_states(list(devices.values()))
+            states = self.controller.get_states(list(devices.values()))
+            self._say_what_was_not_read(devices, states)
+            return states
         except Exception as exc:
             # Nothing is skipped when nothing is known, which is the safe way
             # round: the sequence runs in full, as it did before.
             utils.log('Could not read what is already done: %s' % exc)
             return {}
+
+    def _say_what_was_not_read(self, devices, states):
+        """Log every device that would not say where it is, with what we told it.
+
+        The step runs anyway -- a reading or nothing is the rule -- but "it did
+        not answer" on its own leaves nothing to go on. What we last set it to,
+        and when, is what turns that into something worth looking at.
+        """
+        told = getattr(self.controller, 'last_told', None) or {}
+        for device_id, device in devices.items():
+            if states.get(device_id):
+                continue
+            remembered = told.get(device_id) or {}
+            known = ', '.join(
+                '%s %s' % (key, remembered[key])
+                for key in ('position', 'brightness', 'power')
+                if remembered.get(key) is not None)
+            if known:
+                utils.log('Could not read %s. We last set it to %s%s'
+                          % (device.name, known,
+                             self._when(remembered.get('at'))))
+            else:
+                utils.log('Could not read %s, and nothing has been set on it '
+                          'this session' % device.name)
+
+    @staticmethod
+    def _when(stamp):
+        if not stamp:
+            return ''
+        return time.strftime(' at %H:%M', time.localtime(stamp))
 
     # -- sequences part way through a long pause ----------------------------
     #

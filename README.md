@@ -485,6 +485,29 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### What a number on the remote means
+
+A device's state is only read when you **pull to refresh** — it costs a round
+trip per device, and on SwitchBot a cloud request each, so it is not done on a
+timer. That leaves the question of what to show in between, and the honest
+answers are three:
+
+* **A figure and nothing else** — what the device said when it was last asked.
+* **A figure marked `SET`** — what Paragon Home last told it. The device has not
+  been asked since, and anything could have moved it: a hand, the SwitchBot app,
+  a schedule on the vendor's side. Hover for when it was set.
+* **`--`** — nothing is known. Not a guess dressed up as a reading.
+
+Until v2.51 there was a fourth: every dimmable light showed **60%** and every
+blind **50%**, whatever they were doing, because the page filled in a default
+when it had nothing and then never revised it. Those numbers were invented.
+
+What we last told a device is held in memory only. After a Kodi restart nothing
+is known again, deliberately — anything could have happened while it was off,
+and a remembered position surviving that would be a guess wearing the clothes of
+a fact. It is **never** used to decide a step can be skipped; that still takes a
+reading or nothing.
+
 ### Skipping what is already done
 
 **Skip what is already done** in the sequence editor, off by default. With it
