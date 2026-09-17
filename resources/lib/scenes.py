@@ -352,6 +352,104 @@ def settings_for(scene, device_id):
     }
 
 
+def effective_settings(scene, device):
+    """What `scene` really does to `device`, shape overrides included.
+
+    The answer apply_scene acts on, worked out in one place so that anything
+    showing it to the user shows what will happen rather than a second
+    implementation's opinion of it. That second opinion is exactly what this
+    was extracted to prevent: the rule below used to live inside apply_scene's
+    loop, where nothing else could reach it.
+
+    The order is most specific first, and it matters because these names
+    overlap in real rooms: a backlight is usually a strip, and a strip is
+    sometimes a bar. "TV Backlight Strip" carries two of the three words and
+    has to resolve the same way every time.
+
+    Strip is last for a second reason. It was added after the other two, and
+    going last means no device that already took a bar or backlight figure
+    quietly started taking a different one.
+    """
+    settings = settings_for(scene, device.device_id)
+    backlight = scene.get('backlight_brightness')
+    bar = scene.get('bar_brightness')
+    strip = scene.get('strip_brightness')
+
+    if backlight is not None and is_backlight(device):
+        level = backlight
+    elif bar is not None and is_lightbar(device):
+        level = bar
+    elif strip is not None and is_lightstrip(device):
+        level = strip
+    else:
+        return settings
+
+    # Copied before editing: settings_for hands back the scene's own dict when
+    # there is no per-device entry, and this must not write a shape's figure
+    # into the saved scene.
+    settings = dict(settings)
+    settings['brightness'] = level
+    return settings
+
+
+def describe_settings(settings):
+    """One line for what a scene does to one light, e.g. "35%, RGB 120, 40, 90"."""
+    if not isinstance(settings, dict):
+        return 'leave alone'
+    if settings.get('power') == POWER_OFF:
+        return 'Off'
+    bits = []
+    if settings.get('power') == POWER_KEEP:
+        bits.append('keep power')
+    if settings.get('brightness') is not None:
+        bits.append('%d%%' % settings['brightness'])
+    mode = settings.get('mode')
+    if mode == MODE_COLOR:
+        color = settings.get('color') or [255, 255, 255]
+        bits.append('RGB %d, %d, %d' % tuple(color[:3]))
+    elif mode == MODE_TEMP:
+        bits.append('%dK' % settings.get('kelvin', 2700))
+    return ', '.join(bits) or 'leave alone'
+
+
+def set_device_settings(scene, device_id, settings):
+    """Give one light its own settings inside `scene`. Returns the scene.
+
+    The targets list is only widened when the scene already names its lights.
+    An empty targets list means "everything this scene can express", and
+    appending one id to it would narrow the scene to that single light --
+    which is not what copying a light's settings into a scene means, and would
+    be a very quiet way to break a scene that lit a whole room.
+    """
+    key = (device_id or '').upper()
+    if not key:
+        return scene
+    cleaned = _normalise_settings(settings)
+    if cleaned is None:
+        return scene
+
+    devices = dict(scene.get('devices') or {})
+    devices[key] = cleaned
+    scene['devices'] = devices
+
+    targets = list(scene.get('targets') or [])
+    if targets and key not in targets:
+        targets.append(key)
+        scene['targets'] = targets
+    return scene
+
+
+def forget_device_settings(scene, device_id):
+    """Drop one light's own settings, so it goes back to the scene's own."""
+    key = (device_id or '').upper()
+    devices = dict(scene.get('devices') or {})
+    if key not in devices:
+        return False
+    del devices[key]
+    scene['devices'] = devices
+    return True
+
+
 def detect_brightness_scale(states):
     """Work out which brightness scale a set of readings uses.
 
@@ -666,11 +764,25 @@ def find(scenes, name):
     return None
 
 
+def fully_captured(scene):
+    """Whether every light this scene names has its own recorded settings.
+
+    The difference between a scene made by Capture -- which has no uniform
+    colour or brightness worth reporting -- and an ordinary one that has had a
+    light or two set apart, which still does.
+    """
+    per_device = scene.get('devices') or {}
+    targets = scene.get('targets') or []
+    if not per_device or not targets:
+        return False
+    return all(str(target).upper() in per_device for target in targets)
+
+
 def describe(scene):
     """One-line summary for list rows, e.g. '35%, 2400K'."""
     bits = []
     per_device = scene.get('devices') or {}
-    if per_device:
+    if fully_captured(scene):
         # A captured scene has no single brightness or colour to report.
         lit = len([s for s in per_device.values()
                    if s.get('power') != POWER_OFF])
@@ -696,6 +808,12 @@ def describe(scene):
         bits.append('%dK' % scene.get('kelvin', 2700))
     targets = scene.get('targets') or []
     bits.append('%d light(s)' % len(targets) if targets else 'all lights')
+    if per_device:
+        # Some lights set apart, the rest on the uniform values above. Said
+        # rather than swallowed: a scene with one light held out is still
+        # described by its own colour and brightness, and reporting it as
+        # "captured" would hide every one of those from the list.
+        bits.append('%d set apart' % len(per_device))
     actions = scene.get('actions') or []
     if actions:
         bits.append('%d command(s)' % len(actions))
@@ -826,9 +944,6 @@ def apply_scene(controller, scene, devices, log_func=None,
     applied = 0
     errors = []
     per_device_map = scene.get('devices') or {}
-    bar_brightness = scene.get('bar_brightness')
-    backlight_brightness = scene.get('backlight_brightness')
-    strip_brightness = scene.get('strip_brightness')
     for index, device in enumerate(targets):
         # A few milliseconds between lights. Sending 25 lights' worth of
         # datagrams as fast as the loop runs is the shape of traffic consumer
@@ -837,30 +952,12 @@ def apply_scene(controller, scene, devices, log_func=None,
         # lights and buys a far better chance every command lands.
         if index and gap:
             sleep(gap)
-        # A captured scene carries this device's own recorded settings; every
-        # other scene falls back to its single uniform set.
-        settings = settings_for(scene, device.device_id)
-        # A lightbar puts out far more light than a bulb at the same
-        # percentage, so a scene can carry a second figure just for them, a
-        # third for a backlight and a fourth for a light strip.
-        #
-        # The order is most specific first, and it matters because these
-        # names overlap in real rooms: a backlight is usually a strip, and a
-        # strip is sometimes a bar. "TV Backlight Strip" carries two of the
-        # three words and has to resolve the same way every time.
-        #
-        # Strip is last for a second reason. It was added after the other
-        # two, and going last means no device that already took a bar or
-        # backlight figure quietly started taking a different one.
-        if backlight_brightness is not None and is_backlight(device):
-            settings = dict(settings)
-            settings['brightness'] = backlight_brightness
-        elif bar_brightness is not None and is_lightbar(device):
-            settings = dict(settings)
-            settings['brightness'] = bar_brightness
-        elif strip_brightness is not None and is_lightstrip(device):
-            settings = dict(settings)
-            settings['brightness'] = strip_brightness
+        # A captured scene carries this device's own recorded settings, every
+        # other scene falls back to its single uniform set, and either can be
+        # overridden by the figure for this light's shape. All of that is
+        # effective_settings, which the menus call too so that what they show
+        # is what happens here.
+        settings = effective_settings(scene, device)
         if dealt is not None and device.device_id not in per_device_map:
             slot = dealt.get(device.device_id)
             if slot is not None:

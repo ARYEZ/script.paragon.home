@@ -485,6 +485,48 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### What a scene does to each light
+
+**What it does to each light...** in the scene editor lists every light the
+scene reaches with the colour and brightness it will really get:
+
+```
+Lightstrip Left    -  35%, RGB 120, 40, 90   [set apart]
+Lightstrip Right   -  35%, RGB 120, 40, 90   [set apart]
+Reading Lamp       -  60%, 2400K             [set apart]
+Hall Bulb          -  50%, 2700K
+```
+
+`[set apart]` marks a light with its **own** recorded settings, as against one
+taking the scene's uniform values. Only the first kind changes when you edit
+the scene's own colour or brightness.
+
+This is what a captured scene had been hiding. `Capture` wrote a colour and a
+brightness for every light and nothing ever read them back — the values were in
+`scenes.json` and only the bulbs ever saw them again.
+
+Pick a light and you can **copy its settings into another scene**. That is how
+the light strips from *Twilight* get into *Dusk* without touching anything else
+in either one. If the destination already has its own settings for that light,
+it says what they are and asks before replacing them.
+
+**Stop setting this one apart** is the other direction: the light goes back to
+following the scene's own colour and brightness.
+
+Two things worth knowing:
+
+* **Copying never narrows a scene.** A scene that names no lights means *every
+  light it can express to*; adding one id to that list would quietly turn a
+  whole-room scene into a one-strip scene, so the list is only widened when the
+  scene already names its lights.
+* **A scene with a light or two held out is not "captured".** It still has a
+  colour and a brightness of its own, so the list keeps reporting them and adds
+  `1 set apart` rather than hiding everything behind the word.
+
+What this list shows is what `apply_scene` sends — both read the same function,
+so the shape brightnesses (lightbar, backlight, light strip) are resolved here
+exactly as they are at the bulb.
+
 ### Locks
 
 A SwitchBot deadbolt appears alongside the blinds, with one deliberate limit:

@@ -860,6 +860,8 @@ class ControlPanel(object):
                  lambda: self._edit_appearance(scene)),
                 ('Lights: %s' % target_label,
                  lambda: self._edit_targets(scene)),
+                ('What it does to each light...',
+                 lambda: self._per_light_menu(scene)),
                 ('Commands to send: %s' % command_label,
                  lambda: self._edit_actions(scene)),
                 ('Cycle colours: %s' % cycle_label,
@@ -1248,6 +1250,111 @@ class ControlPanel(object):
             else:
                 chosen.append(dict(entry))
                 chosen_rgb.append(rgb)
+
+    def _scene_lights(self, scene):
+        """The lights a scene touches, in the order it would reach them.
+
+        The named ones where it names any, and every light it could express to
+        where it does not -- the same reading apply_scene takes, so this list
+        is what really happens rather than a guess at it.
+        """
+        lights = [d for d in self.app.devices
+                  if scene_lib.is_a_light(d, self.app.controller)]
+        named = [str(t).upper() for t in (scene.get('targets') or [])]
+        if not named:
+            return lights
+        return [d for d in lights if d.device_id.upper() in named]
+
+    def _per_light_menu(self, scene):
+        """What this scene does to each light, and where to copy it from.
+
+        Built because a captured scene held a colour and a brightness for every
+        light and nothing ever showed them back: Capture wrote them and only
+        the bulbs ever saw them again.
+        """
+        while True:
+            lights = self._scene_lights(scene)
+            if not lights:
+                utils.force_notify('%s reaches no lights' % scene['name'])
+                return
+            own = scene.get('devices') or {}
+            rows = []
+            for device in lights:
+                settings = scene_lib.effective_settings(scene, device)
+                # Marked, because "its own" and "the scene's" look identical
+                # once they are both a colour and a percentage, and only one of
+                # them changes when the scene's own values are edited.
+                apart = ' [set apart]' \
+                    if device.device_id.upper() in own else ''
+                rows.append(('%s  -  %s%s'
+                             % (device.name,
+                                scene_lib.describe_settings(settings), apart),
+                             device))
+
+            choice = _select('%s: each light' % scene['name'],
+                             [label for label, _d in rows])
+            if choice == BACK:
+                return
+            self._one_light_menu(scene, rows[choice][1])
+
+    def _one_light_menu(self, scene, device):
+        """What can be done with one light's settings inside a scene."""
+        settings = scene_lib.effective_settings(scene, device)
+        own = (scene.get('devices') or {})
+        is_own = device.device_id.upper() in own
+
+        rows = [('Copy this into another scene...',
+                 lambda: self._copy_settings_to_scene(scene, device, settings))]
+        if is_own:
+            rows.append(('Stop setting this one apart',
+                         lambda: self._forget_one_light(scene, device)))
+
+        choice = _select('%s in %s' % (device.name, scene['name']),
+                         [label for label, _h in rows])
+        if choice == BACK:
+            return
+        rows[choice][1]()
+
+    def _copy_settings_to_scene(self, scene, device, settings):
+        """Write one light's settings from this scene into another one."""
+        others = [other for other in self.app.scenes
+                  if other['name'] != scene['name']]
+        if not others:
+            utils.force_notify('There is no other scene to copy into')
+            return
+        choice = _select('Copy %s into which scene' % device.name,
+                         ['%s  -  %s' % (other['name'],
+                                         scene_lib.describe(other))
+                          for other in others])
+        if choice == BACK:
+            return
+        target = dict(others[choice])
+
+        existing = (target.get('devices') or {}).get(device.device_id.upper())
+        if existing is not None and not _dialog().yesno(
+                utils.ADDON_NAME,
+                '%s already has its own settings in "%s":\n\n%s\n\n'
+                'Replace them with %s?'
+                % (device.name, target['name'],
+                   scene_lib.describe_settings(existing),
+                   scene_lib.describe_settings(settings))):
+            return
+
+        scene_lib.set_device_settings(target, device.device_id, settings)
+        self.app.save_scene(target)
+        utils.notify('%s in %s: %s'
+                     % (device.name, target['name'],
+                        scene_lib.describe_settings(settings)))
+
+    def _forget_one_light(self, scene, device):
+        """Put a light back on the scene's own values."""
+        if not _dialog().yesno(
+                utils.ADDON_NAME,
+                'Put %s back on the scene\'s own colour and brightness?'
+                % device.name):
+            return
+        if scene_lib.forget_device_settings(scene, device.device_id):
+            utils.notify('%s now follows %s' % (device.name, scene['name']))
 
     def _edit_targets(self, scene):
         """Pick which lights a scene touches, one at a time.

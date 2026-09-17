@@ -343,6 +343,252 @@ class RecordingController(object):
 # Scenes
 # ---------------------------------------------------------------------------
 
+class TestWhatASceneDoesToEachLight(unittest.TestCase):
+    """A captured scene held a colour for every light and never showed one back.
+
+    Capture wrote them and only the bulbs saw them again: there was no way to
+    read a scene's per-device settings, let alone move one to another scene.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'scenes', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def strip(self, device_id='STRIP#1', name='Lightstrip Left'):
+        return Device(device_id, name=name, lan=True)
+
+    def twilight(self):
+        """Captured: every light carries its own recorded settings."""
+        return scene_lib.normalise({
+            'name': 'Twilight',
+            'targets': ['STRIP#1', 'BULB#1'],
+            'devices': {
+                'STRIP#1': {'power': 'on', 'brightness': 35,
+                            'mode': 'color', 'color': [120, 40, 90]},
+                'BULB#1': {'power': 'on', 'brightness': 60,
+                           'mode': 'temp', 'kelvin': 2400},
+            },
+        })
+
+    def dusk(self):
+        """Ordinary: one colour and one brightness for everything it reaches."""
+        return scene_lib.make_scene('Dusk', power=scene_lib.POWER_ON,
+                                    brightness=50,
+                                    mode=scene_lib.MODE_TEMP, kelvin=2700)
+
+    # -- reading it back ---------------------------------------------------
+
+    def test_a_captured_light_reports_its_own_colour_and_brightness(self):
+        scene = self.twilight()
+
+        said = scene_lib.describe_settings(
+            scene_lib.effective_settings(scene, self.strip()))
+
+        self.assertEqual(said, '35%, RGB 120, 40, 90')
+
+    def test_a_captured_light_on_a_temperature_reports_that(self):
+        scene = self.twilight()
+
+        said = scene_lib.describe_settings(
+            scene_lib.effective_settings(scene, self.strip('BULB#1', 'Lamp')))
+
+        self.assertEqual(said, '60%, 2400K')
+
+    def test_a_light_with_no_entry_reports_the_scene_own_values(self):
+        said = scene_lib.describe_settings(
+            scene_lib.effective_settings(self.dusk(), self.strip()))
+
+        self.assertEqual(said, '50%, 2700K')
+
+    def test_a_light_that_is_switched_off_says_so_and_nothing_else(self):
+        scene = scene_lib.normalise({
+            'name': 'Night', 'targets': ['STRIP#1'],
+            'devices': {'STRIP#1': {'power': 'off', 'brightness': 80,
+                                    'mode': 'color', 'color': [1, 2, 3]}}})
+
+        self.assertEqual(
+            scene_lib.describe_settings(
+                scene_lib.effective_settings(scene, self.strip())),
+            'Off')
+
+    def test_the_shape_figure_is_what_the_light_really_gets(self):
+        """A strip brightness overrides the scene's own, so it must be shown."""
+        scene = scene_lib.make_scene('Dusk', brightness=50,
+                                     strip_brightness=12,
+                                     mode=scene_lib.MODE_TEMP, kelvin=2700)
+
+        said = scene_lib.describe_settings(
+            scene_lib.effective_settings(scene, self.strip()))
+
+        self.assertEqual(said, '12%, 2700K')
+
+    def test_the_shape_figure_beats_even_a_captured_entry(self):
+        """Because that is the order apply_scene resolves them in."""
+        scene = self.twilight()
+        scene['strip_brightness'] = 12
+
+        settings = scene_lib.effective_settings(scene, self.strip())
+
+        self.assertEqual(settings['brightness'], 12)
+        self.assertEqual(settings['color'], [120, 40, 90], 'lost the colour')
+
+    def test_reading_a_light_never_writes_back_into_the_scene(self):
+        """settings_for hands back the scene's own dict where there is no entry."""
+        scene = self.dusk()
+        scene['strip_brightness'] = 12
+
+        scene_lib.effective_settings(scene, self.strip())
+
+        self.assertEqual(scene['brightness'], 50,
+                         "a shape's figure was written into the scene")
+
+    # -- copying it --------------------------------------------------------
+
+    def test_a_light_can_be_given_its_own_settings_in_another_scene(self):
+        source = self.twilight()
+        target = self.dusk()
+        settings = scene_lib.effective_settings(source, self.strip())
+
+        scene_lib.set_device_settings(target, 'STRIP#1', settings)
+
+        self.assertEqual(
+            scene_lib.describe_settings(
+                scene_lib.effective_settings(target, self.strip())),
+            '35%, RGB 120, 40, 90')
+
+    def test_the_rest_of_the_target_scene_is_untouched(self):
+        target = self.dusk()
+        scene_lib.set_device_settings(target, 'STRIP#1',
+                                      {'power': 'on', 'brightness': 35,
+                                       'mode': 'color', 'color': [120, 40, 90]})
+
+        other = scene_lib.effective_settings(target,
+                                             self.strip('BULB#1', 'Lamp'))
+
+        self.assertEqual(scene_lib.describe_settings(other), '50%, 2700K')
+
+    def test_copying_into_an_all_lights_scene_does_not_narrow_it(self):
+        """The bug this would have shipped with.
+
+        An empty targets list means "everything this scene can express".
+        Appending one id to it would quietly turn a scene that lit a whole room
+        into one that lights a single strip.
+        """
+        target = self.dusk()
+        self.assertEqual(target['targets'], [])
+
+        scene_lib.set_device_settings(target, 'STRIP#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        self.assertEqual(target['targets'], [],
+                         'a whole-room scene was narrowed to one light')
+
+    def test_copying_into_a_named_scene_adds_the_light_to_it(self):
+        """Otherwise the scene would hold settings for a light it never reaches."""
+        target = scene_lib.make_scene('Dusk', targets=['BULB#1'])
+
+        scene_lib.set_device_settings(target, 'STRIP#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        self.assertIn('STRIP#1', target['targets'])
+
+    def test_a_light_is_not_added_to_the_targets_twice(self):
+        target = scene_lib.make_scene('Dusk', targets=['STRIP#1'])
+
+        scene_lib.set_device_settings(target, 'strip#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        self.assertEqual(target['targets'], ['STRIP#1'])
+
+    def test_settings_are_stored_under_the_case_they_are_looked_up_by(self):
+        target = self.dusk()
+
+        scene_lib.set_device_settings(target, 'strip#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        self.assertEqual(
+            scene_lib.settings_for(target, 'STRIP#1')['brightness'], 35)
+
+    def test_rubbish_is_not_written_into_a_scene(self):
+        target = self.dusk()
+
+        scene_lib.set_device_settings(target, 'STRIP#1', 'not settings')
+        scene_lib.set_device_settings(target, '', {'brightness': 35})
+
+        self.assertEqual(target.get('devices') or {}, {})
+
+    def test_a_light_can_be_put_back_on_the_scene_own_values(self):
+        scene = self.twilight()
+
+        self.assertTrue(scene_lib.forget_device_settings(scene, 'STRIP#1'))
+
+        self.assertEqual(
+            scene_lib.describe_settings(
+                scene_lib.effective_settings(scene, self.strip())),
+            'leave alone')
+        self.assertFalse(scene_lib.forget_device_settings(scene, 'STRIP#1'))
+
+    # -- how the list reads it ---------------------------------------------
+
+    def test_a_captured_scene_still_reads_as_captured(self):
+        self.assertIn('captured', scene_lib.describe(self.twilight()))
+
+    def test_a_scene_with_one_light_held_out_is_not_called_captured(self):
+        """It still has a colour and a brightness of its own worth reporting."""
+        target = scene_lib.make_scene('Dusk', brightness=50,
+                                      mode=scene_lib.MODE_TEMP, kelvin=2700,
+                                      targets=['STRIP#1', 'BULB#1'])
+        scene_lib.set_device_settings(target, 'STRIP#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        said = scene_lib.describe(target)
+
+        self.assertNotIn('captured', said)
+        self.assertIn('50%', said)
+        self.assertIn('2700K', said)
+        self.assertIn('1 set apart', said)
+
+    def test_a_scene_naming_no_lights_is_never_fully_captured(self):
+        """"All lights" and "these two, exactly" are different things."""
+        target = self.dusk()
+        scene_lib.set_device_settings(target, 'STRIP#1',
+                                      {'power': 'on', 'brightness': 35})
+
+        self.assertFalse(scene_lib.fully_captured(target))
+        self.assertNotIn('captured', scene_lib.describe(target))
+
+    # -- and it is what really happens -------------------------------------
+
+    def test_what_the_list_shows_is_what_the_lights_are_sent(self):
+        """The whole point of one effective_settings rather than two."""
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        recorder = RecordingController()
+        recorder.capabilities = lambda d: {CAP_POWER, CAP_BRIGHTNESS,
+                                           CAP_COLOR, CAP_STATE}
+        app.controller = recorder
+        app._devices = [self.strip()]
+        scene = self.twilight()
+        app._scenes = [scene]
+
+        shown = scene_lib.describe_settings(
+            scene_lib.effective_settings(scene, app.devices[0]))
+        app.apply_scene(scene, announce=False)
+
+        self.assertEqual(shown, '35%, RGB 120, 40, 90')
+        sent = dict((c[0], c[2:]) for c in recorder.calls)
+        self.assertEqual(sent['brightness'], (35,))
+        self.assertEqual(sent['color'], (120, 40, 90))
+
+
 class TestScenes(unittest.TestCase):
 
     def test_normalise_clamps_out_of_range_values(self):
