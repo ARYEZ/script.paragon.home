@@ -12172,6 +12172,23 @@ class TestWebRemote(unittest.TestCase):
         self.assertIsNotNone(self.app.pending_for('Coffee'),
                              'the phone slept through the brew')
 
+    def test_the_status_line_answers_in_the_page_orange(self):
+        """"Working" and what came of it are one action, so they are one colour."""
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        rule = re.search(r'\.status\.good,\s*\n\.status\.busy \{([^}]*)\}',
+                         page)
+        self.assertIsNotNone(rule, 'good and busy are no longer one rule')
+        self.assertIn('var(--orange)', rule.group(1))
+        self.assertNotIn('--teal', rule.group(1))
+        # Failure is still its own answer, not the same colour as success.
+        failure = re.search(r'\.status\.bad \{([^}]*)\}', page)
+        self.assertIsNotNone(failure)
+        self.assertNotIn('var(--orange)', failure.group(1))
+
     def test_a_waiting_sequence_is_lit_like_the_channel_that_is_on(self):
         """Both mean "this is the one that is going", so both are drawn alike.
 

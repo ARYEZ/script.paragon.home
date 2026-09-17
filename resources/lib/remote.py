@@ -1851,9 +1851,19 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 2px; }
   padding-left: 10px;
   border-left: 2px solid var(--line);
 }
-.status.good { color: var(--teal); border-left-color: var(--teal); }
-.status.bad { color: #ff5f5f; border-left-color: #ff5f5f; }
+/* Working and whatever came of it are one colour: the page's orange. They are
+   never on screen together -- "Working" is replaced by the result -- so one
+   colour reads as one action carrying through rather than two unrelated
+   states, and it is the orange the rest of the remote is built from.
+
+   Failure stays red, and stays far enough away to be read as a different
+   answer: dE76 31.9 from this orange, where anything over about 10 is plainly
+   a different colour. Measured because the two share a red channel at full,
+   and eyeballing hex is how a warning ends up looking like a success. Both
+   clear the contrast floor on the bar -- orange 6.4:1, red 6.7:1. */
+.status.good,
 .status.busy { color: var(--orange); border-left-color: var(--orange); }
+.status.bad { color: #ff5f5f; border-left-color: #ff5f5f; }
 
 footer {
   display: flex; gap: 9px; flex-wrap: wrap;
