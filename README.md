@@ -485,6 +485,41 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### A sequence can run another sequence
+
+A step can name another sequence instead of a device, and its steps run in that
+place. Closing five blinds is one sequence, written once:
+
+```
+Shutdown
+   1. Scene: All Off
+   2. Sequence: Blinds Down      <- five steps, written once, used everywhere
+   3. Office Plug: Off
+```
+
+The nested steps are spliced in before anything runs, so the whole thing is one
+flat run: **the numbering, the progress bar and a long pause all count the same
+steps**, and a long pause *inside* a nested sequence is handed back exactly as
+one in the host would be.
+
+A pause on the nesting step waits **after** everything it brought in, which is
+what "run the blinds, then wait five seconds" means. An empty nested sequence
+contributes nothing, its pause included — that pause exists to let an action
+land, and no action happened.
+
+**Nothing may reach itself.** A sequence is not offered as a step in itself, or
+in anything it already runs, however far down. If one gets in anyway — by hand,
+or by editing the file — the step fails when it runs and says why, and the rest
+of the sequence carries on.
+
+Nesting is capped at **5 deep** and **200 steps** once spliced. Neither is what
+stops a loop; they stop the other runaway, where a handful of sequences each
+holding the next one twice come to thousands of steps.
+
+**Renaming takes everything along.** Every nested step and every rerack phase
+naming the old name is repointed, and the menus say how many moved. Deleting a
+sequence that something else uses names what will break before it happens.
+
 ### Long pauses do not hold the box
 
 A pause of **30 seconds or more is not waited out in place**. The sequence

@@ -251,6 +251,26 @@ def needs_tv(rerack):
     return any(follows_tv(phase) for _n, phase in filled_phases(rerack))
 
 
+def repoint(reracks, old_name, new_name):
+    """Point every phase at a sequence's new name. Returns how many moved.
+
+    A rename used to leave the phases naming something that was no longer
+    there, and a phase whose sequence has gone does nothing and says so only in
+    the log.
+    """
+    was = (old_name or '').strip().lower()
+    now = (new_name or '').strip()
+    if not was or not now:
+        return 0
+    moved = 0
+    for rerack in reracks or []:
+        for _number, phase in filled_phases(rerack):
+            if phase['sequence'].strip().lower() == was:
+                phase['sequence'] = now
+                moved += 1
+    return moved
+
+
 def used_by(reracks, sequence_name):
     """Where a sequence is used, so the reuse is visible from the sequence."""
     wanted = (sequence_name or '').strip().lower()

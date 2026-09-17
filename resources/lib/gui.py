@@ -1744,7 +1744,10 @@ class ControlPanel(object):
 
         progress = xbmcgui.DialogProgress()
         progress.create(utils.ADDON_NAME, 'Running %s...' % name)
-        total = len(sequence.get('steps') or [])
+        # Counted on what will really run, not on the fifteen slots: a sequence
+        # that runs others is longer than its own list, and the bar was filling
+        # up and then carrying on past the end.
+        total = len(sequence_lib.expand(sequence, self.app.sequences))
 
         def announce(index, step):
             if progress.iscanceled():
@@ -1939,16 +1942,23 @@ class ControlPanel(object):
                          'There is already a sequence called "%s".'
                          % name.strip())
             return
-        self.app.delete_sequence(sequence)
-        sequence['name'] = name.strip()
-        self.app.save_sequence(sequence)
+        _renamed, moved = self.app.rename_sequence(sequence, name)
+        if moved:
+            utils.notify('Renamed, and %d place(s) now point at it' % moved)
 
     def _delete_sequence(self, sequence):
-        if not _dialog().yesno(utils.ADDON_NAME,
-                               'Delete the sequence "%s"?' % sequence['name']):
+        name = sequence['name']
+        used = self.app.sequence_used_by(name)
+        question = 'Delete the sequence "%s"?' % name
+        if used:
+            # Said before it happens rather than found out at six in the
+            # morning when the shutdown gives up at the step that named it.
+            question += ('\n\nIt is used by: %s.\nThose will stop working.'
+                         % ', '.join(used))
+        if not _dialog().yesno(utils.ADDON_NAME, question):
             return
         self.app.delete_sequence(sequence)
-        utils.notify('Deleted %s' % sequence['name'])
+        utils.notify('Deleted %s' % name)
         return False
 
     # -- reracks: a day in nine phases -------------------------------------
@@ -2456,6 +2466,11 @@ class ControlPanel(object):
     def edit_step(self, sequence, index):
         """Pick a step in the order you would say it: kind, target, action."""
         kinds = [('Scene', self._step_scene)]
+        # Offered only when there is another sequence to reach for. On a house
+        # with one sequence the row would always say no when pressed.
+        if self._nestable(sequence):
+            kinds.append(('Sequence',
+                          lambda: self._step_sequence(sequence)))
         for driver_id in self._driver_ids(self.app.enabled_devices):
             kinds.append((self._driver_label(driver_id),
                           lambda d=driver_id: self._step_device(d)))
@@ -2497,6 +2512,30 @@ class ControlPanel(object):
             return None
         return {'kind': sequence_lib.KIND_SCENE,
                 'target': scenes[choice]['name']}
+
+    def _nestable(self, sequence):
+        """The sequences this one may run: not itself, and nothing that loops."""
+        return [other for other in self.app.sequences
+                if not sequence_lib.would_loop(self.app.sequences,
+                                               sequence.get('name'),
+                                               other.get('name'))]
+
+    def _step_sequence(self, sequence):
+        """Run another sequence's steps here, in place of retyping them."""
+        choices = self._nestable(sequence)
+        if not choices:
+            # Every other sequence already reaches this one, so any of them
+            # here would close a ring.
+            utils.force_notify('No sequence can go here without looping')
+            return None
+        choice = _select('Which sequence',
+                         ['%s  -  %s' % (other['name'],
+                                         sequence_lib.describe(other))
+                          for other in choices])
+        if choice == BACK:
+            return None
+        return {'kind': sequence_lib.KIND_SEQUENCE,
+                'target': choices[choice]['name']}
 
     def _step_device(self, driver_id):
         """Which device of this driver, then what to do to it."""

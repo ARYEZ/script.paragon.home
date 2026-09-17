@@ -57,6 +57,7 @@ KIND_SCENE = 'scene'
 KIND_POWER = 'power'
 KIND_COMMAND = 'command'
 KIND_POSITION = 'position'   # open a blind to a percentage
+KIND_SEQUENCE = 'sequence'   # run another sequence's steps here
 
 # Power actions a step can carry.
 ACTION_ON = 'on'
@@ -69,6 +70,15 @@ POWER_ACTIONS = (ACTION_ON, ACTION_OFF, ACTION_TOGGLE)
 TARGET_ALL = '*'
 
 MAX_PAUSE = 3600
+
+# How deep one sequence may reach into others, and how many steps the whole
+# thing may come to once they are spliced together. A loop is already refused
+# outright, so neither of these is what stops A calling B calling A -- they
+# stop the other runaway, where a handful of sequences each holding the next
+# one twice come to thousands of steps and a Kodi on a small box stops
+# answering while it works them out.
+MAX_NESTING = 5
+MAX_EXPANDED_STEPS = 200
 
 # A pause longer than this is not waited out in place. The sequence writes down
 # where it got to and returns, and the service carries it on when the wait is
@@ -333,6 +343,14 @@ def normalise_step(raw):
         step['action'] = action
         return step
 
+    if kind == KIND_SEQUENCE:
+        name = (raw.get('target') or '').strip()
+        if not name:
+            return empty_step()
+        step['kind'] = KIND_SEQUENCE
+        step['target'] = name
+        return step
+
     if kind == KIND_POSITION:
         target = (raw.get('target') or '').strip()
         if not target:
@@ -444,6 +462,8 @@ def describe_step(step, device_name=None):
     target = device_name or step.get('target') or ''
     if kind == KIND_SCENE:
         text = 'Scene: %s' % target
+    elif kind == KIND_SEQUENCE:
+        text = 'Sequence: %s' % (step.get('target') or '')
     elif kind == KIND_POWER:
         if step.get('target') == TARGET_ALL:
             target = 'all %s devices' % (step.get('driver') or 'listed')
@@ -459,6 +479,149 @@ def describe_step(step, device_name=None):
     if pause:
         text += '  (+%ds)' % pause
     return text
+
+
+def _last_doing_something(steps):
+    """The index of the last step that is not an empty slot, or None."""
+    for index in range(len(steps) - 1, -1, -1):
+        if steps[index].get('kind') != KIND_NONE:
+            return index
+    return None
+
+
+def uses(sequence):
+    """The sequences this one runs directly, in the order it runs them."""
+    names = []
+    for step in sequence.get('steps') or []:
+        if step.get('kind') == KIND_SEQUENCE:
+            name = (step.get('target') or '').strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def used_by_sequences(sequences, name):
+    """Which sequences run `name`, so the reuse is visible from both ends."""
+    wanted = (name or '').strip().lower()
+    return [other['name'] for other in sequences or []
+            if wanted in [used.strip().lower() for used in uses(other)]]
+
+
+def repoint(sequences, old_name, new_name):
+    """Point every nested step at a sequence's new name. Returns how many moved.
+
+    Called when a sequence is renamed. Without it a rename is a quiet way to
+    break every sequence that runs this one -- they would go on naming
+    something that is not there and fail at the step, which on a shutdown means
+    finding out in the morning.
+    """
+    was = (old_name or '').strip().lower()
+    now = (new_name or '').strip()
+    if not was or not now:
+        return 0
+    moved = 0
+    for sequence in sequences or []:
+        for step in sequence.get('steps') or []:
+            if step.get('kind') != KIND_SEQUENCE:
+                continue
+            if (step.get('target') or '').strip().lower() == was:
+                step['target'] = now
+                moved += 1
+    return moved
+
+
+def would_loop(sequences, host_name, candidate_name):
+    """Whether host running candidate would make a sequence reach itself.
+
+    Asked before a step is saved rather than only caught when it runs. A loop
+    is refused at the point it is chosen, where there is something to say about
+    it, rather than at six in the morning when the shutdown gives up half way.
+    """
+    host = (host_name or '').strip().lower()
+    candidate = (candidate_name or '').strip().lower()
+    if not host or not candidate:
+        return False
+    if host == candidate:
+        return True
+
+    by_name = dict((seq['name'].strip().lower(), seq)
+                   for seq in sequences or [] if seq.get('name'))
+    # Walk out from the candidate: if the host is anywhere below it, adding it
+    # to the host closes a ring.
+    seen = set()
+    pending = [candidate]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current == host:
+            return True
+        found = by_name.get(current)
+        if found is None:
+            continue
+        pending.extend(used.strip().lower() for used in uses(found))
+    return False
+
+
+def expand(sequence, sequences, _depth=0, _seen=None, _budget=None):
+    """This sequence's steps with any nested sequence's steps spliced in.
+
+    Done before anything runs rather than while it runs, so everything below --
+    the runner, the resume index a long pause writes down, the progress dialog
+    -- goes on working with one flat list of steps and knows nothing about
+    nesting.
+
+    A step naming a sequence that cannot be run is left as it is rather than
+    dropped: a missing name and a loop are both worth reporting when the
+    sequence runs, and _run_step raises on the kind for exactly that reason. A
+    dropped step would be a shutdown that quietly did less than it was told to.
+
+    The nesting step's own pause belongs after everything it brought in, so it
+    moves to the last of the spliced steps. An empty nested sequence brings in
+    nothing, pause included: that pause exists to let an action land, and no
+    action happened.
+    """
+    seen = set(_seen or ())
+    budget = [MAX_EXPANDED_STEPS] if _budget is None else _budget
+    by_name = dict((seq['name'].strip().lower(), seq)
+                   for seq in sequences or [] if seq.get('name'))
+    here = (sequence.get('name') or '').strip().lower()
+    seen.add(here)
+
+    out = []
+    for step in sequence.get('steps') or []:
+        if budget[0] <= 0:
+            break
+        if step.get('kind') != KIND_SEQUENCE:
+            out.append(step)
+            budget[0] -= 1
+            continue
+
+        wanted = (step.get('target') or '').strip().lower()
+        nested = by_name.get(wanted)
+        if (nested is None or wanted in seen or _depth >= MAX_NESTING):
+            # Left to fail at run time, with the reason it could not be run.
+            out.append(step)
+            budget[0] -= 1
+            continue
+
+        inner = expand(nested, sequences, _depth + 1, seen, budget)
+        # The last slot of a sequence is almost always empty -- fifteen of them
+        # and most unused -- and the pause has to land on the last step that
+        # does something, not on the blank after it, where nothing would ever
+        # wait for it.
+        last = _last_doing_something(inner)
+        if last is None:
+            continue
+        pause = step.get('pause') or 0
+        if pause:
+            # A copy, because the step being carried over belongs to the nested
+            # sequence and must not be given the host's pause on disk.
+            inner = (inner[:last] + [dict(inner[last], pause=pause)]
+                     + inner[last + 1:])
+        out.extend(inner)
+    return out
 
 
 def describe_wait(seconds):
@@ -588,6 +751,19 @@ def _run_step(app, step):
         if not app.apply_scene_by_name(step['target'], announce=False):
             raise ControlError('No scene called "%s"' % step['target'])
         return
+
+    if kind == KIND_SEQUENCE:
+        # Everything runnable was spliced in by expand() before any of this
+        # started, so a step of this kind still standing here is one that could
+        # not be: a name that is not there, a ring, or nesting too deep. Which
+        # one is worth saying, so it is worked out here rather than guessed at.
+        name = step.get('target') or ''
+        known = find(getattr(app, 'sequences', None) or [], name)
+        if known is None:
+            raise ControlError('No sequence called "%s"' % name)
+        raise ControlError('"%s" cannot run here: it would reach itself, or '
+                           'the nesting is more than %d deep'
+                           % (name, MAX_NESTING))
 
     targets = resolve_targets(step, app.devices)
     if not targets:

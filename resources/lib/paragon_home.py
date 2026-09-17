@@ -804,6 +804,31 @@ class ParagonHome(object):
         self.save_sequences()
         return cleaned
 
+    def rename_sequence(self, sequence, new_name):
+        """Rename a sequence and take everything naming it along.
+
+        Returns (renamed, moved) -- whether it happened, and how many places
+        were pointed at the new name. A rename that left those behind would be
+        a quiet way to break a shutdown.
+        """
+        cleaned = (new_name or '').strip()
+        if not cleaned or cleaned == sequence.get('name'):
+            return False, 0
+        if self._master_owns('sequences'):
+            return False, 0
+        old = sequence.get('name')
+        self.delete_sequence(sequence)
+        sequence['name'] = cleaned
+        self.save_sequence(sequence)
+
+        moved = sequence_lib.repoint(self.sequences, old, cleaned)
+        if moved:
+            self.save_sequences()
+        phases = rerack_lib.repoint(self.reracks, old, cleaned)
+        if phases:
+            self.save_reracks()
+        return True, moved + phases
+
     def delete_sequence(self, sequence):
         if self._master_owns('sequences'):
             return False
@@ -833,7 +858,14 @@ class ParagonHome(object):
             waited.append((index, seconds))
             self.defer_sequence(name, index, seconds)
 
-        done, errors = sequence_lib.run(self, sequence, log_func=utils.log,
+        # Any sequence this one runs is spliced in first, so what runs is one
+        # flat list and every index below -- including the one a long pause
+        # writes down -- counts the same steps. Re-expanded on a resume rather
+        # than stored, which is what makes editing the nested sequence during a
+        # wait behave the way editing the host already does.
+        flat = dict(sequence,
+                    steps=sequence_lib.expand(sequence, self.sequences))
+        done, errors = sequence_lib.run(self, flat, log_func=utils.log,
                                       sleep_func=sleep_func, on_step=on_step,
                                       start=start,
                                       defer=_defer if defer else None)
@@ -1137,7 +1169,9 @@ class ParagonHome(object):
                                         now or sequence_lib.now())
 
     def sequence_used_by(self, name):
-        return rerack_lib.used_by(self.reracks, name)
+        """Everywhere a sequence is used: rerack phases, and other sequences."""
+        return (sequence_lib.used_by_sequences(self.sequences, name)
+                + rerack_lib.used_by(self.reracks, name))
 
     @property
     def phase_state(self):

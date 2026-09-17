@@ -319,6 +319,11 @@ class RecordingController(object):
         # would never have had.
         self._record('command', device, name)
 
+    def set_position(self, device, percent):
+        # Same reason. A blind step against a stub without this failed with
+        # "no attribute", which reads in a test as the step being wrong.
+        self._record('position', device, percent)
+
     def driver(self, driver_id):
         """The Hub answers with the driver object, or None for an unknown id."""
         return None
@@ -1731,6 +1736,341 @@ class TestSequences(unittest.TestCase):
 
 # Kept so the guard below can be lifted again between tests.
 _real_sleep = time.sleep
+
+
+class TestNestedSequences(unittest.TestCase):
+    """One sequence running another, so a shutdown can say "and the blinds".
+
+    The blinds are the case this was written for: closing five of them is five
+    steps, and every sequence that wants them closed had to hold all five.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui',
+                     'reracks'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.sequences = sequences
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {'power', 'state', 'position'}
+        app.controller = self.recorder
+        app._devices = [
+            Device('BLIND#1', name='Blind One', driver='switchbot'),
+            Device('BLIND#2', name='Blind Two', driver='switchbot'),
+            Device('WP9ABC#1', name='Amp', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+        ]
+        app._scenes = []
+        return app
+
+    def blinds(self):
+        return self.sequences.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0'},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ])
+
+    def shutdown(self, pause=0):
+        return self.sequences.make_sequence('Shutdown', [
+            {'kind': 'sequence', 'target': 'Blinds Down', 'pause': pause},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'},
+        ])
+
+    # -- what a nested step is ---------------------------------------------
+
+    def test_a_step_can_name_another_sequence(self):
+        step = self.sequences.normalise_step(
+            {'kind': 'sequence', 'target': 'Blinds Down'})
+
+        self.assertEqual(step['kind'], self.sequences.KIND_SEQUENCE)
+        self.assertEqual(step['target'], 'Blinds Down')
+
+    def test_a_nested_step_with_no_name_is_an_empty_slot(self):
+        for raw in ({'kind': 'sequence', 'target': '  '},
+                    {'kind': 'sequence'}):
+            self.assertEqual(
+                self.sequences.normalise_step(raw)['kind'], 'none',
+                'accepted %r' % (raw,))
+
+    def test_a_nested_step_reads_as_what_it_runs(self):
+        step = self.sequences.normalise_step(
+            {'kind': 'sequence', 'target': 'Blinds Down', 'pause': 5})
+
+        self.assertEqual(self.sequences.describe_step(step),
+                         'Sequence: Blinds Down  (+5s)')
+
+    # -- splicing ----------------------------------------------------------
+
+    def test_the_nested_steps_are_spliced_in_where_it_sits(self):
+        flat = self.sequences.expand(self.shutdown(),
+                                     [self.blinds(), self.shutdown()])
+
+        self.assertEqual(
+            [self.sequences.describe_step(step)
+             for step in flat if step['kind'] != 'none'],
+            ['Blind One: 0% open', 'Blind Two: 0% open', 'Amp: Off'])
+
+    def test_the_nesting_step_pause_lands_after_everything_it_brought(self):
+        """+5 after "run the blinds" means after the blinds, not before them."""
+        flat = self.sequences.expand(self.shutdown(pause=5),
+                                     [self.blinds(), self.shutdown(pause=5)])
+        filled = [step for step in flat if step['kind'] != 'none']
+
+        self.assertEqual([step.get('pause') or 0 for step in filled],
+                         [0, 5, 0])
+
+    def test_the_nested_sequence_does_not_keep_the_host_pause(self):
+        """The step carried over is the nested sequence's own, on disk."""
+        blinds = self.blinds()
+        self.sequences.expand(self.shutdown(pause=5), [blinds])
+
+        self.assertEqual(
+            [step.get('pause') or 0
+             for step in blinds['steps'] if step['kind'] != 'none'],
+            [0, 0])
+
+    def test_an_empty_nested_sequence_brings_nothing_not_even_its_pause(self):
+        empty = self.sequences.make_sequence('Blinds Down')
+        flat = self.sequences.expand(self.shutdown(pause=5), [empty])
+        filled = [step for step in flat if step['kind'] != 'none']
+
+        self.assertEqual([self.sequences.describe_step(s) for s in filled],
+                         ['Amp: Off'])
+
+    def test_nesting_goes_more_than_one_deep(self):
+        inner = self.blinds()
+        middle = self.sequences.make_sequence('Evening', [
+            {'kind': 'sequence', 'target': 'Blinds Down'},
+        ])
+        outer = self.sequences.make_sequence('Shutdown', [
+            {'kind': 'sequence', 'target': 'Evening'},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'},
+        ])
+
+        flat = self.sequences.expand(outer, [inner, middle, outer])
+
+        self.assertEqual(
+            [self.sequences.describe_step(s)
+             for s in flat if s['kind'] != 'none'],
+            ['Blind One: 0% open', 'Blind Two: 0% open', 'Amp: Off'])
+
+    # -- the things that must not happen -----------------------------------
+
+    def test_a_sequence_that_reaches_itself_is_left_to_fail_not_expanded(self):
+        """Dropping it would be a shutdown quietly doing less than it was told."""
+        loop = self.sequences.make_sequence('Shutdown', [
+            {'kind': 'sequence', 'target': 'Shutdown'},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'},
+        ])
+
+        flat = self.sequences.expand(loop, [loop])
+        filled = [step for step in flat if step['kind'] != 'none']
+
+        self.assertEqual([self.sequences.describe_step(s) for s in filled],
+                         ['Sequence: Shutdown', 'Amp: Off'])
+
+    def test_a_ring_between_two_sequences_does_not_expand_for_ever(self):
+        a = self.sequences.make_sequence('A', [
+            {'kind': 'sequence', 'target': 'B'}])
+        b = self.sequences.make_sequence('B', [
+            {'kind': 'sequence', 'target': 'A'}])
+
+        flat = self.sequences.expand(a, [a, b])
+
+        self.assertEqual(
+            [self.sequences.describe_step(s)
+             for s in flat if s['kind'] != 'none'],
+            ['Sequence: A'])
+
+    def test_nesting_stops_at_the_stated_depth(self):
+        chain = []
+        for number in range(self.sequences.MAX_NESTING + 3):
+            chain.append(self.sequences.make_sequence(
+                'S%d' % number,
+                [{'kind': 'sequence', 'target': 'S%d' % (number + 1)}]))
+        chain.append(self.sequences.make_sequence('S%d' % (
+            self.sequences.MAX_NESTING + 3), [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'}]))
+
+        flat = self.sequences.expand(chain[0], chain)
+        filled = [s for s in flat if s['kind'] != 'none']
+
+        # It stops with the step it could not go further into, rather than the
+        # switch-off at the bottom of the chain.
+        self.assertEqual(len(filled), 1)
+        self.assertEqual(filled[0]['kind'], self.sequences.KIND_SEQUENCE)
+
+    def test_the_whole_expansion_is_capped(self):
+        """Ten sequences each holding the next twice is not ten steps."""
+        wide = []
+        for number in range(self.sequences.MAX_NESTING):
+            wide.append(self.sequences.make_sequence('W%d' % number, [
+                {'kind': 'sequence', 'target': 'W%d' % (number + 1)},
+                {'kind': 'sequence', 'target': 'W%d' % (number + 1)},
+            ]))
+        wide.append(self.sequences.make_sequence('W%d' % (
+            self.sequences.MAX_NESTING), [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'}] * 1))
+
+        flat = self.sequences.expand(wide[0], wide)
+
+        self.assertLessEqual(len(flat), self.sequences.MAX_EXPANDED_STEPS)
+
+    # -- refused before it is saved ----------------------------------------
+
+    def test_a_loop_is_spotted_before_the_step_is_chosen(self):
+        a = self.sequences.make_sequence('A', [
+            {'kind': 'sequence', 'target': 'B'}])
+        b = self.sequences.make_sequence('B')
+        pool = [a, b]
+
+        # B already runs nothing, so A may go in it -- except that A runs B.
+        self.assertTrue(self.sequences.would_loop(pool, 'B', 'A'))
+        # And nothing may run itself.
+        self.assertTrue(self.sequences.would_loop(pool, 'A', 'A'))
+        # The other way round is what already exists and is fine.
+        self.assertFalse(self.sequences.would_loop(pool, 'A', 'B'))
+
+    def test_a_loop_three_deep_is_spotted_too(self):
+        a = self.sequences.make_sequence('A', [
+            {'kind': 'sequence', 'target': 'B'}])
+        b = self.sequences.make_sequence('B', [
+            {'kind': 'sequence', 'target': 'C'}])
+        c = self.sequences.make_sequence('C')
+
+        self.assertTrue(self.sequences.would_loop([a, b, c], 'C', 'A'))
+        self.assertFalse(self.sequences.would_loop([a, b, c], 'A', 'C'))
+
+    # -- running it --------------------------------------------------------
+
+    def test_running_the_shutdown_runs_the_blinds_then_the_rest(self):
+        app = self.app()
+        app._sequences = [self.blinds(), self.shutdown()]
+
+        ran = app.run_sequence_by_name('Shutdown', announce=False)
+
+        self.assertTrue(ran)
+        self.assertEqual([call[:2] for call in self.recorder.calls],
+                         [('position', 'BLIND#1'),
+                          ('position', 'BLIND#2'),
+                          ('turn', 'WP9ABC#1')])
+
+    def test_a_missing_nested_sequence_says_so_and_the_rest_still_runs(self):
+        app = self.app()
+        app._sequences = [self.shutdown()]   # no Blinds Down at all
+        errors = []
+
+        done, errors = self.sequences.run(
+            app, dict(self.shutdown(),
+                      steps=self.sequences.expand(self.shutdown(),
+                                                  app.sequences)))
+
+        self.assertEqual(done, 1, 'the amp was left on')
+        self.assertEqual(len(errors), 1)
+        self.assertIn('No sequence called "Blinds Down"', errors[0])
+
+    def test_a_sequence_that_reaches_itself_says_that_when_it_runs(self):
+        app = self.app()
+        loop = self.sequences.make_sequence('Shutdown', [
+            {'kind': 'sequence', 'target': 'Shutdown'},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'},
+        ])
+        app._sequences = [loop]
+
+        done, errors = self.sequences.run(
+            app, dict(loop, steps=self.sequences.expand(loop, app.sequences)))
+
+        self.assertEqual(done, 1, 'the amp was left on')
+        self.assertIn('would reach itself', errors[0])
+
+    def test_a_long_pause_inside_a_nested_sequence_still_defers(self):
+        """The wait is written down against the host, at the spliced index."""
+        app = self.app()
+        slow = self.sequences.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0', 'pause': 600},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ])
+        app._sequences = [slow, self.shutdown()]
+
+        app.run_sequence_by_name('Shutdown', announce=False)
+
+        waiting = app.pending_for('Shutdown')
+        self.assertIsNotNone(waiting, 'the nested pause was slept through')
+        self.assertEqual(waiting['step'], 1)
+        self.assertEqual([call[:2] for call in self.recorder.calls],
+                         [('position', 'BLIND#1')])
+
+        app.run_due_resumes(now=time.time() + 601)
+
+        self.assertEqual([call[:2] for call in self.recorder.calls],
+                         [('position', 'BLIND#1'),
+                          ('position', 'BLIND#2'),
+                          ('turn', 'WP9ABC#1')])
+        self.assertIsNone(app.pending_for('Shutdown'))
+
+    # -- the reuse being visible -------------------------------------------
+
+    def test_a_sequence_says_which_sequences_run_it(self):
+        app = self.app()
+        app._sequences = [self.blinds(), self.shutdown()]
+
+        self.assertEqual(app.sequence_used_by('Blinds Down'), ['Shutdown'])
+        self.assertEqual(app.sequence_used_by('Shutdown'), [])
+
+    def test_renaming_takes_everything_naming_it_along(self):
+        """A rename that left them behind would break the shutdown silently."""
+        app = self.app()
+        app._sequences = [self.blinds(), self.shutdown()]
+
+        renamed, moved = app.rename_sequence(app.sequence_by_name('Blinds Down'),
+                                             'Blinds Shut')
+
+        self.assertTrue(renamed)
+        self.assertEqual(moved, 1)
+        self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Shutdown'])
+        # And it still runs, which is the point of repointing it.
+        app.run_sequence_by_name('Shutdown', announce=False)
+        self.assertEqual([call[:2] for call in self.recorder.calls],
+                         [('position', 'BLIND#1'),
+                          ('position', 'BLIND#2'),
+                          ('turn', 'WP9ABC#1')])
+
+    def test_a_rename_also_moves_the_rerack_phases(self):
+        import reracks as rerack_lib
+
+        app = self.app()
+        app._sequences = [self.blinds()]
+        app._reracks = rerack_lib.normalise_all([
+            rerack_lib.make_rerack('Alpha', [
+                {'sequence': 'Blinds Down', 'time': '22:00'}])])
+
+        _renamed, moved = app.rename_sequence(
+            app.sequence_by_name('Blinds Down'), 'Blinds Shut')
+
+        self.assertEqual(moved, 1)
+        self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Alpha phase 1'])
 
 
 class TestLongPauses(unittest.TestCase):
