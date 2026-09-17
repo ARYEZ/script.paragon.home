@@ -13536,6 +13536,52 @@ class TestWebRemote(unittest.TestCase):
         self.assertIn('text/html', answer['type'])
         self.assertIn(b'Paragon Home', answer['body'])
 
+    def test_no_javascript_string_runs_off_the_end_of_its_line(self):
+        """The page is a plain Python string, so a backslash-n in it is a real
+        newline by the time a browser sees it -- and a real newline inside a
+        JavaScript string literal is a syntax error that takes the whole script
+        down with it. The page then serves perfectly, styles perfectly, and
+        renders nothing at all.
+
+        That shipped. Every other test here asks whether some text is present
+        in the page, and the text was present: the page was broken around it.
+        This asks the only question those could not.
+        """
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        js = page[page.index('<script>'):]
+
+        offenders, index, length, line, quote = [], 0, len(js), 1, None
+        while index < length:
+            char = js[index]
+            if quote:
+                if char == '\\':
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = None
+                elif char == '\n':
+                    offenders.append(line)
+                    quote = None
+                    line += 1
+            elif char in '"\'':
+                quote = char
+            elif char == '/' and index + 1 < length and js[index + 1] == '/':
+                while index < length and js[index] != '\n':
+                    index += 1
+                continue
+            elif char == '/' and index + 1 < length and js[index + 1] == '*':
+                end = js.find('*/', index + 2)
+                line += js.count('\n', index, end)
+                index = end + 2
+                continue
+            elif char == '\n':
+                line += 1
+            index += 1
+
+        self.assertEqual(offenders, [],
+                         'a string literal is cut off at these script lines')
+
     def test_the_page_asks_for_nothing_from_anywhere_else(self):
         """No CDN and no font host: the typeface is served from this box.
 

@@ -3016,7 +3016,7 @@ function deviceCard(device) {
     var opening = el('button', 'unlockbtn', 'Unlock');
     opening.addEventListener('click', function () {
       if (!window.confirm('Open ' + device.name
-                          + '?\n\nThis withdraws the bolt.')) { return; }
+                          + '?\\n\\nThis withdraws the bolt.')) { return; }
       act('unlock', {target: device.id});
     });
     controls.appendChild(opening);
