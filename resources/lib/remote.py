@@ -51,7 +51,7 @@ import tv
 from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
                     same_secret, to_bytes, to_text)
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP, CAP_COMMANDS,
-                     CAP_POSITION, CAP_POWER, CAP_STATE)
+                     CAP_LOCK, CAP_POSITION, CAP_POWER, CAP_STATE)
 
 # Where the API token is kept. Not in settings.xml: it is not something anyone
 # types, and Kodi rewrites settings.xml on exit -- which is exactly the race
@@ -107,8 +107,12 @@ COOKIE_NAME = 'paragon_remote'
 # Actions the remote accepts, and whether the phone waits for the answer.
 # Sequences and discovery are not waited on: a sequence can hold an hour of
 # pauses, and the phone wants to know it started, not sit there until it ends.
+# 'lock' is here and 'unlock' is not, and never will be. Paragon Home can lock
+# a door and cannot open one -- there is no unlock verb in any driver or in the
+# Hub for this to route to, so the absence is structural rather than a name
+# left off a list.
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
-             'command', 'position', 'states', 'cancel_sequence')
+             'command', 'position', 'states', 'cancel_sequence', 'lock')
 # A satellite copying from its master reads five files over SSH, each with its
 # own timeout, so a master that is off can take longer than a handler is
 # willing to wait. Discovery is the same shape.
@@ -160,7 +164,7 @@ STATIC_CACHE = 'public, max-age=31536000, immutable'
 # or colour, but it does have the codes it has been taught, and those are as
 # much a thing to press as an on switch is.
 ACTIONABLE = frozenset([CAP_POWER, CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
-                        CAP_COMMANDS, CAP_POSITION])
+                        CAP_COMMANDS, CAP_POSITION, CAP_LOCK])
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +613,15 @@ def perform(app, action, params, sleep_func=None, on_step=None):
         return {'ok': bool(ran),
                 'message': name if ran else '%s had nothing to do' % name}
 
+    if action == 'lock':
+        device = app.device_by_id(params.get('target'))
+        if device is None:
+            return {'ok': False, 'message': 'No such device'}
+        if CAP_LOCK not in app.controller.capabilities(device):
+            return {'ok': False, 'message': '%s is not a lock' % device.name}
+        app.controller.lock(device)
+        return {'ok': True, 'message': '%s locked' % device.name}
+
     if action == 'cancel_sequence':
         name = params.get('name') or params.get('value') or ''
         if app.cancel_pending(name):
@@ -670,6 +683,8 @@ def _device_entry(app, device, state):
         'power': None,
         'brightness': None,
         'position': None,
+        'lock': None,
+        'door': None,
         # Where these numbers came from: 'read' is what the device said when it
         # was last asked, 'told' is what we last set it to and never heard back
         # about, absent is nothing known at all. The page says which, because a
@@ -680,9 +695,11 @@ def _device_entry(app, device, state):
         entry['power'] = state.get('power')
         entry['brightness'] = state.get('brightness')
         entry['position'] = state.get('position')
+        entry['lock'] = state.get('lock')
+        entry['door'] = state.get('door')
         entry['from'] = 'read'
         if any(entry[key] is not None
-               for key in ('power', 'brightness', 'position')):
+               for key in ('power', 'brightness', 'position', 'lock')):
             return entry
 
     # Nothing was read, or what was read said nothing useful. What we last told
@@ -692,7 +709,7 @@ def _device_entry(app, device, state):
     remembered = told.get(device.device_id)
     if not remembered:
         return entry
-    for key in ('power', 'brightness', 'position'):
+    for key in ('power', 'brightness', 'position', 'lock'):
         if entry.get(key) is None and remembered.get(key) is not None:
             entry[key] = remembered[key]
             entry['from'] = 'told'
@@ -1776,6 +1793,14 @@ button.tile .sub {
    reaches 4.4:1 there. Left as it is so this reads as one thing with the lit
    channel card, which makes exactly the same trade, and because the wait is
    also written in the menus and logged. */
+/* A deadbolt. Given its own edge so a door does not read as another lamp in
+   the list, and a jammed bolt takes the red the page already uses for a
+   failure, because that is what it is. */
+.card.dev.bolt::before { background: var(--teal); opacity: .9; }
+.card.dev.jammed::before { background: #ff5f5f; opacity: 1; }
+.card.dev.jammed .state { color: #ff5f5f; }
+.lockbtn { font-weight: 700; }
+
 /* The marker on a number we set rather than read. Quiet enough not to compete
    with the number, present enough to stop it reading as measured fact. */
 .stat .told {
@@ -2921,6 +2946,16 @@ function renderPalette() {
 }
 
 function describe(device) {
+  /* A deadbolt, which has neither power nor codes. Jammed is said as itself
+     rather than folded into unlocked: a bolt that fouled the strike plate has
+     not locked, and the difference is whether you go to bed or go and look. */
+  if ((device.caps || []).indexOf('lock') >= 0) {
+    var bolt = device.lock;
+    if (!bolt) { return device.model || 'Lock'; }
+    var door = device.door ? ', door ' + device.door : '';
+    if (bolt === 'jammed') { return 'JAMMED' + door; }
+    return (bolt === 'locked' ? 'Locked' : 'Unlocked') + door;
+  }
   // A blaster has no power to report; what it has is however many codes it
   // has been taught.
   if ((device.caps || []).indexOf('power') < 0) {
@@ -2940,7 +2975,19 @@ function deviceCard(device) {
   card.appendChild(state_line);
 
   var caps = device.caps || [];
+  if (caps.indexOf('lock') >= 0) { card.classList.add('bolt'); }
+  if (device.lock === 'jammed') { card.classList.add('jammed'); }
   var controls = el('div', 'controls');
+
+  /* One button, and no counterpart. There is no unlock action to ask for --
+     not withheld from the page, absent from the add-on. */
+  if (caps.indexOf('lock') >= 0) {
+    var bolting = el('button', 'lockbtn', 'Lock');
+    bolting.addEventListener('click', function () {
+      act('lock', {target: device.id});
+    });
+    controls.appendChild(bolting);
+  }
 
   if (caps.indexOf('power') >= 0) {
     // A blind is switched by the same two verbs, but "On" is not what a

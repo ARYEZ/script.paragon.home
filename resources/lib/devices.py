@@ -37,6 +37,12 @@ CAP_COLOR_TEMP = 'color_temp'
 CAP_STATE = 'state'        # can report what it is currently doing
 CAP_COMMANDS = 'commands'  # emits named commands, e.g. a learned IR code
 CAP_POSITION = 'position'  # opens and closes to a percentage, e.g. a blind
+# Throws a deadbolt. One direction only, and that is the whole of the design:
+# there is no CAP_UNLOCK and no unlock verb anywhere in this add-on, so no
+# sequence, no scene, no phone on the network and no mistake in this code can
+# open a door. Withdrawing the bolt stays with the key, the keypad and the
+# vendor's own app.
+CAP_LOCK = 'lock'
 
 # Devices cached before drivers existed have no driver recorded; they are all
 # Govee, because that is all there was.

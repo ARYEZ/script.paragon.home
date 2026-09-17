@@ -5,7 +5,7 @@ Creator: Aryez
 Year: 2026
 Part of: Paragon TV Project
 
-The SwitchBot driver: blinds and shades, reached through a SwitchBot hub.
+The SwitchBot driver: blinds, shades and deadbolts, through a SwitchBot hub.
 
 One implementation of the driver contract the Hub routes to. What is unusual
 about it is that it is the only driver here with no LAN path at all -- see
@@ -18,6 +18,15 @@ every "switch everything off" path in the add-on and would be shut by scenes
 that meant to turn off a lamp. It reports CAP_POSITION and CAP_STATE, so the
 menus offer it a position and the scene engine passes over it entirely.
 
+A lock is here on one condition: it locks and it cannot unlock. It reports
+CAP_LOCK and CAP_STATE and nothing else -- no CAP_POWER, most of all, because a
+lock offered as a switch would be reached by "switch everything off", by a
+scene meaning to turn off a lamp, and by the power buttons on the web remote.
+It is not that those paths would refuse a lock; it is that they never see one.
+
+There is no unlock verb in this driver, in the Hub, or anywhere above them. A
+door is not a thing this add-on can open.
+
 A note on what "position" means on a Blind Tilt, because it is not what it
 means on a curtain. The slats tilt rather than travelling: both ends of the
 range are shut -- one tilted up, one tilted down -- and the middle is open.
@@ -27,14 +36,43 @@ commands in their own right, so Open, Close Up and Close Down do whatever the
 hardware says they do and do not depend on this comment being right.
 """
 
-from devices import (CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
-                     ControlError, Device)
+from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
+                     CAP_STATE, ControlError, Device)
 from switchbot_cloud import CloudError
 
 # What this driver will adopt. Everything else on the account -- bots,
 # sensors, plugs, the hub itself, and every infrared remote it fronts -- is
 # left alone rather than half-supported.
 COVER_TYPES = ('Blind Tilt', 'Curtain', 'Curtain3', 'Roller Shade')
+
+# Deadbolts. Several spellings because SwitchBot has shipped the line under
+# more than one name and the account reports whichever the hardware is; a type
+# not listed here is passed over and named in the search warning, which is how
+# a new one gets added rather than guessed at.
+LOCK_TYPES = ('Smart Lock', 'Smart Lock Pro', 'Smart Lock Ultra', 'Lock',
+              'Lock Pro', 'Lock Ultra')
+
+# What SwitchBot reports a bolt as doing, mapped to the two words this add-on
+# uses plus the one that matters most. "jammed" is its own answer and not a
+# kind of unlocked: a bolt that fouled the strike plate has not locked, and
+# saying so is the difference between going to bed and going to look.
+LOCK_STATES = {
+    'locked': 'locked',
+    'lock': 'locked',
+    'unlocked': 'unlocked',
+    'unlock': 'unlocked',
+    'jammed': 'jammed',
+}
+
+# The one command this driver will send a lock. There is no unlock here, and
+# that absence is the feature -- see Hub.lock.
+LOCK_COMMAND = 'lock'
+
+
+def is_lock(device):
+    """Whether this is a deadbolt rather than a cover."""
+    model = (getattr(device, 'model', '') or '').strip()
+    return model in LOCK_TYPES
 
 # Tilt devices take even positions only; an odd one is rejected outright.
 POSITION_STEP = 2
@@ -93,7 +131,7 @@ class SwitchBotDriver(object):
     # -- discovery ---------------------------------------------------------
 
     def discover(self, timeout=3.0):
-        """Every cover on the account. Returns (devices, warnings).
+        """Every cover and lock on the account. Returns (devices, warnings).
 
         `timeout` is accepted for the contract's sake and unused: this is one
         HTTPS request whose timeout belongs to the transport, not a LAN sweep
@@ -116,7 +154,7 @@ class SwitchBotDriver(object):
         skipped = []
         for entry in entries:
             devtype = (entry.get('deviceType') or '').strip()
-            if devtype not in COVER_TYPES:
+            if devtype not in COVER_TYPES and devtype not in LOCK_TYPES:
                 skipped.append(devtype or 'unnamed type')
                 continue
             device_id = entry.get('deviceId') or ''
@@ -144,8 +182,8 @@ class SwitchBotDriver(object):
                 self._log('SwitchBot: passed over %s' % listed)
             else:
                 warnings.append(
-                    'SwitchBot found %d device(s), none of them a blind or '
-                    'shade: %s' % (len(skipped), listed))
+                    'SwitchBot found %d device(s), none of them a blind, '
+                    'shade or lock: %s' % (len(skipped), listed))
         return found, warnings
 
     # -- capabilities ------------------------------------------------------
@@ -161,10 +199,18 @@ class SwitchBotDriver(object):
         decides that from CAP_POWER, and CAP_BRIGHTNESS is deliberately
         absent so the scene engine passes over it.
         """
+        if is_lock(device):
+            # Deliberately short. No CAP_POWER, so no "switch everything off"
+            # and no scene ever reaches a deadbolt; no CAP_POSITION, because a
+            # door is not ajar by a percentage; no CAP_COMMANDS, because the
+            # named-command path would be a way to send "unlock" by typing it.
+            return set([CAP_LOCK, CAP_STATE])
         return set([CAP_POSITION, CAP_STATE, CAP_POWER, CAP_COMMANDS])
 
     @staticmethod
     def commands(device):
+        if is_lock(device):
+            return []
         table = TILT_COMMANDS if is_tilt(device) else TRAVEL_COMMANDS
         return [label for label, _command in table]
 
@@ -201,6 +247,8 @@ class SwitchBotDriver(object):
         either way -- reinterpreting it here would put this driver's guess
         between the user and the slider.
         """
+        if is_lock(device):
+            raise ControlError('%s is a lock, not a blind' % device.name)
         position = clean_position(percent)
         if is_tilt(device):
             # The API wants a direction alongside the number. "up" is the
@@ -210,8 +258,31 @@ class SwitchBotDriver(object):
         else:
             self._send(device, 'setPosition', '0,ff,%d' % position)
 
+    def lock(self, device):
+        """Throw the bolt. There is no counterpart and there will not be one.
+
+        Safe to send at a bolt that is already thrown, which is why nothing
+        here reads the state first: the right thing to do is the same either
+        way, and a read that said "already locked" wrongly would be a reason
+        not to lock a door.
+        """
+        if not is_lock(device):
+            raise ControlError('%s is not a lock' % device.name)
+        return self._send(device, LOCK_COMMAND)
+
     def turn(self, device, on):
-        """Open or shut, for callers that only know how to switch things."""
+        """Open or shut, for callers that only know how to switch things.
+
+        A lock is refused here rather than only being kept out by not claiming
+        CAP_POWER. Not claiming it is what stops a lock being offered; this is
+        what stops it being reached anyway -- Hub.turn does not check
+        capabilities, and on this hardware "turnOn" at a deadbolt is an open
+        front door. A rule this important is worth enforcing where it would be
+        broken, not only where it is declared.
+        """
+        if is_lock(device):
+            raise ControlError('%s is a lock. Paragon Home can lock a door '
+                               'and cannot open one.' % device.name)
         if is_tilt(device):
             self._send(device, 'fullyOpen' if on else 'closeDown')
         else:
@@ -229,10 +300,36 @@ class SwitchBotDriver(object):
     # -- reading -----------------------------------------------------------
 
     @staticmethod
-    def _state_from_status(status):
+    def _lock_state_from_status(status):
+        """A deadbolt's status, as the state dict the add-on uses.
+
+        "jammed" is carried through as itself rather than folded into
+        unlocked. A bolt that fouled the strike plate has not locked, but it is
+        not the same as one that was never asked to -- and the difference is
+        whether you go to bed or go and look.
+        """
+        raw = (status.get('lockState') or '').strip().lower()
+        known = LOCK_STATES.get(raw)
+        if known is None:
+            return None
+        state = {'lock': known}
+        door = (status.get('doorState') or '').strip().lower()
+        if door in ('open', 'opened'):
+            state['door'] = 'open'
+        elif door in ('close', 'closed'):
+            state['door'] = 'closed'
+        battery = status.get('battery')
+        if battery is not None:
+            state['battery'] = battery
+        return state
+
+    @staticmethod
+    def _state_from_status(status, lock=False):
         """One SwitchBot status body, as the state dict the add-on uses."""
         if not status:
             return None
+        if lock:
+            return SwitchBotDriver._lock_state_from_status(status)
         raw = status.get('slidePosition')
         if raw is None:
             return None
@@ -257,7 +354,7 @@ class SwitchBotDriver(object):
         except CloudError as exc:
             self._log('Could not read %s: %s' % (device.name, exc))
             return None
-        return self._state_from_status(status)
+        return self._state_from_status(status, lock=is_lock(device))
 
     def get_states(self, devices, timeout=3.0):
         """Read every listed cover.

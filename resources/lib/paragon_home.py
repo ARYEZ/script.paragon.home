@@ -22,8 +22,8 @@ import reracks as rerack_lib
 import satellite as satellite_lib
 import sequences as sequence_lib
 import scenes as scene_lib
-from devices import (DEVICE_CACHE, Device, TRANSPORT_AUTO, TRANSPORT_CLOUD,
-                     TRANSPORT_LAN, build_hub)
+from devices import (CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
+                     TRANSPORT_CLOUD, TRANSPORT_LAN, build_hub)
 
 # Order must match the `values` list on the transport_mode setting.
 _TRANSPORT_MODES = [TRANSPORT_AUTO, TRANSPORT_LAN, TRANSPORT_CLOUD]
@@ -1527,6 +1527,17 @@ class ParagonHome(object):
         return collapse(devices)
 
     def power_all(self, on, targets=None):
+        """Switch the named devices, or everything that can be switched.
+
+        "Everything" means everything with CAP_POWER, not every enabled device.
+        A deadbolt has no power and must never be reached by "switch everything
+        off" -- the driver refuses it, but a rule enforced only by a refusal is
+        a rule that shows up as an error on the television every night. It is
+        cleaner for the door never to be in the list.
+        """
+        if targets is None:
+            targets = [device for device in self.enabled_devices
+                       if CAP_POWER in self.controller.capabilities(device)]
         return self._each(lambda d: self.controller.turn(d, on), targets)
 
     def brightness_all(self, percent, targets=None):

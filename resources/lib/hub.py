@@ -31,8 +31,8 @@ it has and reports the rest as absent.
 
 import time
 
-from devices import (CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
-                     ControlError, DEFAULT_DRIVER)
+from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
+                     CAP_STATE, ControlError, DEFAULT_DRIVER)
 
 # What a power-only device is allowed to be asked for. Switching, and saying
 # what it is doing -- everything about how it looks is somebody else's job.
@@ -219,6 +219,26 @@ class Hub(object):
             raise ControlError('%s cannot be opened or closed' % device.name)
         answer = driver.set_position(device, percent)
         self._remember(device, position=percent)
+        return answer
+
+    def lock(self, device):
+        """Throw a deadbolt. There is deliberately no counterpart to this.
+
+        Paragon Home can lock a door and cannot open one. Not by refusing at
+        the door -- by there being no unlock verb here, in any driver, or
+        anywhere above this. A sequence cannot call one, the web remote cannot
+        ask for one, and a mistake in any of that code cannot become an open
+        front door. Withdrawing the bolt is the key's job, and the keypad's,
+        and the vendor app's.
+
+        Locking is also safe to repeat: a bolt already thrown stays thrown, so
+        nothing here has to know the state to do the right thing.
+        """
+        driver = self._require(device)
+        if CAP_LOCK not in driver.capabilities(device):
+            raise ControlError('%s is not a lock' % device.name)
+        answer = driver.lock(device)
+        self._remember(device, lock='locked')
         return answer
 
     @staticmethod

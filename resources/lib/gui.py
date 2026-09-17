@@ -25,7 +25,8 @@ import reracks as rerack_lib
 import sequences as sequence_lib
 import scenes as scene_lib
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
-                     CAP_COMMANDS, CAP_POSITION, CAP_POWER, CAP_STATE,
+                     CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
+                     CAP_STATE,
                      ControlError, DEFAULT_DRIVER, TRANSPORT_CLOUD)
 
 # Presets offered before the user has to type anything.
@@ -437,6 +438,12 @@ class ControlPanel(object):
                      lambda: _report(self.app.power_all(False, targets),
                                      '%s off' % heading)),
                 ])
+            if CAP_LOCK in capabilities:
+                # One row, and no counterpart. Paragon Home can lock a door
+                # and cannot open one -- there is no unlock verb anywhere
+                # below this to call.
+                rows.append(('Lock',
+                             lambda: self._lock_them(targets, heading)))
             if CAP_BRIGHTNESS in capabilities:
                 rows.append(('Brightness...',
                              lambda: self.brightness_menu(targets, heading)))
@@ -2546,6 +2553,24 @@ class ControlPanel(object):
                                                sequence.get('name'),
                                                other.get('name'))]
 
+    def _lock_them(self, targets, heading):
+        """Throw the bolts. Asked about first, because a door is not a lamp."""
+        if not _dialog().yesno(utils.ADDON_NAME, 'Lock %s?' % heading):
+            return
+        locked, problems = 0, []
+        for device in targets:
+            try:
+                self.app.controller.lock(device)
+                locked += 1
+            except Exception as exc:
+                problems.append('%s: %s' % (device.name, exc))
+        if problems:
+            # Forced, and named: a bolt that did not throw is the one thing
+            # here worth interrupting somebody for.
+            utils.force_notify(problems[0])
+        elif locked:
+            utils.notify('%s locked' % heading)
+
     def _step_sequence(self, sequence):
         """Run another sequence's steps here, in place of retyping them."""
         choices = self._nestable(sequence)
@@ -2600,6 +2625,8 @@ class ControlPanel(object):
         if device is not None and CAP_COMMANDS in capabilities:
             actions.extend((name, sequence_lib.KIND_COMMAND, name)
                            for name in self.app.controller.commands(device))
+        if CAP_LOCK in capabilities:
+            actions.append(('Lock', sequence_lib.KIND_LOCK, ''))
         if device is not None and CAP_POSITION in capabilities:
             actions.extend(('Position %d%%' % step,
                             sequence_lib.KIND_POSITION, str(step))

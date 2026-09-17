@@ -58,6 +58,7 @@ KIND_POWER = 'power'
 KIND_COMMAND = 'command'
 KIND_POSITION = 'position'   # open a blind to a percentage
 KIND_SEQUENCE = 'sequence'   # run another sequence's steps here
+KIND_LOCK = 'lock'           # throw a deadbolt; there is no unlock step
 
 # Power actions a step can carry.
 ACTION_ON = 'on'
@@ -358,6 +359,17 @@ def normalise_step(raw):
         step['target'] = name
         return step
 
+    if kind == KIND_LOCK:
+        # No action of its own: there is one thing a lock step can do, and the
+        # other one does not exist anywhere in this add-on.
+        target = (raw.get('target') or '').strip()
+        if not target:
+            return empty_step()
+        step['kind'] = KIND_LOCK
+        step['driver'] = (raw.get('driver') or '').strip()
+        step['target'] = target
+        return step
+
     if kind == KIND_POSITION:
         target = (raw.get('target') or '').strip()
         if not target:
@@ -472,6 +484,8 @@ def describe_step(step, device_name=None):
         text = 'Scene: %s' % target
     elif kind == KIND_SEQUENCE:
         text = 'Sequence: %s' % (step.get('target') or '')
+    elif kind == KIND_LOCK:
+        text = '%s: Lock' % target
     elif kind == KIND_POWER:
         if step.get('target') == TARGET_ALL:
             target = 'all %s devices' % (step.get('driver') or 'listed')
@@ -713,7 +727,16 @@ def still_needed(step, targets, states):
 
 
 def checkable(step):
-    """Whether this kind of step could ever be skipped as already done."""
+    """Whether this kind of step could ever be skipped as already done.
+
+    Only a position and an explicit on or off. Everything else falls through to
+    False, and a lock is the one worth saying out loud: a bolt does report
+    whether it is thrown, so the comparison would work, and it is still never
+    asked. A reading that wrongly says "already locked" leaves a front door
+    open all night, where throwing a bolt that is already thrown costs nothing.
+    The trade that makes skipping worth it for a blind is upside down at a
+    door, so a lock is not even asked where it is.
+    """
     if step.get('kind') == KIND_POSITION:
         return True
     return (step.get('kind') == KIND_POWER
@@ -879,6 +902,11 @@ def _run_step(app, step, states=None):
     if kind == KIND_POSITION:
         for device in targets:
             app.controller.set_position(device, int(step['action']))
+        return
+
+    if kind == KIND_LOCK:
+        for device in targets:
+            app.controller.lock(device)
         return
 
     raise ControlError('Unknown step type "%s"' % kind)

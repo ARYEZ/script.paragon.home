@@ -15,7 +15,9 @@ import datetime
 import hashlib
 import hmac
 import json
+import io
 import os
+import re
 import shutil
 import socket
 import struct
@@ -47,8 +49,9 @@ import govee_cloud  # noqa: E402
 import govee_lan  # noqa: E402
 import scenes as scene_lib  # noqa: E402
 from devices import (CAP_BRIGHTNESS, CAP_COLOR,  # noqa: E402
-                     CAP_COLOR_TEMP, CAP_COMMANDS, CAP_POSITION, CAP_POWER,
-                     CAP_STATE, ControlError, Device, GoveeController)
+                     CAP_COLOR_TEMP, CAP_COMMANDS, CAP_LOCK, CAP_POSITION,
+                     CAP_POWER, CAP_STATE, ControlError, Device,
+                     GoveeController)
 
 PROFILE = xbmcaddon._PROFILE
 
@@ -2071,6 +2074,361 @@ class TestNestedSequences(unittest.TestCase):
 
         self.assertEqual(moved, 1)
         self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Alpha phase 1'])
+
+
+class TestTheLockCannotUnlock(unittest.TestCase):
+    """The rule the whole deadbolt feature rests on, checked as a rule.
+
+    Paragon Home can throw a bolt and cannot withdraw one. Not because the
+    paths that could refuse -- because there is no unlock verb anywhere for
+    them to reach. These are the tests that would notice if that stopped being
+    true, including by somebody adding the obvious missing method.
+    """
+
+    LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'resources', 'lib')
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui', 'hub',
+                     'switchbot_driver', 'remote'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def sources(self):
+        for name in sorted(os.listdir(self.LIB)):
+            if not name.endswith('.py'):
+                continue
+            handle = io.open(os.path.join(self.LIB, name), encoding='utf-8')
+            try:
+                yield name, handle.read()
+            finally:
+                handle.close()
+
+    def test_no_module_defines_an_unlock(self):
+        offenders = []
+        for name, source in self.sources():
+            if re.search(r'def\s+unlock\s*\(', source):
+                offenders.append(name)
+        self.assertEqual(offenders, [], 'something grew an unlock verb')
+
+    def test_nothing_sends_the_unlock_command(self):
+        """The API takes the word "unlock"; nothing here may put it on the wire."""
+        offenders = []
+        for name, source in self.sources():
+            # The word appears in prose and in the state vocabulary, which is
+            # fine -- reading that a door is unlocked is not opening one. What
+            # must not appear is it being sent or called.
+            for hit in re.findall(r"^.*['\"]unlock['\"].*$", source,
+                                  re.MULTILINE):
+                if re.search(r'(_send|command|lock)\s*\(\s*[^)]*'
+                             r"['\"]unlock['\"]", hit):
+                    offenders.append('%s: %s' % (name, hit.strip()))
+        self.assertEqual(offenders, [])
+
+    def test_the_remote_has_no_unlock_action(self):
+        import remote as remote_lib
+
+        self.assertIn('lock', remote_lib.ACTIONS)
+        self.assertNotIn('unlock', remote_lib.ACTIONS)
+
+    # -- a lock is not a switch --------------------------------------------
+
+    def driver(self):
+        import switchbot_driver
+
+        return switchbot_driver
+
+    def a_lock(self, model='Smart Lock Pro'):
+        return Device('LK1', name='Front Door', driver='switchbot',
+                      model=model, cloud=True)
+
+    def test_a_lock_offers_only_locking_and_reporting(self):
+        """No power, so no "switch everything off" ever sees a door."""
+        caps = self.driver().SwitchBotDriver.capabilities(self.a_lock())
+
+        self.assertEqual(caps, set([CAP_LOCK, CAP_STATE]))
+        self.assertNotIn(CAP_POWER, caps)
+        self.assertNotIn(CAP_POSITION, caps)
+        self.assertNotIn(CAP_COMMANDS, caps)
+
+    def test_a_lock_offers_no_named_commands(self):
+        """The command path would be a way to type "unlock" and send it."""
+        self.assertEqual(
+            self.driver().SwitchBotDriver.commands(self.a_lock()), [])
+
+    def test_switching_a_lock_is_refused_by_the_driver_itself(self):
+        """Hub.turn does not check capabilities; this is the backstop.
+
+        On this hardware "turnOn" at a deadbolt is an open front door, so the
+        rule is enforced where it would be broken and not only where it is
+        declared.
+        """
+        sent = []
+        driver = self.driver().SwitchBotDriver()
+        driver._send = lambda d, c, **kw: sent.append(c)
+
+        self.assertRaises(ControlError, driver.turn, self.a_lock(), True)
+        self.assertRaises(ControlError, driver.turn, self.a_lock(), False)
+        self.assertEqual(sent, [], 'a command reached a deadbolt')
+
+    def test_driving_a_lock_to_a_position_is_refused(self):
+        sent = []
+        driver = self.driver().SwitchBotDriver()
+        driver._send = lambda d, c, **kw: sent.append(c)
+
+        self.assertRaises(ControlError, driver.set_position, self.a_lock(), 50)
+        self.assertEqual(sent, [])
+
+    def test_locking_sends_the_one_command_there_is(self):
+        sent = []
+        driver = self.driver().SwitchBotDriver()
+        driver._send = lambda d, c, **kw: sent.append(c)
+
+        driver.lock(self.a_lock())
+
+        self.assertEqual(sent, ['lock'])
+
+    def test_the_hub_refuses_to_lock_something_that_is_not_a_lock(self):
+        """Its own check, not the driver's. Two guards, tested separately.
+
+        A driver that would happily take it is exactly the case the Hub's check
+        exists for, so the double here says yes to everything.
+        """
+        import hub as hub_lib
+
+        class WouldLockAnything(object):
+            DRIVER_ID = 'anything'
+            DRIVER_LABEL = 'Anything'
+            locked = []
+
+            @staticmethod
+            def capabilities(device):
+                return set([CAP_POWER])
+
+            @staticmethod
+            def commands(device):
+                return []
+
+            def lock(self, device):
+                WouldLockAnything.locked.append(device.device_id)
+
+        hub = hub_lib.Hub([WouldLockAnything()])
+        plug = Device('WP1', name='Amp', driver='anything')
+
+        self.assertRaises(ControlError, hub.lock, plug)
+        self.assertEqual(WouldLockAnything.locked, [])
+
+    def test_locking_something_that_is_not_a_lock_is_refused(self):
+        sent = []
+        driver = self.driver().SwitchBotDriver()
+        driver._send = lambda d, c, **kw: sent.append(c)
+        blind = Device('BT01', name='Blinds', driver='switchbot',
+                       model='Blind Tilt')
+
+        self.assertRaises(ControlError, driver.lock, blind)
+        self.assertEqual(sent, [])
+
+    # -- nothing in the house sweeps up the door ---------------------------
+
+    def house(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        caps = {'LK1': {CAP_LOCK, CAP_STATE},
+                'WP9ABC#1': {CAP_POWER, CAP_STATE}}
+        self.recorder.capabilities = lambda d: caps[d.device_id]
+        app.controller = self.recorder
+        app._devices = [
+            Device('LK1', name='Front Door', driver='switchbot',
+                   model='Smart Lock Pro', cloud=True),
+            Device('WP9ABC#1', name='Amp', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+        ]
+        app._scenes = []
+        return app
+
+    def test_switching_everything_off_does_not_reach_the_door(self):
+        """The one that would matter most, and the easiest to get wrong."""
+        app = self.house()
+
+        app.power_all(False)
+
+        self.assertEqual([c[:2] for c in self.recorder.calls],
+                         [('turn', 'WP9ABC#1')])
+
+    def test_a_scene_applied_to_everything_does_not_reach_the_door(self):
+        import scenes as scene_lib
+
+        app = self.house()
+        app._scenes = [scene_lib.make_scene('All Off',
+                                            power=scene_lib.POWER_OFF)]
+
+        app.apply_scene_by_name('All Off', announce=False)
+
+        self.assertEqual(
+            [c for c in self.recorder.calls if c[1] == 'LK1'], [],
+            'a scene reached the front door')
+
+    def test_a_lock_is_not_offered_as_a_light(self):
+        import scenes as scene_lib
+
+        app = self.house()
+        lock = app.device_by_id('LK1')
+
+        self.assertFalse(scene_lib.is_a_light(lock, app.controller))
+
+    def test_a_lock_is_not_even_asked_where_it_is(self):
+        """Nothing here can act on the answer, so the request is waste.
+
+        Not only waste: on SwitchBot every read is a cloud request against a
+        daily allowance, and a bolt that is never skipped has nothing to say
+        that would change what happens next.
+        """
+        import sequences as sequence_lib
+
+        app = self.house()
+        sequence = sequence_lib.make_sequence('Lock up', [
+            {'kind': 'lock', 'driver': 'switchbot', 'target': 'Front Door'},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Amp',
+             'action': 'off'},
+        ], skip_done=True)
+
+        asked = app.states_for_skipping(sequence)
+
+        self.assertEqual(sorted(asked), ['WP9ABC#1'],
+                         'spent a request asking a door what it was doing')
+
+    def test_a_lock_is_thrown_even_when_it_says_it_is_already_locked(self):
+        """The skip rule stops at the front door, and this is the proof.
+
+        Asserted through a whole run rather than through checkable(), because
+        the predicate answering False is not the same as the bolt being thrown.
+        """
+        import sequences as sequence_lib
+
+        app = self.house()
+        self.recorder.lock = lambda d: self.recorder.calls.append(
+            ('lock', d.device_id))
+        self.recorder.states = {'LK1': {'lock': 'locked'}}
+        app._sequences = [sequence_lib.make_sequence('Lock up', [
+            {'kind': 'lock', 'driver': 'switchbot', 'target': 'Front Door'},
+        ], skip_done=True)]
+
+        app.run_sequence_by_name('Lock up', announce=False)
+
+        self.assertEqual(self.recorder.calls, [('lock', 'LK1')],
+                         'a front door was skipped on a reading')
+
+    def test_a_lock_step_locks_and_sends_nothing_else(self):
+        import sequences as sequence_lib
+
+        app = self.house()
+        self.recorder.lock = lambda d: self.recorder.calls.append(
+            ('lock', d.device_id))
+        app._sequences = [sequence_lib.make_sequence('Lock up', [
+            {'kind': 'lock', 'driver': 'switchbot', 'target': 'Front Door'},
+        ])]
+
+        app.run_sequence_by_name('Lock up', announce=False)
+
+        self.assertEqual(self.recorder.calls, [('lock', 'LK1')])
+
+    # -- what the bolt says ------------------------------------------------
+
+    def test_a_bolt_reports_locked_unlocked_and_jammed(self):
+        read = self.driver().SwitchBotDriver._state_from_status
+        for raw, expected in (('locked', 'locked'), ('lock', 'locked'),
+                              ('unlocked', 'unlocked'), ('unlock', 'unlocked'),
+                              ('jammed', 'jammed')):
+            state = read({'lockState': raw}, lock=True)
+            self.assertEqual(state['lock'], expected, 'read %r wrong' % raw)
+
+    def test_jammed_is_its_own_answer_and_not_a_kind_of_unlocked(self):
+        """A bolt that fouled the strike plate has not locked, and has not
+        simply been left open either."""
+        read = self.driver().SwitchBotDriver._state_from_status
+        state = read({'lockState': 'jammed'}, lock=True)
+
+        self.assertEqual(state['lock'], 'jammed')
+        self.assertNotEqual(state['lock'], 'unlocked')
+
+    def test_the_door_and_the_battery_come_across_too(self):
+        read = self.driver().SwitchBotDriver._state_from_status
+        state = read({'lockState': 'locked', 'doorState': 'closed',
+                      'battery': 84}, lock=True)
+
+        self.assertEqual(state['door'], 'closed')
+        self.assertEqual(state['battery'], 84)
+
+    def test_an_open_door_is_reported_as_open(self):
+        """A bolt thrown with the door open is the state worth seeing."""
+        read = self.driver().SwitchBotDriver._state_from_status
+
+        for raw in ('open', 'opened'):
+            state = read({'lockState': 'locked', 'doorState': raw}, lock=True)
+            self.assertEqual(state['door'], 'open', 'read %r wrong' % raw)
+        for raw in ('close', 'closed'):
+            state = read({'lockState': 'locked', 'doorState': raw}, lock=True)
+            self.assertEqual(state['door'], 'closed', 'read %r wrong' % raw)
+
+    def test_a_state_nothing_can_be_made_of_is_nothing(self):
+        read = self.driver().SwitchBotDriver._state_from_status
+        self.assertIsNone(read({'lockState': 'wibble'}, lock=True))
+        self.assertIsNone(read({}, lock=True))
+
+    # -- discovery ---------------------------------------------------------
+
+    def test_a_lock_on_the_account_is_adopted(self):
+        api = FakeSwitchBotAPI(entries=[
+            {'deviceId': 'LK1', 'deviceName': 'Front Door',
+             'deviceType': 'Smart Lock Pro'}])
+        import switchbot_driver
+
+        driver = switchbot_driver.SwitchBotDriver(transport=api)
+
+        found, warnings = driver.discover()
+
+        self.assertEqual([d.device_id for d in found], ['LK1'])
+        self.assertEqual(found[0].model, 'Smart Lock Pro')
+        self.assertEqual(warnings, [])
+
+    # -- a lock is never skipped -------------------------------------------
+
+    def test_a_lock_step_is_never_skipped_as_already_done(self):
+        """It could be -- a bolt reports itself. The trade is upside down.
+
+        A reading that wrongly says "already locked" leaves a front door open
+        all night; throwing a bolt that is already thrown costs nothing.
+        """
+        import sequences as sequence_lib
+
+        step = sequence_lib.normalise_step(
+            {'kind': 'lock', 'target': 'Front Door'})
+
+        self.assertFalse(sequence_lib.checkable(step))
+        self.assertIsNone(sequence_lib.already_there(step, {'lock': 'locked'}))
+
+    def test_a_lock_step_reads_as_one(self):
+        import sequences as sequence_lib
+
+        step = sequence_lib.normalise_step(
+            {'kind': 'lock', 'target': 'Front Door'})
+
+        self.assertEqual(sequence_lib.describe_step(step), 'Front Door: Lock')
+
+    def test_a_lock_step_with_no_target_is_an_empty_slot(self):
+        import sequences as sequence_lib
+
+        self.assertEqual(
+            sequence_lib.normalise_step({'kind': 'lock', 'target': ' '})['kind'],
+            'none')
 
 
 class TestWhatWeLastTold(unittest.TestCase):
@@ -13475,8 +13833,8 @@ class TestSwitchBotDriver(unittest.TestCase):
         looks exactly like a lock that never paired, unless the name is said.
         """
         api = FakeSwitchBotAPI(entries=[
-            {'deviceId': 'LK1', 'deviceName': 'Front Door',
-             'deviceType': 'Smart Lock Pro'},
+            {'deviceId': 'M1', 'deviceName': 'Porch', 'deviceType': 'Motion '
+             'Sensor'},
             {'deviceId': 'BOT1', 'deviceName': 'Bot', 'deviceType': 'Bot'},
             {'deviceId': 'BOT2', 'deviceName': 'Bot 2', 'deviceType': 'Bot'},
         ])
@@ -13484,7 +13842,7 @@ class TestSwitchBotDriver(unittest.TestCase):
 
         _found, warnings = driver.discover()
 
-        self.assertIn('Smart Lock Pro', warnings[0])
+        self.assertIn('Motion Sensor', warnings[0])
         # Counted where there are several of a kind, rather than listed twice.
         self.assertIn('Bot x2', warnings[0])
 
@@ -13503,8 +13861,8 @@ class TestSwitchBotDriver(unittest.TestCase):
         api = FakeSwitchBotAPI(entries=[
             {'deviceId': 'BT01', 'deviceName': 'Lounge Blinds',
              'deviceType': 'Blind Tilt'},
-            {'deviceId': 'LK1', 'deviceName': 'Front Door',
-             'deviceType': 'Smart Lock Pro'},
+            {'deviceId': 'M1', 'deviceName': 'Porch',
+             'deviceType': 'Motion Sensor'},
         ])
         driver, _api = self.driver(api)
         driver._log = said.append
@@ -13513,7 +13871,7 @@ class TestSwitchBotDriver(unittest.TestCase):
 
         self.assertEqual([d.device_id for d in found], ['BT01'])
         self.assertEqual(warnings, [], 'a house with a blind is not warned')
-        self.assertIn('Smart Lock Pro', ' '.join(said))
+        self.assertIn('Motion Sensor', ' '.join(said))
 
     def test_a_search_with_no_credentials_is_quiet(self):
         """Not an error. Most installs will never have a SwitchBot account."""

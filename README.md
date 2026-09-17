@@ -485,6 +485,41 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### Locks
+
+A SwitchBot deadbolt appears alongside the blinds, with one deliberate limit:
+
+> **Paragon Home can lock a door. It cannot open one.**
+
+Not "asks first", and not "only from the menus". There is no unlock verb in the
+driver, in the Hub, in a sequence step, or in the web remote's action list. No
+scene, no schedule, no phone on the network and no mistake in this code can
+withdraw a bolt. That stays with your key, your keypad and the SwitchBot app.
+
+The lock takes a short capability set for the same reason — **lock and report,
+nothing else**. No power, so *"switch everything off"* and every scene pass over
+it entirely; no position, because a door is not ajar by a percentage; no named
+commands, because that path would be a way to type `unlock` and have it sent.
+The driver also refuses a lock outright on the power and position verbs, because
+a rule this important is worth enforcing where it would be broken and not only
+where it is declared.
+
+**What a bolt reports:** `Locked`, `Unlocked`, or **`JAMMED`** — carried through
+as itself rather than folded into unlocked, because a bolt that fouled the
+strike plate has not locked, and the difference is whether you go to bed or go
+and look. Door open/closed and battery come across too where the hardware sends
+them.
+
+**A lock step is never skipped**, even with *Skip what is already done* on, and
+the lock is not even asked where it is. A bolt does report itself, so the
+comparison would work — but a reading that wrongly says "already locked" leaves
+a front door open all night, where throwing a bolt that is already thrown costs
+nothing. The trade that makes skipping worth it for a blind is upside down at a
+door.
+
+Adding **Lock** as a sequence step is how a *Lock up* or bedtime routine gets a
+door in it.
+
 ### What a number on the remote means
 
 A device's state is only read when you **pull to refresh** — it costs a round
