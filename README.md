@@ -529,7 +529,13 @@ exactly as they are at the bulb.
 
 ### Locks
 
-A SwitchBot deadbolt appears alongside the blinds, with one deliberate limit:
+A SwitchBot deadbolt appears alongside the blinds — any of them, because the
+driver matches on the word `Lock` in the type SwitchBot reports rather than on a
+list of model names. Smart Lock, Smart Lock Pro, Lock Ultra, Lock Vision and
+whatever ships next are all recognised without a code change. Nothing else in
+the catalogue carries the word; the Keypad is the nearest miss and does not.
+
+It comes with one deliberate limit:
 
 > **Paragon Home can lock a door. It cannot open one.**
 

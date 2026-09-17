@@ -49,8 +49,27 @@ COVER_TYPES = ('Blind Tilt', 'Curtain', 'Curtain3', 'Roller Shade')
 # more than one name and the account reports whichever the hardware is; a type
 # not listed here is passed over and named in the search warning, which is how
 # a new one gets added rather than guessed at.
-LOCK_TYPES = ('Smart Lock', 'Smart Lock Pro', 'Smart Lock Ultra', 'Lock',
-              'Lock Pro', 'Lock Ultra')
+# Deadbolts, matched on the word rather than on a list of spellings.
+#
+# The list came first and was the wrong shape. SwitchBot has shipped this line
+# as Smart Lock, Smart Lock Pro, Lock Ultra and Lock Vision, and the API
+# documents the deviceType for some of those and not others -- so a list is a
+# guess that goes stale every time a model ships, and goes stale silently: the
+# lock simply does not appear and nothing says why.
+#
+# Every deadbolt SwitchBot makes has "Lock" in the name it reports, and nothing
+# else in the catalogue does. Not the covers this driver already adopts, and
+# not the Keypad, which is the nearest miss and does not contain the word.
+#
+# A false positive is cheap and bounded: a device wrongly taken for a lock gets
+# CAP_LOCK, and the worst it can do is fail when told to lock. It can never
+# open anything, because there is nothing here that opens anything.
+LOCK_WORD = 'LOCK'
+
+
+def looks_like_a_lock(device_type):
+    """Whether SwitchBot's own name for a device says it is a deadbolt."""
+    return LOCK_WORD in (device_type or '').strip().upper()
 
 # What SwitchBot reports a bolt as doing, mapped to the two words this add-on
 # uses plus the one that matters most. "jammed" is its own answer and not a
@@ -70,9 +89,13 @@ LOCK_COMMAND = 'lock'
 
 
 def is_lock(device):
-    """Whether this is a deadbolt rather than a cover."""
-    model = (getattr(device, 'model', '') or '').strip()
-    return model in LOCK_TYPES
+    """Whether this is a deadbolt rather than a cover.
+
+    The same question discovery asks, asked the same way. This one is also a
+    safety guard -- turn() and set_position() refuse on it -- so the two must
+    not be able to disagree about what a lock is.
+    """
+    return looks_like_a_lock(getattr(device, 'model', '') or '')
 
 # Tilt devices take even positions only; an odd one is rejected outright.
 POSITION_STEP = 2
@@ -154,7 +177,7 @@ class SwitchBotDriver(object):
         skipped = []
         for entry in entries:
             devtype = (entry.get('deviceType') or '').strip()
-            if devtype not in COVER_TYPES and devtype not in LOCK_TYPES:
+            if devtype not in COVER_TYPES and not looks_like_a_lock(devtype):
                 skipped.append(devtype or 'unnamed type')
                 continue
             device_id = entry.get('deviceId') or ''

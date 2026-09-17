@@ -2631,6 +2631,51 @@ class TestTheLockCannotUnlock(unittest.TestCase):
 
     # -- discovery ---------------------------------------------------------
 
+    def test_every_deadbolt_switchbot_ships_is_recognised(self):
+        """Matched on the word, because a list of spellings goes stale silently.
+
+        Lock Vision is the one that made the point: bought, paired, and absent
+        from a driver that held six exact names and not that one.
+        """
+        driver = self.driver()
+        for model in ('Smart Lock', 'Smart Lock Pro', 'Smart Lock Ultra',
+                      'Lock Pro', 'Lock Ultra', 'Lock Vision', 'Lock',
+                      'lock vision'):
+            self.assertTrue(driver.looks_like_a_lock(model),
+                            '%r was not taken for a lock' % model)
+
+    def test_nothing_else_on_the_account_is_taken_for_a_lock(self):
+        """The Keypad is the nearest miss and does not carry the word."""
+        driver = self.driver()
+        for model in ('Blind Tilt', 'Curtain', 'Curtain3', 'Roller Shade',
+                      'Bot', 'Keypad', 'Keypad Touch', 'Motion Sensor',
+                      'Contact Sensor', 'Hub 2', 'Plug Mini (US)',
+                      'Color Bulb', 'Strip Light', 'Meter', '', None):
+            self.assertFalse(driver.looks_like_a_lock(model),
+                             '%r was taken for a lock' % model)
+
+    def test_a_lock_vision_is_adopted_and_locks(self):
+        """End to end on the model actually on the door."""
+        api = FakeSwitchBotAPI(entries=[
+            {'deviceId': 'LV1', 'deviceName': 'Front Door',
+             'deviceType': 'Lock Vision'}])
+        import switchbot_driver
+
+        driver = switchbot_driver.SwitchBotDriver(transport=api)
+        found, warnings = driver.discover()
+
+        self.assertEqual([d.device_id for d in found], ['LV1'])
+        self.assertEqual(warnings, [])
+        self.assertEqual(driver.capabilities(found[0]),
+                         set([CAP_LOCK, CAP_STATE]))
+
+        sent = []
+        driver._send = lambda d, c, **kw: sent.append(c)
+        driver.lock(found[0])
+        self.assertEqual(sent, ['lock'])
+        # And the rule holds on it like any other lock.
+        self.assertRaises(ControlError, driver.turn, found[0], True)
+
     def test_a_lock_on_the_account_is_adopted(self):
         api = FakeSwitchBotAPI(entries=[
             {'deviceId': 'LK1', 'deviceName': 'Front Door',
