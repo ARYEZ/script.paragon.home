@@ -108,11 +108,16 @@ class SwitchBotDriver(object):
             return [], ['SwitchBot search failed: %s' % exc]
 
         found = []
-        skipped = 0
+        # What was passed over, by the name SwitchBot calls it. Counting them
+        # was not enough: "none of them a blind" leaves you with no idea
+        # whether the thing you just installed is absent from the account, or
+        # present under a name this driver has never heard of. The name is the
+        # whole of what is needed to decide which.
+        skipped = []
         for entry in entries:
             devtype = (entry.get('deviceType') or '').strip()
             if devtype not in COVER_TYPES:
-                skipped += 1
+                skipped.append(devtype or 'unnamed type')
                 continue
             device_id = entry.get('deviceId') or ''
             if not device_id:
@@ -128,9 +133,19 @@ class SwitchBotDriver(object):
             ))
 
         warnings = []
-        if not found and skipped:
-            warnings.append('SwitchBot found %d device(s), none of them a '
-                            'blind or shade' % skipped)
+        if skipped:
+            counted = {}
+            for name in skipped:
+                counted[name] = counted.get(name, 0) + 1
+            listed = ', '.join(
+                '%s x%d' % (name, count) if count > 1 else name
+                for name, count in sorted(counted.items()))
+            if found:
+                self._log('SwitchBot: passed over %s' % listed)
+            else:
+                warnings.append(
+                    'SwitchBot found %d device(s), none of them a blind or '
+                    'shade: %s' % (len(skipped), listed))
         return found, warnings
 
     # -- capabilities ------------------------------------------------------

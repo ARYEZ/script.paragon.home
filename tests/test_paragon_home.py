@@ -13468,6 +13468,53 @@ class TestSwitchBotDriver(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn('none of them a blind', warnings[0])
 
+    def test_the_warning_names_what_it_passed_over(self):
+        """"None of them a blind" leaves you unable to tell absent from unknown.
+
+        A lock that is on the account under a type this driver does not know
+        looks exactly like a lock that never paired, unless the name is said.
+        """
+        api = FakeSwitchBotAPI(entries=[
+            {'deviceId': 'LK1', 'deviceName': 'Front Door',
+             'deviceType': 'Smart Lock Pro'},
+            {'deviceId': 'BOT1', 'deviceName': 'Bot', 'deviceType': 'Bot'},
+            {'deviceId': 'BOT2', 'deviceName': 'Bot 2', 'deviceType': 'Bot'},
+        ])
+        driver, _api = self.driver(api)
+
+        _found, warnings = driver.discover()
+
+        self.assertIn('Smart Lock Pro', warnings[0])
+        # Counted where there are several of a kind, rather than listed twice.
+        self.assertIn('Bot x2', warnings[0])
+
+    def test_a_type_with_no_name_is_still_accounted_for(self):
+        api = FakeSwitchBotAPI(entries=[
+            {'deviceId': 'X1', 'deviceName': 'Mystery', 'deviceType': ''}])
+        driver, _api = self.driver(api)
+
+        _found, warnings = driver.discover()
+
+        self.assertIn('unnamed type', warnings[0])
+
+    def test_what_was_passed_over_is_logged_even_when_blinds_were_found(self):
+        """Otherwise a house with one blind never learns why the lock is absent."""
+        said = []
+        api = FakeSwitchBotAPI(entries=[
+            {'deviceId': 'BT01', 'deviceName': 'Lounge Blinds',
+             'deviceType': 'Blind Tilt'},
+            {'deviceId': 'LK1', 'deviceName': 'Front Door',
+             'deviceType': 'Smart Lock Pro'},
+        ])
+        driver, _api = self.driver(api)
+        driver._log = said.append
+
+        found, warnings = driver.discover()
+
+        self.assertEqual([d.device_id for d in found], ['BT01'])
+        self.assertEqual(warnings, [], 'a house with a blind is not warned')
+        self.assertIn('Smart Lock Pro', ' '.join(said))
+
     def test_a_search_with_no_credentials_is_quiet(self):
         """Not an error. Most installs will never have a SwitchBot account."""
         import switchbot_driver
