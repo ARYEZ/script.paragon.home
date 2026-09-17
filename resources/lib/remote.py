@@ -108,7 +108,7 @@ COOKIE_NAME = 'paragon_remote'
 # Sequences and discovery are not waited on: a sequence can hold an hour of
 # pauses, and the phone wants to know it started, not sit there until it ends.
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
-             'command', 'position', 'states')
+             'command', 'position', 'states', 'cancel_sequence')
 # A satellite copying from its master reads five files over SSH, each with its
 # own timeout, so a master that is off can take longer than a handler is
 # willing to wait. Discovery is the same shape.
@@ -587,15 +587,33 @@ def perform(app, action, params, sleep_func=None, on_step=None):
         sequence = app.sequence_by_name(name)
         if sequence is None:
             return {'ok': False, 'message': 'No sequence called "%s"' % name}
+        if app.pending_for(name) is not None:
+            # Already part way through, waiting out a long pause. Starting it
+            # again would repeat its opening steps and leave one tail owed to
+            # two openings.
+            return {'ok': False, 'message': '%s is already running' % name}
         # Called rather than run_sequence_by_name so the service's own pause
         # helper can be handed down: a step that waits then keeps the loop
         # ticking, which is what leaves the remote answerable while it runs.
         # Announce off -- a notification belongs on the television in front of
         # whoever pressed the button, and this one was pressed elsewhere.
         ran = app.run_sequence(sequence, announce=False,
-                               sleep_func=sleep_func, on_step=on_step)
+                               sleep_func=sleep_func, on_step=on_step,
+                               defer=True)
+        waiting = app.pending_for(name)
+        if waiting is not None:
+            return {'ok': True,
+                    'message': '%s: waiting %s' % (
+                        name,
+                        sequence_lib.describe_wait(max(0, waiting['at'] - time.time())))}
         return {'ok': bool(ran),
                 'message': name if ran else '%s has no steps yet' % name}
+
+    if action == 'cancel_sequence':
+        name = params.get('name') or params.get('value') or ''
+        if app.cancel_pending(name):
+            return {'ok': True, 'message': '%s stopped' % name}
+        return {'ok': False, 'message': '%s is not waiting' % name}
 
     if action == 'refresh':
         found, warnings = app.refresh_devices()
@@ -665,6 +683,17 @@ def _driver_label(app, driver_id):
     return getattr(driver, 'DRIVER_LABEL', driver_id.title())
 
 
+def _waiting_for(app, name, now):
+    """Seconds left on a sequence's long pause, or 0 if it is not in one."""
+    try:
+        entry = app.pending_for(name)
+    except Exception:
+        return 0
+    if entry is None:
+        return 0
+    return max(0, int(round(entry['at'] - now)))
+
+
 def snapshot(app, states=None, allow_sequences=True):
     """Everything the page draws itself from, built on the loop's thread.
 
@@ -674,6 +703,7 @@ def snapshot(app, states=None, allow_sequences=True):
     somebody asks for it, and is passed back in.
     """
     states = states or {}
+    now = time.time()
     devices = []
     counts = collections.OrderedDict()
     for device in app.enabled_devices:
@@ -699,7 +729,14 @@ def snapshot(app, states=None, allow_sequences=True):
         'scenes': [{'name': scene.get('name', '')} for scene in app.scenes],
         'sequences': [{'name': sequence.get('name', ''),
                        'schedule': sequence_lib.describe_schedule(sequence),
-                       'steps': len(sequence_lib.filled_steps(sequence))}
+                       'steps': len(sequence_lib.filled_steps(sequence)),
+                       # Seconds still to wait if it is part way through a
+                       # long pause, 0 if it is not. The page shows the wait
+                       # and offers to stop it, because a sequence waiting is
+                       # a sequence that has done half of what it was asked
+                       # and left a plug on.
+                       'waiting': _waiting_for(app, sequence.get('name', ''),
+                                               now)}
                       for sequence in app.sequences],
         'palette': [{'name': entry.get('name', ''),
                      'hex': _hex(entry.get('color'))}
@@ -1080,7 +1117,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_json(400, {'ok': False,
                                          'message': 'Unknown action "%s"'
                                                     % action})
-        if action == 'sequence' and not remote.allow_sequences:
+        if (action in ('sequence', 'cancel_sequence')
+                and not remote.allow_sequences):
             return self._send_json(403, {
                 'ok': False,
                 'message': 'Sequences are switched off for the remote'})
@@ -1701,6 +1739,12 @@ button.tile .sub {
   color: var(--sub);
   margin-top: 5px;
 }
+/* A sequence part way through a long pause. The teal edge is the one colour
+   on the page that is not the ember band, so a waiting sequence reads as a
+   different thing from a resting one at a glance across the room, and its
+   wait is spelled out underneath rather than left to the colour alone. */
+button.tile.waiting::before { background: var(--teal); opacity: 1; }
+button.tile.waiting .sub { color: var(--teal); }
 
 input[type=password] {
   width: 100%;
@@ -2751,15 +2795,33 @@ function renderScenes() {
   document.getElementById('scenesBlock').hidden = !(state.scenes || []).length;
 }
 
+/* A wait said the way the add-on says it, so the phone and the television
+   agree on what is left. */
+function saidWait(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  if (seconds < 60) { return seconds + ' second' + (seconds === 1 ? '' : 's'); }
+  var minutes = Math.floor(seconds / 60), rest = seconds % 60;
+  if (rest) { return minutes + ' min ' + rest + ' sec'; }
+  return minutes + ' minute' + (minutes === 1 ? '' : 's');
+}
+
 function renderSequences() {
   var box = document.getElementById('sequences');
   box.textContent = '';
   var list = state.allow_sequences ? (state.sequences || []) : [];
   list.forEach(function (sequence) {
-    var sub = sequence.steps + ' step(s) - ' + sequence.schedule;
-    box.appendChild(tile(sequence.name, sub, function () {
-      act('sequence', {name: sequence.name});
-    }));
+    var waiting = sequence.waiting || 0;
+    /* A sequence in the middle of a long pause says what it is waiting on and
+       stops on a press instead of starting again -- pressing it twice must not
+       leave one tail owed to two openings. */
+    var sub = waiting
+      ? 'Waiting ' + saidWait(waiting) + ' - press to stop'
+      : sequence.steps + ' step(s) - ' + sequence.schedule;
+    var node = tile(sequence.name, sub, function () {
+      act(waiting ? 'cancel_sequence' : 'sequence', {name: sequence.name});
+    });
+    if (waiting) { node.classList.add('waiting'); }
+    box.appendChild(node);
   });
   document.getElementById('sequencesBlock').hidden = !list.length;
 }

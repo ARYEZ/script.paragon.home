@@ -485,6 +485,41 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+### Long pauses do not hold the box
+
+A pause of **30 seconds or more is not waited out in place**. The sequence
+writes down where it got to, stops there, and the service carries the rest on
+when the wait is over. Everything else — other sequences, the schedule, the
+phone, the menus — runs normally meanwhile.
+
+This is what makes an appliance on a timer work at all:
+
+```
+Coffee
+   1. Coffee Maker: On  (+720s)
+   2. Coffee Maker: Off
+```
+
+Twelve minutes is a long time for a house to be unable to do anything else.
+Before this, that sequence held the box for the whole brew and every other
+sequence was refused until it finished.
+
+Shorter pauses still block, because they are meant to: a television waking up
+or an amplifier coming on is a wait of seconds, and handing those to the
+scheduler would put a five-second gap where a one-second one was asked for.
+
+While a sequence is waiting:
+
+* **It says so.** The tile on the phone shows the wait and turns teal; the
+  menus say how long is left when you open it.
+* **Pressing it stops it** rather than starting it again — the half that has
+  already run must not run twice, and one tail must not be owed to two
+  openings. On the phone, press the tile; in the menus, answer the prompt.
+* **A restart does not lose it.** What is owed is on disk, not in memory,
+  because the step on the far side of a long pause is usually the one that
+  turns something off — and a Kodi restart must not be what leaves a coffee
+  maker heating all day.
+
 Sequences live under **Sequences...** on the first screen, and each one is also a
 `RunScript()` target:
 

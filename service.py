@@ -441,8 +441,13 @@ class GoveeService(xbmc.Monitor):
         # could start a second one between two steps of this one.
         self._mark_sequence(True)
         try:
-            ran = self.app.run_due_sequences(sleep_func=self._pause,
-                                             on_step=alive, grace=grace)
+            # Sequences part way through a long pause go first. They are the
+            # tail of something already started -- turning the coffee maker
+            # off -- and a tail is owed its turn before anything new begins.
+            ran = self.app.run_due_resumes(sleep_func=self._pause,
+                                           on_step=alive)
+            ran.extend(self.app.run_due_sequences(sleep_func=self._pause,
+                                                  on_step=alive, grace=grace))
             # Today's rerack is checked in the same pass and for the same
             # reason.
             ran.extend(self.app.run_due_phases(sleep_func=self._pause,

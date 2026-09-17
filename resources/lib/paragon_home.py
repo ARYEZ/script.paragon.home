@@ -819,23 +819,149 @@ class ParagonHome(object):
         return True
 
     def run_sequence(self, sequence, announce=True, sleep_func=None,
-                   on_step=None):
-        """Run a sequence and report the outcome. Returns True if any step ran."""
+                   on_step=None, start=0, defer=False):
+        """Run a sequence and report the outcome. Returns True if any step ran.
+
+        With `defer`, a long pause is written down and the sequence stops there
+        rather than sleeping through it -- see defer_sequence. The caller does
+        not have to do anything about that: run_due_resumes carries it on.
+        """
+        name = sequence.get('name')
+        waited = []
+
+        def _defer(index, seconds):
+            waited.append((index, seconds))
+            self.defer_sequence(name, index, seconds)
+
         done, errors = sequence_lib.run(self, sequence, log_func=utils.log,
-                                      sleep_func=sleep_func, on_step=on_step)
+                                      sleep_func=sleep_func, on_step=on_step,
+                                      start=start,
+                                      defer=_defer if defer else None)
         if announce:
-            if done and not errors:
-                utils.notify('%s: %d step(s) done'
-                             % (sequence.get('name'), done))
+            if waited:
+                # Said out loud because the sequence is not over and the room
+                # gives no sign that it is still going: the plug is on and
+                # nothing more will happen for a quarter of an hour.
+                utils.notify('%s: waiting %s'
+                             % (name,
+                                sequence_lib.describe_wait(waited[0][1])))
+            elif done and not errors:
+                utils.notify('%s: %d step(s) done' % (name, done))
             elif done:
                 utils.force_notify('%s: %d done, %d failed'
-                                   % (sequence.get('name'), done, len(errors)))
+                                   % (name, done, len(errors)))
             elif errors:
                 utils.force_notify(errors[0])
             else:
-                utils.force_notify('%s has no steps yet'
-                                   % sequence.get('name'))
+                utils.force_notify('%s has no steps yet' % name)
         return done > 0
+
+    # -- sequences part way through a long pause ----------------------------
+    #
+    # A sequence that stops at a long pause leaves an entry here saying what to
+    # carry on, from where, and when. Nothing is cached: the menus are a
+    # different interpreter from the service, either can write this, and a copy
+    # held in memory for twelve minutes is a copy that is wrong. The file holds
+    # one line per waiting sequence, so reading it back is cheap enough to do
+    # on every look.
+
+    @property
+    def pending_sequences(self):
+        """Every sequence waiting out a pause, soonest first."""
+        raw = utils.read_json(sequence_lib.PENDING_FILE, default=[])
+        if not isinstance(raw, list):
+            return []
+        entries = []
+        for item in raw:
+            entry = self._clean_pending(item)
+            if entry is not None:
+                entries.append(entry)
+        entries.sort(key=lambda entry: entry['at'])
+        return entries
+
+    @staticmethod
+    def _clean_pending(raw):
+        """One stored entry, or None if it is not usable."""
+        if not isinstance(raw, dict):
+            return None
+        name = (raw.get('name') or '').strip()
+        if not name:
+            return None
+        try:
+            step = int(raw.get('step'))
+            at = float(raw.get('at'))
+        except (TypeError, ValueError):
+            return None
+        if step < 0:
+            return None
+        return {'name': name, 'step': step, 'at': at}
+
+    def _write_pending(self, entries):
+        utils.write_json(sequence_lib.PENDING_FILE, entries)
+
+    def defer_sequence(self, name, step, seconds, now=None):
+        """Note that `name` is to carry on at `step` once `seconds` are up.
+
+        Read straight back off disk and rewritten rather than edited in memory,
+        because the menus and the service both write this file and each holds
+        its own copy of everything else.
+
+        One entry per sequence. Running a sequence that is already waiting
+        replaces the wait rather than adding a second one, which is the only
+        reading that does not end with two copies of its tail running.
+        """
+        moment = now if now is not None else time.time()
+        entries = [e for e in self.pending_sequences if e['name'] != name]
+        entries.append({'name': name, 'step': int(step),
+                        'at': moment + float(seconds)})
+        self._write_pending(entries)
+        utils.log('Sequence "%s" waiting %s, then step %d'
+                  % (name, sequence_lib.describe_wait(seconds), int(step) + 1))
+
+    def pending_for(self, name):
+        """What `name` is waiting on, or None."""
+        for entry in self.pending_sequences:
+            if entry['name'] == name:
+                return entry
+        return None
+
+    def cancel_pending(self, name):
+        """Drop a waiting sequence. Returns True if there was one."""
+        entries = self.pending_sequences
+        kept = [e for e in entries if e['name'] != name]
+        if len(kept) == len(entries):
+            return False
+        self._write_pending(kept)
+        utils.log('Sequence "%s" will not be carried on: cancelled' % name)
+        return True
+
+    def due_resumes(self, now=None):
+        """The waiting sequences whose pause is over."""
+        moment = now if now is not None else time.time()
+        return [e for e in self.pending_sequences if e['at'] <= moment]
+
+    def run_due_resumes(self, now=None, sleep_func=None, on_step=None):
+        """Carry on whatever has finished waiting. Returns the names that ran.
+
+        Taken off the list before being run, for the reason a due sequence is
+        marked before it runs: a tail that fails must not be retried on every
+        tick for the rest of the day.
+        """
+        moment = now if now is not None else time.time()
+        ran = []
+        for entry in self.due_resumes(moment):
+            self.cancel_pending(entry['name'])
+            sequence = self.sequence_by_name(entry['name'])
+            if sequence is None:
+                utils.log('Sequence "%s" was waiting, but it is not there any '
+                          'more' % entry['name'])
+                continue
+            utils.log('Sequence "%s": carrying on from step %d'
+                      % (entry['name'], entry['step'] + 1))
+            self.run_sequence(sequence, announce=True, sleep_func=sleep_func,
+                              on_step=on_step, start=entry['step'], defer=True)
+            ran.append(entry['name'])
+        return ran
 
     # -- scheduled sequences -------------------------------------------------
 
@@ -918,7 +1044,7 @@ class ParagonHome(object):
             utils.log('Sequence "%s" is due (%s)'
                       % (sequence['name'], sequence_lib.describe_schedule(sequence)))
             self.run_sequence(sequence, announce=True, sleep_func=sleep_func,
-                            on_step=on_step)
+                            on_step=on_step, defer=True)
             ran.append(sequence['name'])
         return ran
 
@@ -1074,7 +1200,7 @@ class ParagonHome(object):
             utils.log('%s phase %d (%s) is due: %s'
                       % (rerack['name'], number, at_time, name))
             self.run_sequence(sequence, announce=True, sleep_func=sleep_func,
-                              on_step=on_step)
+                              on_step=on_step, defer=True)
             ran.append('%s phase %d' % (rerack['name'], number))
         return ran
 
@@ -1085,7 +1211,15 @@ class ParagonHome(object):
             if announce:
                 utils.force_notify('No sequence named "%s"' % name)
             return False
-        return self.run_sequence(sequence, announce=announce)
+        waiting = self.pending_for(name)
+        if waiting is not None:
+            # Starting it again would run its opening steps a second time and
+            # leave one tail for two openings.
+            utils.log('Sequence "%s" is already waiting mid-run' % name)
+            if announce:
+                utils.force_notify('%s is already running' % name)
+            return False
+        return self.run_sequence(sequence, announce=announce, defer=True)
 
     # -- satellite mode ----------------------------------------------------
     #

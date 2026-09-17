@@ -70,7 +70,23 @@ TARGET_ALL = '*'
 
 MAX_PAUSE = 3600
 
+# A pause longer than this is not waited out in place. The sequence writes down
+# where it got to and returns, and the service carries it on when the wait is
+# over -- so a coffee maker brewing for twelve minutes is twelve minutes this
+# box spends free, rather than twelve minutes nothing else can be run.
+#
+# Shorter pauses still block. A light settling or an amplifier coming up is a
+# wait measured in seconds, and handing those to the scheduler would cost more
+# than it saves and put a five-second gap where a one-second one was asked for.
+LONG_PAUSE_SECONDS = 30
+
 SEQUENCE_STATE_FILE = 'sequence_state.json'
+
+# Sequences part way through a long pause: what to carry on, from which step,
+# and when. On disk rather than in memory because the step waiting on the far
+# side of the pause is usually the one that turns something off, and a Kodi
+# restart must not be what leaves the coffee maker heating all day.
+PENDING_FILE = 'pending_sequences.json'
 
 # Index 0 is Monday, to match datetime.weekday(). Nothing is gained by
 # picking a different origin from the standard library's.
@@ -445,6 +461,31 @@ def describe_step(step, device_name=None):
     return text
 
 
+def describe_wait(seconds):
+    """A pause said the way a person would say it: "12 minutes", "90 seconds"."""
+    seconds = int(seconds or 0)
+    if seconds < 60:
+        return '%d second%s' % (seconds, '' if seconds == 1 else 's')
+    minutes, rest = divmod(seconds, 60)
+    if rest:
+        return '%d min %d sec' % (minutes, rest)
+    return '%d minute%s' % (minutes, '' if minutes == 1 else 's')
+
+
+def work_left(steps, index):
+    """Whether any step from `index` on would actually do something.
+
+    A sequence is fifteen slots and most of them are empty, so "is there a step
+    after this one" is not a question about the length of the list. Without
+    this, a pause on the last real step would be deferred and come back to find
+    nothing but blanks.
+    """
+    for step in steps[index:]:
+        if step.get('kind') != KIND_NONE:
+            return True
+    return False
+
+
 def resolve_targets(step, devices):
     """Which devices a step acts on. Empty means the step cannot run.
 
@@ -466,13 +507,24 @@ def resolve_targets(step, devices):
     return matches
 
 
-def run(app, sequence, log_func=None, sleep_func=None, on_step=None):
-    """Run one sequence top to bottom. Returns (steps done, [failures]).
+def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
+        start=0, defer=None):
+    """Run one sequence from `start` on. Returns (steps done, [failures]).
 
     One step failing does not stop the rest. A sequence is a list of separate
     intentions -- lights, plugs, a television -- and a plug that has been
     unplugged is no reason to leave the rest of the room untouched. Every
     failure is collected and reported together at the end.
+
+    Pass `defer` -- called as defer(next_index, seconds) -- to be given back a
+    long pause instead of sleeping through it. The sequence stops there and the
+    caller is expected to call again with `start=next_index` once the wait is
+    over. Without it the pause is slept, which is what it always did; that is
+    why a caller with nowhere to write the wait down can go on passing nothing.
+
+    `start` skips the steps already done. It is an index into the whole slot
+    list, not a count of the filled ones, so it survives an empty slot in the
+    middle.
     """
     from devices import ControlError
 
@@ -482,7 +534,8 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None):
     errors = []
 
     steps = list(sequence.get('steps') or [])
-    for index, step in enumerate(steps):
+    for index in range(max(0, start), len(steps)):
+        step = steps[index]
         if step.get('kind') == KIND_NONE:
             continue
         if on_step is not None and on_step(index, step) is False:
@@ -503,8 +556,22 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None):
                 % (sequence.get('name'), index + 1, exc))
 
         pause = step.get('pause') or 0
-        if pause:
-            sleep(pause)
+        if not pause:
+            continue
+
+        # A long pause with something still to do on the far side of it is
+        # handed back rather than slept. A long pause with nothing after it is
+        # slept like any other -- coming back to a sequence to run no steps
+        # would be bookkeeping for its own sake.
+        if (defer is not None and pause >= LONG_PAUSE_SECONDS
+                and work_left(steps, index + 1)):
+            defer(index + 1, pause)
+            log('Sequence "%s": %d step(s) done, %d failed, waiting %s'
+                % (sequence.get('name'), done, len(errors),
+                   describe_wait(pause)))
+            return done, errors
+
+        sleep(pause)
 
     log('Sequence "%s": %d step(s) done, %d failed'
         % (sequence.get('name'), done, len(errors)))

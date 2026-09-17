@@ -15,6 +15,7 @@ whatever else the user has installed.
 """
 
 import copy
+import time
 
 import xbmcgui
 
@@ -1686,6 +1687,15 @@ class ControlPanel(object):
                 if sequence_lib.scheduled(sequence):
                     summary = '%s  -  %s' % (
                         sequence_lib.describe_schedule(sequence), summary)
+                # One part way through a long pause says so here rather than
+                # only when it is opened: what the list is for is knowing what
+                # the house is doing without pressing anything.
+                waiting = self.app.pending_for(sequence['name'])
+                if waiting is not None:
+                    summary = 'Waiting %s  -  %s' % (
+                        sequence_lib.describe_wait(
+                            max(0, waiting['at'] - time.time())),
+                        summary)
                 rows.append(('%s  -  %s' % (sequence['name'], summary),
                              lambda r=sequence: self.run_sequence(r)))
             # A satellite copies its sequences from the master and cannot
@@ -1705,29 +1715,48 @@ class ControlPanel(object):
     def run_sequence(self, sequence):
         """Run a sequence, showing progress and letting a long one be stopped.
 
-        A sequence can hold pauses that add up to minutes, so it runs behind a
-        cancellable progress dialog rather than freezing the menu.
+        Short pauses are waited out here, behind a cancellable progress dialog.
+        A long one is not: the sequence hands it back, the dialog closes, and
+        the service carries the rest on when the wait is over. Sitting on a
+        long pause here would freeze the menu -- the dialog cannot even be
+        cancelled during a sleep, because iscanceled is only asked between
+        steps -- and would hold the box against everything else meanwhile.
         """
+        name = sequence['name']
         steps = sequence_lib.filled_steps(sequence)
         if not steps:
-            utils.force_notify('%s has no steps yet' % sequence['name'])
+            utils.force_notify('%s has no steps yet' % name)
+            return
+
+        waiting = self.app.pending_for(name)
+        if waiting is not None:
+            # Already part way through. Offer to drop the rest rather than
+            # starting it again, which would repeat its opening steps.
+            left = sequence_lib.describe_wait(
+                max(0, waiting['at'] - time.time()))
+            if _dialog().yesno(
+                    utils.ADDON_NAME,
+                    '%s is part way through. It carries on in %s.\n\n'
+                    'Stop it there?' % (name, left)):
+                self.app.cancel_pending(name)
+                utils.force_notify('%s stopped' % name)
             return
 
         progress = xbmcgui.DialogProgress()
-        progress.create(utils.ADDON_NAME, 'Running %s...' % sequence['name'])
+        progress.create(utils.ADDON_NAME, 'Running %s...' % name)
         total = len(sequence.get('steps') or [])
 
         def announce(index, step):
             if progress.iscanceled():
                 return False
             progress.update(int(100.0 * index / max(1, total)),
-                            'Running %s...' % sequence['name'],
+                            'Running %s...' % name,
                             sequence_lib.describe_step(
                                 step, self._target_name(step)))
             return True
 
         try:
-            self.app.run_sequence(sequence, on_step=announce)
+            self.app.run_sequence(sequence, on_step=announce, defer=True)
         finally:
             progress.close()
 

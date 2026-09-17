@@ -30,8 +30,11 @@ DYNAMIC_SETTINGS = {'scene_playing', 'scene_paused', 'scene_stopped'}
 ACTION_ONLY = {'run_panel', 'run_discover', 'pick_playing', 'pick_paused',
                'pick_stopped'}
 
+# _setting_float is tv.py's own reader: the levels are floats and the shared
+# helpers do not do floats. Listed here so a setting read through it does not
+# read to this scan as a setting nothing reads.
 SETTING_CALL = re.compile(
-    r"""(?:get_setting|get_bool|get_int|set_setting)\(\s*['"]([\w.]+)['"]""")
+    r"""(?:get_setting|get_bool|get_int|set_setting|_setting_float)\(\s*['"]([\w.]+)['"]""")
 
 problems = []
 notes = []

@@ -1729,6 +1729,450 @@ class TestSequences(unittest.TestCase):
                          'all tuya devices: Off')
 
 
+# Kept so the guard below can be lifted again between tests.
+_real_sleep = time.sleep
+
+
+class TestLongPauses(unittest.TestCase):
+    """A twelve-minute brew must not be twelve minutes nothing else can run.
+
+    The coffee maker is the case these were written for: switch on, wait, switch
+    off. The wait is the whole sequence, and before this it was a wait the box
+    spent unable to do anything else.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui',
+                     'remote'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.sequences = sequences
+        # Nothing in this class may sleep. Every long pause here is meant to be
+        # handed back, so a real sleep means the deferral has stopped working
+        # -- and a test that sleeps for the twelve real minutes it was asked to
+        # is a test that hangs rather than fails. That is not hypothetical: it
+        # is exactly what the first revert-check of this work did, and it took
+        # the whole run down with it.
+        self.slept = []
+        sequences.time_module.sleep = self._never_sleep
+
+    def _never_sleep(self, seconds):
+        self.slept.append(seconds)
+        raise AssertionError('slept %ss instead of handing the wait back'
+                             % seconds)
+
+    def tearDown(self):
+        clean_profile()
+        self.sequences.time_module.sleep = _real_sleep
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {'power', 'state'}
+        app.controller = self.recorder
+        app._devices = [
+            Device('WP9ABC#1', name='Coffee Maker', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+            Device('WP9ABC#2', name='Lamp', driver='tuya', lan=True,
+                   native_id='wp9abd'),
+        ]
+        app._scenes = []
+        return app
+
+    def coffee(self):
+        """On, brew for twelve minutes, off."""
+        return self.sequences.make_sequence('Coffee', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'on', 'pause': 720},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'off'},
+        ])
+
+    # -- the runner --------------------------------------------------------
+
+    def test_a_long_pause_is_handed_back_rather_than_slept(self):
+        app = self.app()
+        slept, deferred = [], []
+
+        done, errors = self.sequences.run(
+            app, self.coffee(), sleep_func=slept.append,
+            defer=lambda index, seconds: deferred.append((index, seconds)))
+
+        self.assertEqual(slept, [], 'sat through the brew')
+        self.assertEqual(deferred, [(1, 720)])
+        # Only the switch-on ran. The switch-off is owed, not done.
+        self.assertEqual((done, errors), (1, []))
+        self.assertEqual([call[:2] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1')])
+
+    def test_a_caller_with_nowhere_to_write_it_down_still_sleeps(self):
+        """No defer means the old behaviour, exactly."""
+        app = self.app()
+        slept = []
+        # sleep_func is given, so the class-wide guard is not reached.
+
+        done, _errors = self.sequences.run(app, self.coffee(),
+                                           sleep_func=slept.append)
+
+        self.assertEqual(slept, [720])
+        self.assertEqual(done, 2)
+
+    def test_a_short_pause_is_slept_even_when_it_could_be_handed_back(self):
+        """An amplifier coming up is a wait of seconds; scheduling it is worse."""
+        app = self.app()
+        slept, deferred = [], []
+        sequence = self.sequences.make_sequence('Quick', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+             'action': 'on', 'pause': 5},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'on'},
+        ])
+
+        done, _errors = self.sequences.run(
+            app, sequence, sleep_func=slept.append,
+            defer=lambda index, seconds: deferred.append((index, seconds)))
+
+        self.assertEqual(slept, [5])
+        self.assertEqual(deferred, [])
+        self.assertEqual(done, 2)
+
+    def test_the_line_between_the_two_is_the_stated_one(self):
+        """At the threshold it defers; a second under it, it sleeps."""
+        limit = self.sequences.LONG_PAUSE_SECONDS
+        for pause, expect_defer in ((limit - 1, False), (limit, True)):
+            app = self.app()
+            slept, deferred = [], []
+            sequence = self.sequences.make_sequence('Edge', [
+                {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+                 'action': 'on', 'pause': pause},
+                {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+                 'action': 'off'},
+            ])
+
+            self.sequences.run(
+                app, sequence, sleep_func=slept.append,
+                defer=lambda index, seconds: deferred.append((index, seconds)))
+
+            self.assertEqual(bool(deferred), expect_defer,
+                             'pause of %ds went the wrong way' % pause)
+            self.assertEqual(bool(slept), not expect_defer,
+                             'pause of %ds went the wrong way' % pause)
+
+    def test_a_long_pause_with_nothing_after_it_is_not_worth_coming_back_for(self):
+        """Fourteen empty slots follow every real step. None of them is work."""
+        app = self.app()
+        slept, deferred = [], []
+        sequence = self.sequences.make_sequence('Trailing', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+             'action': 'on', 'pause': 900},
+        ])
+
+        self.sequences.run(
+            app, sequence, sleep_func=slept.append,
+            defer=lambda index, seconds: deferred.append((index, seconds)))
+
+        self.assertEqual(deferred, [], 'came back to run nothing')
+        self.assertEqual(slept, [900])
+
+    def test_starting_part_way_through_runs_only_what_is_left(self):
+        app = self.app()
+
+        done, errors = self.sequences.run(app, self.coffee(), start=1)
+
+        self.assertEqual((done, errors), (1, []))
+        # The switch-off, and not a second switch-on.
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)])
+
+    def test_the_resume_point_counts_slots_not_filled_steps(self):
+        """An empty slot in the middle must not shift where it picks up."""
+        app = self.app()
+        sequence = self.sequences.make_sequence('Gapped')
+        sequence['steps'][0] = self.sequences.normalise_step(
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+             'action': 'on', 'pause': 600})
+        sequence['steps'][4] = self.sequences.normalise_step(
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'off'})
+        deferred = []
+
+        self.sequences.run(app, sequence, sleep_func=lambda s: None,
+                           defer=lambda i, s: deferred.append((i, s)))
+
+        # Slot 1, not step 2: the gap is part of the count.
+        self.assertEqual(deferred, [(1, 600)])
+        self.recorder.calls[:] = []
+        self.sequences.run(app, sequence, start=1)
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)])
+
+    # -- how a wait is said ------------------------------------------------
+
+    # -- what is owed, and when --------------------------------------------
+
+    def test_running_the_coffee_writes_down_what_is_still_owed(self):
+        app = self.app()
+        app._sequences = [self.coffee()]
+
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+
+        waiting = app.pending_for('Coffee')
+        self.assertIsNotNone(waiting, 'nothing was written down')
+        self.assertEqual(waiting['step'], 1)
+        self.assertAlmostEqual(waiting['at'] - time.time(), 720, delta=5)
+
+    def test_what_is_owed_survives_the_session_that_owed_it(self):
+        """A Kodi restart must not be what leaves the coffee maker heating."""
+        app = self.app()
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+
+        from paragon_home import ParagonHome
+        after_restart = ParagonHome()
+
+        self.assertIsNotNone(after_restart.pending_for('Coffee'))
+
+    def test_only_what_has_finished_waiting_comes_due(self):
+        app = self.app()
+        app.defer_sequence('Coffee', 1, 720, now=1000.0)
+        app.defer_sequence('Bread', 3, 60, now=1000.0)
+
+        self.assertEqual([e['name'] for e in app.due_resumes(now=1000.0)], [])
+        self.assertEqual([e['name'] for e in app.due_resumes(now=1061.0)],
+                         ['Bread'])
+        self.assertEqual(
+            sorted(e['name'] for e in app.due_resumes(now=1721.0)),
+            ['Bread', 'Coffee'])
+
+    def test_the_tail_runs_when_the_wait_is_over_and_then_is_not_owed(self):
+        app = self.app()
+        app._sequences = [self.coffee()]
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+        self.recorder.calls[:] = []
+
+        ran = app.run_due_resumes(now=time.time() + 721)
+
+        self.assertEqual(ran, ['Coffee'])
+        # The switch-off, and only it.
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)])
+        self.assertIsNone(app.pending_for('Coffee'),
+                          'still owed after it was paid')
+
+    def test_a_tail_that_is_not_due_yet_does_not_run(self):
+        app = self.app()
+        app._sequences = [self.coffee()]
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+        self.recorder.calls[:] = []
+
+        ran = app.run_due_resumes(now=time.time() + 60)
+
+        self.assertEqual(ran, [])
+        self.assertEqual(self.recorder.calls, [])
+        self.assertIsNotNone(app.pending_for('Coffee'))
+
+    def test_a_sequence_waits_once_however_often_it_is_deferred(self):
+        """Two entries would be one tail owed to two openings."""
+        app = self.app()
+        app.defer_sequence('Coffee', 1, 720, now=1000.0)
+        app.defer_sequence('Coffee', 1, 720, now=1100.0)
+
+        self.assertEqual(len(app.pending_sequences), 1)
+        self.assertEqual(app.pending_for('Coffee')['at'], 1820.0)
+
+    def test_stopping_a_waiting_sequence_means_its_tail_never_runs(self):
+        app = self.app()
+        app._sequences = [self.coffee()]
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+        self.recorder.calls[:] = []
+
+        self.assertTrue(app.cancel_pending('Coffee'))
+        ran = app.run_due_resumes(now=time.time() + 721)
+
+        self.assertEqual(ran, [])
+        self.assertEqual(self.recorder.calls, [])
+        self.assertFalse(app.cancel_pending('Coffee'), 'stopped twice')
+
+    def test_a_tail_owed_to_a_deleted_sequence_is_dropped_quietly(self):
+        app = self.app()
+        app._sequences = []
+        app.defer_sequence('Coffee', 1, 1, now=1000.0)
+
+        ran = app.run_due_resumes(now=1002.0)
+
+        self.assertEqual(ran, [])
+        self.assertIsNone(app.pending_for('Coffee'),
+                          'left owed for ever by a sequence that is gone')
+
+    def test_pressing_a_waiting_sequence_again_does_not_restart_it(self):
+        """Twice pressed would switch the coffee maker on a second time."""
+        app = self.app()
+        app._sequences = [self.coffee()]
+        app.run_sequence(self.coffee(), announce=False, defer=True)
+        first = app.pending_for('Coffee')['at']
+        self.recorder.calls[:] = []
+
+        started = app.run_sequence_by_name('Coffee', announce=False)
+
+        self.assertFalse(started)
+        self.assertEqual(self.recorder.calls, [])
+        self.assertEqual(app.pending_for('Coffee')['at'], first,
+                         'the wait was pushed back by a press that did nothing')
+
+    def test_nonsense_in_the_file_is_ignored_rather_than_believed(self):
+        app = self.app()
+        utils = sys.modules['addon_utils']
+        utils.write_json(self.sequences.PENDING_FILE, [
+            {'name': 'Coffee', 'step': 1, 'at': 1000.0},
+            {'name': '', 'step': 1, 'at': 1000.0},
+            {'name': 'Bad step', 'step': 'soon', 'at': 1000.0},
+            {'name': 'Bad time', 'step': 1, 'at': 'later'},
+            {'name': 'Backwards', 'step': -2, 'at': 1000.0},
+            'not even a row',
+        ])
+
+        self.assertEqual([e['name'] for e in app.pending_sequences], ['Coffee'])
+
+    # -- the paths that reach it -------------------------------------------
+
+    def test_the_menus_hand_a_long_pause_back_rather_than_freezing(self):
+        """A progress dialog cannot even be cancelled during a sleep."""
+        import gui
+
+        app = self.app()
+        app._sequences = [self.coffee()]
+        panel = gui.ControlPanel(app)
+
+        # The class-wide guard is what makes this a real assertion: if the
+        # menus stop deferring, this call sleeps for twelve minutes and the
+        # guard turns that into a failure instead of a hang.
+        panel.run_sequence(app.sequence_by_name('Coffee'))
+
+        self.assertIsNotNone(app.pending_for('Coffee'),
+                             'the menus slept through the brew')
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True)])
+
+    def test_opening_a_waiting_sequence_offers_to_stop_it(self):
+        """Pressing it again must not switch the coffee maker on a second time."""
+        import gui
+
+        app = self.app()
+        app._sequences = [self.coffee()]
+        panel = gui.ControlPanel(app)
+        panel.run_sequence(app.sequence_by_name('Coffee'))
+        self.recorder.calls[:] = []
+        xbmcgui.YESNO_QUEUE.append(True)
+
+        panel.run_sequence(app.sequence_by_name('Coffee'))
+
+        self.assertEqual(self.recorder.calls, [], 'it started again')
+        self.assertIsNone(app.pending_for('Coffee'), 'the stop did nothing')
+
+    def test_a_scheduled_brew_defers_like_one_started_by_hand(self):
+        """The coffee is on a clock at seven, not pressed. It must defer too."""
+        app = self.app()
+        morning = self.coffee()
+        morning['time'] = '07:00'
+        morning['days'] = [0, 1, 2, 3, 4]
+        app._sequences = [morning]
+
+        ran = app.run_due_sequences(
+            now=datetime.datetime(2026, 8, 24, 7, 0))   # a Monday
+
+        self.assertEqual(ran, ['Coffee'])
+        # Switched on, and the switch-off written down rather than slept for.
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True)])
+        self.assertIsNotNone(app.pending_for('Coffee'))
+
+    def test_a_phase_sequence_defers_too(self):
+        """A rerack phase runs a sequence; it is the same sequence either way."""
+        import reracks as rerack_lib
+
+        app = self.app()
+        app._sequences = [self.coffee()]
+        app._reracks = rerack_lib.normalise_all([
+            rerack_lib.make_rerack('Alpha', [
+                {'sequence': 'Coffee', 'time': '07:00'}])])
+        app._week = ['Alpha'] * 7
+        app._phase_state = set()
+
+        ran = app.run_due_phases(now=datetime.datetime(2026, 8, 24, 7, 0))
+
+        self.assertEqual(ran, ['Alpha phase 1'], 'the phase never fired')
+        self.assertIsNotNone(app.pending_for('Coffee'),
+                             'a phase slept through the brew')
+
+    def test_a_tail_that_hits_another_long_pause_waits_again(self):
+        """Three steps and two brews: the second wait must be written down too."""
+        app = self.app()
+        twice = self.sequences.make_sequence('Two brews', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'on', 'pause': 720},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'off', 'pause': 600},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+             'action': 'on'},
+        ])
+        app._sequences = [twice]
+
+        app.run_sequence_by_name('Two brews', announce=False)
+        first = app.pending_for('Two brews')
+        app.run_due_resumes(now=time.time() + 721)
+        second = app.pending_for('Two brews')
+
+        self.assertEqual(first['step'], 1)
+        self.assertEqual(second['step'], 2, 'the second wait was lost')
+        # The lamp is still owed, so it has not been switched on yet.
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True),
+                          ('turn', 'WP9ABC#1', False)])
+
+        app.run_due_resumes(now=time.time() + 1400)
+
+        self.assertIsNone(app.pending_for('Two brews'))
+        self.assertEqual(self.recorder.calls[-1][:3],
+                         ('turn', 'WP9ABC#2', True))
+
+    # -- the whole point ---------------------------------------------------
+
+    def test_another_sequence_runs_while_the_coffee_brews(self):
+        """The reason any of this exists."""
+        app = self.app()
+        lamp = self.sequences.make_sequence('Lamp on', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+             'action': 'on'},
+        ])
+        app._sequences = [self.coffee(), lamp]
+
+        app.run_sequence_by_name('Coffee', announce=False)
+        # Mid-brew, and nothing about the box says no.
+        started = app.run_sequence_by_name('Lamp on', announce=False)
+
+        self.assertTrue(started, 'the brew was still holding the box')
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True),
+                          ('turn', 'WP9ABC#2', True)])
+        # And the coffee maker is still owed its switch-off.
+        self.assertIsNotNone(app.pending_for('Coffee'))
+
+    def test_a_wait_is_said_the_way_a_person_would_say_it(self):
+        said = self.sequences.describe_wait
+        self.assertEqual(said(720), '12 minutes')
+        self.assertEqual(said(60), '1 minute')
+        self.assertEqual(said(90), '1 min 30 sec')
+        self.assertEqual(said(45), '45 seconds')
+        self.assertEqual(said(1), '1 second')
+        self.assertEqual(said(0), '0 seconds')
+
+
 class TestReracks(unittest.TestCase):
     """A day laid out in nine phases, each holding a sequence."""
 
@@ -8846,6 +9290,11 @@ class TestPlaybackService(unittest.TestCase):
 
         class StubApp(object):
             @staticmethod
+            def run_due_resumes(**kwargs):
+                seen.append(server.sequence_running)
+                return []
+
+            @staticmethod
             def run_due_sequences(**kwargs):
                 seen.append(server.sequence_running)
                 return []
@@ -8859,7 +9308,7 @@ class TestPlaybackService(unittest.TestCase):
 
         svc._check_sequences(now=10000.0)
 
-        self.assertEqual(seen, [True, True])
+        self.assertEqual(seen, [True, True, True])
         # And released afterwards, or the remote would refuse sequences for
         # the rest of the Kodi session.
         self.assertFalse(server.sequence_running)
@@ -11194,6 +11643,12 @@ class RemoteClient(object):
         return self.call('POST', '/api/action', params)
 
 
+def _no_sleep(seconds):
+    """Handed to the remote where a real pause must never be reached."""
+    raise AssertionError('slept %ss instead of handing the wait back'
+                         % seconds)
+
+
 class ServiceLoop(object):
     """Stands in for service.py's loop: the one thread allowed in the session.
 
@@ -11693,6 +12148,104 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertEqual(answer['status'], 202)
         self.assertTrue(answer['data']['queued'])
+
+    def test_a_sequence_started_from_the_phone_hands_its_long_pause_back(self):
+        """Otherwise the phone starting the brew is the phone holding the box."""
+        import sequences as sequence_lib
+
+        brew = sequence_lib.make_sequence('Coffee', [
+            {'kind': 'power', 'target': 'AA:BB', 'action': 'on',
+             'pause': 720},
+            {'kind': 'power', 'target': 'AA:BB', 'action': 'off'},
+        ])
+        self.app._sequences = [brew]
+        self.serve(run_loop=False)
+
+        job = self.server.commands.submit('sequence', {'name': 'Coffee'})
+        # sleep_func left out on purpose: a pause that is not handed back is a
+        # real twelve-minute sleep here, and this call would not come back.
+        self.server.pump(self.app, sleep_func=_no_sleep)
+
+        self.assertTrue(job.wait(1.0))
+        self.assertTrue(job.result['ok'])
+        self.assertIn('waiting', job.result['message'])
+        self.assertIsNotNone(self.app.pending_for('Coffee'),
+                             'the phone slept through the brew')
+
+    def test_a_waiting_sequence_says_what_it_is_waiting_on(self):
+        """So the phone can show a brew in progress rather than a resting tile."""
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Coffee')]
+        self.app.defer_sequence('Coffee', 1, 720)
+        client = self.signed_in()
+
+        tile = client.state()['data']['sequences'][0]
+
+        self.assertEqual(tile['name'], 'Coffee')
+        self.assertGreater(tile['waiting'], 700)
+        self.assertLessEqual(tile['waiting'], 720)
+
+    def test_a_sequence_that_is_not_waiting_says_so(self):
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Bedtime')]
+        client = self.signed_in()
+
+        self.assertEqual(client.state()['data']['sequences'][0]['waiting'], 0)
+
+    def test_a_waiting_sequence_cannot_be_started_again_from_the_phone(self):
+        """Pressed twice would switch the coffee maker on a second time."""
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Coffee')]
+        self.app.defer_sequence('Coffee', 1, 720)
+        client = self.serve(run_loop=False)
+
+        job = self.server.commands.submit('sequence', {'name': 'Coffee'})
+        self.server.pump(self.app)
+
+        self.assertTrue(job.wait(1.0))
+        self.assertFalse(job.result['ok'])
+        self.assertIn('already running', job.result['message'])
+        self.assertEqual(self.recorder.calls, [])
+
+    def test_a_waiting_sequence_can_be_stopped_from_the_phone(self):
+        """Whoever started the brew must be able to call the rest of it off."""
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Coffee')]
+        self.app.defer_sequence('Coffee', 1, 720)
+        client = self.signed_in()
+
+        answer = client.act('cancel_sequence', name='Coffee')
+
+        self.assertEqual(answer['status'], 200)
+        self.assertTrue(answer['data']['ok'])
+        self.assertIsNone(self.app.pending_for('Coffee'))
+
+    def test_stopping_a_sequence_that_is_not_waiting_says_so(self):
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Coffee')]
+        client = self.signed_in()
+
+        answer = client.act('cancel_sequence', name='Coffee')
+
+        self.assertFalse(answer['data']['ok'])
+
+    def test_stopping_a_sequence_is_off_when_sequences_are(self):
+        """Otherwise a pocket could call off the run the remote may not start."""
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Coffee')]
+        self.app.defer_sequence('Coffee', 1, 720)
+        client = self.signed_in(allow_sequences=False)
+
+        answer = client.act('cancel_sequence', name='Coffee')
+
+        self.assertEqual(answer['status'], 403)
+        self.assertIsNotNone(self.app.pending_for('Coffee'))
 
     def test_sequences_can_be_switched_off_for_the_remote(self):
         """A phone in a pocket should not be able to start the bedtime run."""
