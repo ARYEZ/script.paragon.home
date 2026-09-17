@@ -27,7 +27,8 @@ import scenes as scene_lib
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
                      CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
                      CAP_STATE,
-                     ControlError, DEFAULT_DRIVER, TRANSPORT_CLOUD)
+                     ControlError, DEFAULT_DRIVER, TRANSPORT_CLOUD,
+                     describe_state)
 
 # Presets offered before the user has to type anything.
 BRIGHTNESS_STEPS = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
@@ -669,17 +670,14 @@ class ControlPanel(object):
             self._explain_no_status(device)
             return
 
-        lines = ['Power: %s' % state.get('power', 'unknown')]
-        if state.get('brightness') is not None:
-            lines.append('Brightness: %s%%' % state.get('brightness'))
-        color = state.get('color')
-        if isinstance(color, dict) and any(color.get(k) for k in 'rgb'):
-            lines.append('Colour: RGB %s, %s, %s'
-                         % (color.get('r', 0), color.get('g', 0),
-                            color.get('b', 0)))
-        if state.get('colorTem'):
-            lines.append('Temperature: %sK' % state.get('colorTem'))
-        lines.append('Read over: %s' % str(state.get('source', '?')).upper())
+        lines = describe_state(state)
+        if not lines:
+            # It answered, but with nothing this add-on knows how to read.
+            # Said plainly, with the keys, rather than as "Power: unknown" --
+            # which is what a lock and a blind both used to be told.
+            lines = ['It answered, but said nothing recognisable.',
+                     '',
+                     'What it sent: %s' % ', '.join(sorted(state.keys()))]
         if device.ip:
             lines.append('Address: %s' % device.ip)
 

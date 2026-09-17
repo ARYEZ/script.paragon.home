@@ -49,6 +49,53 @@ CAP_LOCK = 'lock'
 DEFAULT_DRIVER = 'govee'
 
 
+def describe_state(state):
+    """What a device says it is doing, as lines to show. [] if it said nothing.
+
+    Built from what the state actually holds rather than from a fixed shape.
+    The fixed shape was a bulb's -- power, brightness, colour, temperature --
+    written when every device here was a Govee light, and it stayed that shape
+    while blinds and then a deadbolt were added under it. Both reported
+    perfectly well and both were shown as "Power: unknown", because neither has
+    a power and nothing asked what they did have.
+
+    Order is most-wanted first: what you came to the screen to find out.
+    """
+    if not isinstance(state, dict):
+        return []
+    lines = []
+
+    bolt = state.get('lock')
+    if bolt:
+        # Said in capitals because it is the one answer worth crossing a room
+        # over: a bolt that fouled the strike plate has not locked.
+        lines.append('Lock: %s' % ('JAMMED' if bolt == 'jammed'
+                                   else str(bolt).capitalize()))
+    if state.get('door'):
+        lines.append('Door: %s' % state['door'])
+    if state.get('position') is not None:
+        lines.append('Open: %s%%' % state['position'])
+    if state.get('moving'):
+        lines.append('Moving now')
+    if state.get('power'):
+        lines.append('Power: %s' % state['power'])
+    if state.get('brightness') is not None:
+        lines.append('Brightness: %s%%' % state['brightness'])
+
+    color = state.get('color')
+    if isinstance(color, dict) and any(color.get(k) for k in 'rgb'):
+        lines.append('Colour: RGB %s, %s, %s'
+                     % (color.get('r', 0), color.get('g', 0),
+                        color.get('b', 0)))
+    if state.get('colorTem'):
+        lines.append('Temperature: %sK' % state['colorTem'])
+    if state.get('battery') is not None:
+        lines.append('Battery: %s%%' % state['battery'])
+    if state.get('source'):
+        lines.append('Read over: %s' % str(state['source']).upper())
+    return lines
+
+
 class ControlError(Exception):
     """A command could not be delivered to a device."""
 

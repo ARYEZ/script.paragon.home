@@ -2322,6 +2322,123 @@ class TestNestedSequences(unittest.TestCase):
         self.assertEqual(app.sequence_used_by('Blinds Shut'), ['Alpha phase 1'])
 
 
+class TestSayingWhatADeviceReported(unittest.TestCase):
+    """Show status was a bulb's shape and stayed one while the house grew.
+
+    Power, brightness, colour, temperature -- written when every device here
+    was a Govee light. A blind and then a deadbolt were added under it, both
+    reporting perfectly well, and both were shown as "Power: unknown" because
+    neither has a power and nothing ever asked what they did have.
+    """
+
+    def lines(self, state):
+        from devices import describe_state
+
+        return describe_state(state)
+
+    # -- the deadbolt ------------------------------------------------------
+
+    def test_a_locked_door_says_it_is_locked(self):
+        said = self.lines({'lock': 'locked', 'door': 'closed', 'battery': 84})
+
+        self.assertEqual(said[0], 'Lock: Locked')
+        self.assertIn('Door: closed', said)
+        self.assertIn('Battery: 84%', said)
+        self.assertNotIn('Power: unknown', said)
+
+    def test_an_unlocked_door_says_so(self):
+        self.assertEqual(self.lines({'lock': 'unlocked'})[0], 'Lock: Unlocked')
+
+    def test_a_jammed_bolt_shouts(self):
+        """The one answer worth crossing a room over."""
+        self.assertEqual(self.lines({'lock': 'jammed'})[0], 'Lock: JAMMED')
+
+    # -- the blind, broken just as long --------------------------------------
+
+    def test_a_blind_says_where_it_is(self):
+        said = self.lines({'position': 40, 'battery': 90})
+
+        self.assertEqual(said[0], 'Open: 40%')
+        self.assertNotIn('Power: unknown', said)
+
+    def test_a_blind_shut_says_nought_rather_than_nothing(self):
+        """0 is a position. Falsy, and the thing you most want to be told."""
+        self.assertIn('Open: 0%', self.lines({'position': 0}))
+
+    def test_a_blind_on_the_move_says_so(self):
+        self.assertIn('Moving now', self.lines({'position': 40,
+                                                'moving': True}))
+
+    # -- the bulb it was always right about ----------------------------------
+
+    def test_a_bulb_still_reports_everything_it_used_to(self):
+        said = self.lines({'power': 'on', 'brightness': 60,
+                           'color': {'r': 120, 'g': 40, 'b': 90},
+                           'colorTem': 2700, 'source': 'lan'})
+
+        self.assertEqual(said, ['Power: on', 'Brightness: 60%',
+                                'Colour: RGB 120, 40, 90',
+                                'Temperature: 2700K', 'Read over: LAN'])
+
+    def test_a_plug_reports_its_power_and_nothing_invented(self):
+        self.assertEqual(self.lines({'power': 'off'}), ['Power: off'])
+
+    def test_a_bulb_at_nought_brightness_still_says_the_number(self):
+        self.assertIn('Brightness: 0%', self.lines({'brightness': 0}))
+
+    def test_a_black_colour_is_not_reported_as_a_colour(self):
+        """All zeroes is what a bulb says when it has no colour to report."""
+        said = self.lines({'power': 'on',
+                           'color': {'r': 0, 'g': 0, 'b': 0}})
+
+        self.assertEqual(said, ['Power: on'])
+
+    # -- nothing to say ----------------------------------------------------
+
+    def test_a_state_with_nothing_known_in_it_says_nothing(self):
+        """So the caller can say "it answered, but" rather than invent a line."""
+        self.assertEqual(self.lines({'wibble': 1}), [])
+        self.assertEqual(self.lines({}), [])
+
+    def test_anything_that_is_not_a_state_is_not_read_as_one(self):
+        """A driver returning the wrong shape must not reach .get on a string."""
+        for junk in (None, 'locked', ['locked'], 42, True):
+            self.assertEqual(self.lines(junk), [],
+                             'made something of %r' % (junk,))
+
+    # -- and the screen it is for -------------------------------------------
+
+    def test_show_status_puts_the_lock_on_the_screen(self):
+        """The screen this was all for. It used to say "Power: unknown"."""
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import gui
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        recorder = RecordingController()
+        recorder.capabilities = lambda d: {CAP_LOCK, CAP_STATE}
+        recorder.states = {'LK1': {'lock': 'locked', 'door': 'closed',
+                                   'battery': 84}}
+        app.controller = recorder
+        lock = Device('LK1', name='Front Door', driver='switchbot',
+                      model='Lock Vision', cloud=True)
+        app._devices = [lock]
+
+        gui.ControlPanel(app).show_status(lock)
+
+        said = xbmcgui.OK_DIALOGS[-1][1]
+        self.assertIn('Lock: Locked', said)
+        self.assertIn('Door: closed', said)
+        self.assertIn('Battery: 84%', said)
+        self.assertNotIn('unknown', said)
+        clean_profile()
+
+
 class TestTheLockCannotUnlock(unittest.TestCase):
     """The rule the whole deadbolt feature rests on, checked as a rule.
 
