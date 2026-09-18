@@ -1800,17 +1800,71 @@ class ControlPanel(object):
         """Eight slots, each one thing worth a single press from a phone."""
         while True:
             dial = self.app.dial
-            rows = []
-            for number in range(1, dial_lib.SLOT_COUNT + 1):
-                slot = dial[number - 1]
-                label = (self.app.dial_label(slot)
-                         if dial_lib.is_filled(slot) else 'Empty')
-                rows.append(('%d.  %s' % (number, label), number))
+            rows = [(label, number + 1) for number, label
+                    in enumerate(self._dial_labels(dial))]
+
+            # Nothing to reorder until two of them are set, and a row that
+            # says no when pressed is worse than no row.
+            reorderable = len(dial_lib.filled(dial)) > 1
+            if reorderable:
+                rows.append(('Reorder the dial...', None))
 
             choice = _select('Speed dial', [row for row, _n in rows])
             if choice == BACK:
                 return
+            if reorderable and choice == len(rows) - 1:
+                self.reorder_dial()
+                continue
             self.edit_dial_slot(rows[choice][1])
+
+    def reorder_dial(self):
+        """Move slots about, staying on the screen between moves.
+
+        The sequence editor's reordering, on the dial. A mode of its own rather
+        than a "move up" on every slot: dragging one from eighth to first a row
+        at a time is seven trips through the menu and the seventh is where the
+        mistake gets made.
+        """
+        while True:
+            dial = self.app.dial
+            choice = _select('Pick a slot to move', self._dial_labels(dial))
+            if choice == BACK:
+                return
+            if not dial_lib.is_filled(dial[choice]):
+                utils.force_notify('Slot %d is empty' % (choice + 1))
+                continue
+            self._move_dial_slot(choice)
+
+    def _move_dial_slot(self, index):
+        """Ask where a slot should go, and put it there.
+
+        The destination list is the dial as it stands, with the slot being
+        moved marked in it. Naming what is in each position is what makes this
+        answerable: "above the bedtime one" is the question being asked, and
+        "position 6" is not.
+        """
+        dial = self.app.dial
+        labels = self._dial_labels(dial)
+        labels[index] += '   <- moving this'
+
+        choice = _select('Move slot %d to' % (index + 1), labels)
+        if choice == BACK or choice == index:
+            return
+        self.app.save_dial(dial_lib.move(dial, index, choice))
+        utils.notify('Slot %d is now slot %d' % (index + 1, choice + 1))
+
+    def _dial_labels(self, dial):
+        """One numbered row per slot, empty ones included.
+
+        Empty slots are listed because they are where a slot can be moved to --
+        a dial of three with a gap at the top is reordered by moving one into
+        that gap.
+        """
+        return ['%d.  %s' % (number,
+                             self.app.dial_label(dial[number - 1])
+                             if dial_lib.is_filled(dial[number - 1])
+                             else 'Empty')
+                for number in range(1, dial_lib.SLOT_COUNT + 1)]
 
     def edit_dial_slot(self, number):
         """What one slot does, and what it is called on the button."""

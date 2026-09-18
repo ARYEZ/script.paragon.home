@@ -502,6 +502,12 @@ one of those already has a picker in the menus, and pressing a slot runs it
 nested sequence being spliced in, a long pause being handed back and the way a
 failure is reported are all the ones you already know.
 
+**Reorder the dial...** moves slots about, the way the sequence editor moves
+steps: pick one, say where it goes, and the rest slide along. It stays on the
+screen between moves, because reordering is rarely one move. Empty slots are
+listed as destinations — a dial with a gap at the top is reordered by moving
+something into it.
+
 **Slot numbers never move.** Clear slot two and slot three is still slot three,
 because the thing your thumb has learned is the position. An empty slot is a gap
 on the phone, not a shuffle.

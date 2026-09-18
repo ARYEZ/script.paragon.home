@@ -41,6 +41,20 @@ Two failure modes worth watching for, both seen here:
 * **A test that asserts the outcome but not the reason.** A refusal that passes
   whichever guard fired is a test that would not notice the wrong one firing.
 
+**Run mutants with `-B` and clear `__pycache__` first.** Python invalidates
+bytecode on (mtime, size), so a mutant that changes a file by **zero bytes** —
+swapping two arguments, say — can leave a stale `.pyc` that runs the
+*unmutated* code. The tests pass, and the mutant reads as survived when it was
+caught. That happened here and sent me chasing a gap that did not exist. It
+fails safe, never reporting caught when it was not, but it wastes the run:
+
+```python
+for cache in ('resources/lib/__pycache__', 'tests/__pycache__',
+              'tests/kodistubs/__pycache__'):
+    shutil.rmtree(os.path.join(ROOT, cache), ignore_errors=True)
+subprocess.Popen([sys.executable, '-B', 'tests/test_paragon_home.py', ...])
+```
+
 **Remove equivalent mutants rather than keeping them.** Code no test can
 distinguish is dead, and dead code shaped like a safety check is worse than
 none — it invites someone to rely on it.

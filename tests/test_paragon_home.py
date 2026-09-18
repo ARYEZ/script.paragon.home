@@ -3704,6 +3704,139 @@ class TestTheSpeedDial(unittest.TestCase):
         self.assertEqual([number for number, _s in self.dial_lib.filled(dial)],
                          [1, 3])
 
+    # -- moving them about --------------------------------------------------
+
+    def three_set(self):
+        return self.dial_lib.normalise([
+            {'label': 'One', 'step': {'kind': 'scene', 'target': 'All Off'}},
+            {'label': 'Two', 'step': {'kind': 'lock', 'target': 'Front Door'}},
+            {'label': 'Three', 'step': {'kind': 'power', 'driver': 'tuya',
+                                        'target': 'WP9ABC#1',
+                                        'action': 'on'}},
+        ])
+
+    def names(self, dial):
+        return [slot['label'] for slot in dial]
+
+    def test_a_slot_moved_up_pulls_the_others_down(self):
+        moved = self.dial_lib.move(self.three_set(), 2, 0)
+
+        self.assertEqual(self.names(moved)[:3], ['Three', 'One', 'Two'])
+
+    def test_a_slot_moved_down_pulls_the_others_up(self):
+        moved = self.dial_lib.move(self.three_set(), 0, 2)
+
+        self.assertEqual(self.names(moved)[:3], ['Two', 'Three', 'One'])
+
+    def test_moving_never_changes_how_many_slots_there_are(self):
+        """Eight before and eight after, however far a slot travels."""
+        moved = self.dial_lib.move(self.three_set(), 0, 7)
+
+        self.assertEqual(len(moved), self.dial_lib.SLOT_COUNT)
+        self.assertEqual(moved[7]['label'], 'One')
+
+    def test_a_slot_can_be_moved_into_an_empty_position(self):
+        """Which is how a dial with a gap at the top gets reordered at all."""
+        moved = self.dial_lib.move(self.three_set(), 1, 5)
+
+        self.assertEqual(self.names(moved)[:6],
+                         ['One', 'Three', '', '', '', 'Two'])
+
+    def test_a_move_that_goes_nowhere_gives_back_what_it_was_given(self):
+        dial = self.three_set()
+
+        for frm, to in ((0, 0), (-1, 2), (0, 99), (99, 0), (2, -5)):
+            self.assertEqual(self.names(self.dial_lib.move(dial, frm, to)),
+                             self.names(dial),
+                             'move(%r, %r) changed something' % (frm, to))
+
+    def test_moving_leaves_the_original_alone(self):
+        """So a caller that backs out of the move still has what it had."""
+        dial = self.three_set()
+
+        self.dial_lib.move(dial, 0, 4)
+
+        self.assertEqual(self.names(dial)[:3], ['One', 'Two', 'Three'])
+
+    def test_what_a_slot_holds_travels_with_it(self):
+        """Not just its name -- the step is the whole point of the slot."""
+        moved = self.dial_lib.move(self.three_set(), 2, 0)
+
+        self.assertEqual(moved[0]['step']['kind'], 'power')
+        self.assertEqual(moved[0]['step']['target'], 'WP9ABC#1')
+
+    def test_a_reordered_dial_survives_being_saved(self):
+        app = self.app()
+        app.save_dial(self.dial_lib.move(self.three_set(), 2, 0))
+
+        from paragon_home import ParagonHome
+
+        self.assertEqual(self.names(ParagonHome().dial)[:3],
+                         ['Three', 'One', 'Two'])
+
+    def test_the_moved_slot_is_what_the_new_number_now_presses(self):
+        """The whole point: the numbers are positions, not identities."""
+        app = self.app()
+        app.save_dial(self.dial_lib.move(self.three_set(), 2, 0))
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertEqual([c[:3] for c in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True)])
+
+    def test_a_move_made_in_the_menus_is_saved(self):
+        """The move screen is where the reordering actually happens.
+
+        move() being right is not the same as the menus calling it and keeping
+        the answer -- a reorder that vanished on the next visit would look like
+        the move never worked.
+        """
+        import gui
+
+        app = self.app()
+        app.save_dial(self.three_set())
+        panel = gui.ControlPanel(app)
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.append(0)      # move slot 3 to the top
+
+        panel._move_dial_slot(2)
+
+        from paragon_home import ParagonHome
+        self.assertEqual(self.names(ParagonHome().dial)[:3],
+                         ['Three', 'One', 'Two'])
+
+    def test_backing_out_of_the_move_screen_changes_nothing(self):
+        import gui
+
+        app = self.app()
+        app.save_dial(self.three_set())
+        panel = gui.ControlPanel(app)
+
+        for answer in (-1, 2):              # backed out, and "move it to itself"
+            xbmcgui.reset()
+            xbmcgui.SELECT_QUEUE.append(answer)
+            panel._move_dial_slot(2)
+
+            from paragon_home import ParagonHome
+            self.assertEqual(self.names(ParagonHome().dial)[:3],
+                             ['One', 'Two', 'Three'],
+                             'answering %r moved something' % answer)
+
+    def test_the_move_screen_marks_the_slot_being_moved(self):
+        """"Above the bedtime one" is the question; "position 6" is not."""
+        import gui
+
+        app = self.app()
+        app._dial = self.three_set()
+        panel = gui.ControlPanel(app)
+
+        labels = panel._dial_labels(app.dial)
+
+        self.assertEqual(labels[0], '1.  One')
+        self.assertEqual(labels[3], '4.  Empty',
+                         'empty slots are where a slot can be moved to')
+        self.assertEqual(len(labels), self.dial_lib.SLOT_COUNT)
+
     # -- pressing one ------------------------------------------------------
 
     def test_pressing_a_slot_does_what_it_holds(self):

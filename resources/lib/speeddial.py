@@ -77,6 +77,21 @@ def filled(dial):
             if is_filled(slot)]
 
 
+def move(dial, frm, to):
+    """One slot moved to another position, with the rest sliding along.
+
+    The same operation the sequence editor performs on its steps, and the same
+    implementation: both are a fixed-length list of numbered slots where moving
+    one shuffles the others and the length never changes. A second copy of that
+    would be a second place for the off-by-one to live.
+
+    Out-of-range and no-op moves give back the dial unchanged rather than
+    raising, because the honest answer to "move this nowhere" is what you
+    started with.
+    """
+    return sequence_lib.move_step(dial, frm, to)
+
+
 def label_for(slot, device_name=None):
     """What to write on the button.
 
