@@ -56,6 +56,7 @@ class ParagonHome(object):
         settings['switchbot_token'] = utils.get_setting('switchbot_token')
         settings['switchbot_secret'] = utils.get_setting('switchbot_secret')
         settings['allow_unlock'] = utils.get_bool('allow_unlock', False)
+        settings['confirm_unlock'] = utils.get_bool('confirm_unlock', False)
         self.controller = build_hub(settings)
         self._devices = None
         self._scenes = None

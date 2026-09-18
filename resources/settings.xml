@@ -55,6 +55,8 @@ the add-on ships a single locale.
                  label="SwitchBot secret" default=""/>
         <setting id="allow_unlock" type="bool"
                  label="Let this box unlock doors" default="false"/>
+        <setting id="confirm_unlock" type="bool" enable="eq(-1,true)"
+                 label="Ask before unlocking" default="false"/>
     </category>
 
     <category label="Playback lighting">

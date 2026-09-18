@@ -57,12 +57,22 @@ def narrow(capabilities, device):
 class Hub(object):
     """The set of drivers, addressed as one device layer."""
 
-    def __init__(self, drivers=None, log_func=None, allow_unlock=False):
+    def __init__(self, drivers=None, log_func=None, allow_unlock=False,
+                 confirm_unlock=False):
         # Whether this box may open a door. One flag, checked in one place, so
         # that the menus, the web remote and a sequence are all answered the
         # same way and none of them can be the exception. Off unless the box
         # has been told otherwise -- see unlock().
         self.allow_unlock = bool(allow_unlock)
+        # Whether to ask first. Nothing in here reads this -- it is a question
+        # about screens, and there is no screen at this depth. It is carried
+        # here because the menus and the web remote both already have the
+        # controller to hand and neither should be reading settings of its own,
+        # which is how two halves of one preference come to disagree.
+        #
+        # Off by default. The permission above it is already deliberate, so a
+        # prompt on every press is a keystroke rather than a decision.
+        self.confirm_unlock = bool(confirm_unlock)
         self.drivers = {}
         for driver in drivers or []:
             self.drivers[driver.DRIVER_ID] = driver

@@ -778,6 +778,8 @@ def snapshot(app, states=None, allow_sequences=True):
         # So the page can leave the button off rather than show one that always
         # answers with a refusal.
         'allow_unlock': bool(getattr(app.controller, 'allow_unlock', False)),
+        'confirm_unlock': bool(getattr(app.controller, 'confirm_unlock',
+                                       False)),
         'drivers': [{'id': driver, 'label': _driver_label(app, driver),
                      'count': counts[driver]} for driver in counts],
         'devices': devices,
@@ -3009,14 +3011,20 @@ function deviceCard(device) {
 
   /* Only where the box will take one. Absent rather than present and refusing:
      a button that says no every time is a button people learn to press twice.
-     It asks first, and says what it is about to do rather than which word is
-     on it -- "Lock" and "Unlock" are a letter apart on a phone held at arm's
-     length. */
+
+     It asks first only where the box has been told to. The permission to
+     unlock at all is already deliberate, so a prompt on every press is a
+     keystroke rather than a decision. When it does ask it says what it is
+     about to do rather than which word is on it -- "Lock" and "Unlock" are a
+     letter apart on a phone held at arm's length. */
   if (caps.indexOf('unlock') >= 0 && state.allow_unlock) {
     var opening = el('button', 'unlockbtn', 'Unlock');
     opening.addEventListener('click', function () {
-      if (!window.confirm('Open ' + device.name
-                          + '?\\n\\nThis withdraws the bolt.')) { return; }
+      if (state.confirm_unlock
+          && !window.confirm('Open ' + device.name
+                             + '?\\n\\nThis withdraws the bolt.')) {
+        return;
+      }
       act('unlock', {target: device.id});
     });
     controls.appendChild(opening);

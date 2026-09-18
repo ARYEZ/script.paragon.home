@@ -2681,16 +2681,21 @@ class ControlPanel(object):
             utils.notify('%s locked' % heading)
 
     def _unlock_them(self, targets, heading):
-        """Withdraw the bolts. Named in the question, because a door is a door.
+        """Withdraw the bolts.
 
-        Asked more plainly than the lock is: "Unlock?" beside "Lock?" on a
-        remote control, half-read from a sofa, is two words a letter apart.
+        Asks first only where the box has been told to. The permission to
+        unlock at all is already a deliberate one, so a prompt on every press
+        is a keystroke rather than a decision -- but it is one setting away for
+        anyone who wants it, and it is worded plainly when it does appear:
+        "Unlock?" beside "Lock?" on a remote, half-read from a sofa, is two
+        words a letter apart.
         """
-        if not _dialog().yesno(
-                utils.ADDON_NAME,
-                'Open %s?\n\nThis withdraws the bolt. Anyone at the door can '
-                'walk in.' % heading):
-            return
+        if getattr(self.app.controller, 'confirm_unlock', False):
+            if not _dialog().yesno(
+                    utils.ADDON_NAME,
+                    'Open %s?\n\nThis withdraws the bolt. Anyone at the door '
+                    'can walk in.' % heading):
+                return
         opened, problems = 0, []
         for device in targets:
             try:

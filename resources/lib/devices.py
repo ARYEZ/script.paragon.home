@@ -586,4 +586,5 @@ def build_hub(settings):
     # boxes and they all show the same menus, so the question is not "may this
     # house unlock the front door" but "may it be unlocked from this room".
     return Hub(drivers=drivers, log_func=settings.get('log_func'),
-               allow_unlock=bool(settings.get('allow_unlock', False)))
+               allow_unlock=bool(settings.get('allow_unlock', False)),
+               confirm_unlock=bool(settings.get('confirm_unlock', False)))

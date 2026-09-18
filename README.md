@@ -556,8 +556,14 @@ Two things follow from that, and both are load-bearing:
   either would go *round* the gate rather than through it. The driver refuses
   both outright as well.
 * **An unlock is never skipped and never quiet.** It shouts in a sequence
-  listing (`Front Door: UNLOCK`), asks before it acts in both the menus and the
-  page, and the notification is the kind that does not fade.
+  listing (`Front Door: UNLOCK`) and the notification is the kind that does not
+  fade.
+
+**Ask before unlocking** is a second setting, under the first, **off by
+default**. The permission to unlock at all is already a deliberate one, so a
+prompt on every press is a keystroke rather than a decision. Switch it on and
+both the menus and the page ask first. It is a question about screens and never
+a second gate — a box told to ask still opens the door once the screen has.
 
 Where the box is not allowed, the button and the menu row are **absent** rather
 than present and refusing — a control that always says no is one people learn to

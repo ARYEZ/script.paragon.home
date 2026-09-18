@@ -2595,6 +2595,62 @@ class TestTheLockCannotUnlock(unittest.TestCase):
 
     # -- the setting behind the gate ---------------------------------------
 
+    def test_a_box_does_not_ask_before_unlocking_unless_told_to(self):
+        """One press, not two. The permission above it was the decision."""
+        import hub as hub_lib
+
+        self.assertFalse(hub_lib.Hub([]).confirm_unlock)
+        self.assertTrue(hub_lib.Hub([], confirm_unlock=True).confirm_unlock)
+
+    def test_asking_first_is_a_question_about_screens_not_about_locking(self):
+        """It must not become a second gate. Unlocking is gated once, above.
+
+        Asserted with asking switched ON, which is the only way round it can
+        fail: a box told to ask must still open the door once the screen has
+        asked, and the screen is not down here.
+        """
+        hub = self.hub_for(True)
+        hub.confirm_unlock = True
+
+        hub.unlock(self.a_lock())
+
+        self.assertEqual(self.sent, ['unlock'],
+                         'asking first turned into a refusal')
+
+    def test_the_menus_ask_only_where_the_box_says_to(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import gui
+        from paragon_home import ParagonHome
+
+        for asks, expected_prompts in ((False, 0), (True, 1)):
+            xbmcgui.reset()
+            app = ParagonHome()
+            recorder = RecordingController()
+            recorder.capabilities = lambda d: {CAP_LOCK, CAP_UNLOCK, CAP_STATE}
+            recorder.allow_unlock = True
+            recorder.confirm_unlock = asks
+            opened = []
+            recorder.unlock = lambda d: opened.append(d.device_id)
+            app.controller = recorder
+            lock = Device('LK1', name='Front Door', driver='switchbot',
+                          model='Lock Vision')
+            app._devices = [lock]
+            xbmcgui.YESNO_QUEUE.append(True)
+
+            gui.ControlPanel(app)._unlock_them([lock], 'Front Door')
+
+            self.assertEqual(opened, ['LK1'],
+                             'the door did not open with asks=%r' % asks)
+            # The queue is drained only when something actually asked.
+            self.assertEqual(1 - len(xbmcgui.YESNO_QUEUE), expected_prompts,
+                             'wrong number of prompts with asks=%r' % asks)
+        clean_profile()
+
     def test_a_fresh_box_is_not_allowed_to_open_doors(self):
         """No setting, no unlocking. The default is the whole safety net."""
         clean_profile()
@@ -2607,7 +2663,10 @@ class TestTheLockCannotUnlock(unittest.TestCase):
                 del sys.modules[name]
         from paragon_home import ParagonHome
 
-        self.assertFalse(ParagonHome().controller.allow_unlock)
+        controller = ParagonHome().controller
+        self.assertFalse(controller.allow_unlock)
+        # And does not ask, because there is nothing yet to ask about.
+        self.assertFalse(controller.confirm_unlock)
         clean_profile()
 
     def test_the_setting_is_what_opens_the_gate(self):
@@ -2615,12 +2674,17 @@ class TestTheLockCannotUnlock(unittest.TestCase):
         clean_profile()
         xbmcaddon.reset()
         xbmcaddon.SETTINGS['allow_unlock'] = 'true'
+        xbmcaddon.SETTINGS['confirm_unlock'] = 'true'
         for name in ('addon_utils', 'paragon_home'):
             if name in sys.modules:
                 del sys.modules[name]
         from paragon_home import ParagonHome
 
-        self.assertTrue(ParagonHome().controller.allow_unlock)
+        controller = ParagonHome().controller
+        self.assertTrue(controller.allow_unlock)
+        # Both settings travel the same road -- ParagonHome to build_hub to the
+        # Hub -- and either could be dropped anywhere along it.
+        self.assertTrue(controller.confirm_unlock)
         xbmcaddon.reset()
         clean_profile()
 
@@ -14117,8 +14181,30 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertIn("caps.indexOf('unlock') >= 0 && state.allow_unlock",
                       page)
-        # And asks before it opens anything.
+        # And asks first only where the box has been told to, rather than
+        # unconditionally.
+        self.assertIn('state.confirm_unlock', page)
         self.assertIn('window.confirm', page)
+
+    def test_a_box_that_does_not_ask_first_says_so_to_the_page(self):
+        """Off by default: the permission above it is already deliberate."""
+        self.app._devices = [Device('LK1', name='Front Door',
+                                    driver='switchbot', model='Lock Vision')]
+        self.recorder.capabilities = lambda d: {'lock', 'unlock', 'state'}
+        self.recorder.allow_unlock = True
+        client = self.signed_in()
+
+        self.assertFalse(client.state()['data']['confirm_unlock'])
+
+    def test_a_box_told_to_ask_first_says_that_too(self):
+        self.app._devices = [Device('LK1', name='Front Door',
+                                    driver='switchbot', model='Lock Vision')]
+        self.recorder.capabilities = lambda d: {'lock', 'unlock', 'state'}
+        self.recorder.allow_unlock = True
+        self.recorder.confirm_unlock = True
+        client = self.signed_in()
+
+        self.assertTrue(client.state()['data']['confirm_unlock'])
 
     def test_unlocking_through_the_remote_reaches_the_gate(self):
         """The remote does not decide; it routes and reports what came back."""
