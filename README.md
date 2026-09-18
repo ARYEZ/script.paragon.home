@@ -485,6 +485,33 @@ same breath will miss the second command, because it is still waking up.
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.
 
+## Speed dial
+
+Eight things worth one press from a phone. **Speed dial** on the first screen
+sets them up; a **Dial** tab appears on the web remote once any of them is
+filled.
+
+A slot holds **one sequence step**, and that is the whole design. Everything a
+step can already be, a slot can be — a scene, a whole sequence, a plug on or
+off, a blind to a percentage, an infrared code, lock the door, unlock it. Every
+one of those already has a picker in the menus, and pressing a slot runs it
+*through* the sequence engine rather than around it, so the unlock gate, a
+nested sequence being spliced in, a long pause being handed back and the way a
+failure is reported are all the ones you already know.
+
+**Slot numbers never move.** Clear slot two and slot three is still slot three,
+because the thing your thumb has learned is the position. An empty slot is a gap
+on the phone, not a shuffle.
+
+**Called:** gives a slot a short name for the button — up to 18 characters,
+because longer either shrinks to unreadable or wraps to three lines. Leave it
+blank and the button says what the slot does (`Scene: All Off`), which means a
+slot works the moment it is filled and is worth naming only when the description
+is longer than the button.
+
+A satellite takes the master's dial along with everything else. Eight buttons
+disagreeing with the menus above them would be worse than none.
+
 ### What a scene does to each light
 
 **What it does to each light...** in the scene editor lists every light the

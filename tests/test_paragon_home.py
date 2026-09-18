@@ -3552,6 +3552,265 @@ class TestSkippingWhatIsDone(unittest.TestCase):
         self.assertIn('1 already done', said)
 
 
+class TestTheSpeedDial(unittest.TestCase):
+    """Eight things worth one press, each of them a sequence step.
+
+    The design is the reuse: a slot holds a step, so every kind a step can be
+    is already a kind a slot can be, and running one goes through the sequence
+    engine rather than round it. These are mostly about that holding.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'speeddial',
+                     'gui', 'remote'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import speeddial
+
+        self.dial_lib = speeddial
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {CAP_POWER, CAP_LOCK,
+                                                CAP_UNLOCK, CAP_STATE}
+        self.recorder.lock = lambda d: self.recorder.calls.append(
+            ('lock', d.device_id))
+        app.controller = self.recorder
+        app._devices = [
+            Device('WP9ABC#1', name='Office Plug', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+            Device('LK1', name='Front Door', driver='switchbot',
+                   model='Lock Vision', cloud=True),
+        ]
+        app._scenes = [scene_lib.make_scene('All Off',
+                                            power=scene_lib.POWER_OFF)]
+        app._sequences = []
+        return app
+
+    def a_step(self, **raw):
+        import sequences as sequence_lib
+
+        return sequence_lib.normalise_step(raw)
+
+    # -- shape -------------------------------------------------------------
+
+    def test_a_dial_always_has_eight_slots(self):
+        """Numbered and fixed, like the sequence steps and the Transit slots."""
+        self.assertEqual(len(self.dial_lib.normalise([])),
+                         self.dial_lib.SLOT_COUNT)
+        self.assertEqual(self.dial_lib.SLOT_COUNT, 8)
+
+    def test_a_file_with_too_many_or_too_few_is_trimmed_and_padded(self):
+        short = self.dial_lib.normalise([{'step': {'kind': 'scene',
+                                                   'target': 'All Off'}}])
+        long = self.dial_lib.normalise([{'step': {'kind': 'scene',
+                                                  'target': 'All Off'}}] * 20)
+
+        self.assertEqual(len(short), 8)
+        self.assertEqual(len(long), 8)
+        self.assertTrue(self.dial_lib.is_filled(short[0]))
+        self.assertFalse(self.dial_lib.is_filled(short[1]))
+
+    def test_a_slot_can_be_anything_a_step_can_be(self):
+        """The whole point of a slot being a step rather than its own thing."""
+        for raw in ({'kind': 'scene', 'target': 'All Off'},
+                    {'kind': 'sequence', 'target': 'Wind Down'},
+                    {'kind': 'power', 'target': 'Office Plug', 'action': 'on'},
+                    {'kind': 'position', 'target': 'Blind', 'action': '0'},
+                    {'kind': 'command', 'target': 'Blaster',
+                     'action': 'TV power'},
+                    {'kind': 'lock', 'target': 'Front Door'},
+                    {'kind': 'unlock', 'target': 'Front Door'}):
+            slot = self.dial_lib.normalise_slot({'step': raw})
+            self.assertTrue(self.dial_lib.is_filled(slot),
+                            'a slot would not hold %r' % raw)
+
+    def test_a_label_with_nothing_behind_it_is_an_empty_slot(self):
+        """A button that says a word and does nothing reads as broken."""
+        slot = self.dial_lib.normalise_slot({'label': 'Coffee', 'step': None})
+
+        self.assertFalse(self.dial_lib.is_filled(slot))
+        self.assertEqual(slot['label'], '')
+
+    def test_a_long_label_is_cut_to_something_a_button_can_hold(self):
+        slot = self.dial_lib.normalise_slot({
+            'label': 'x' * 100,
+            'step': {'kind': 'scene', 'target': 'All Off'}})
+
+        self.assertEqual(len(slot['label']), self.dial_lib.MAX_LABEL)
+
+    def test_rubbish_in_the_file_becomes_empty_slots_not_an_error(self):
+        dial = self.dial_lib.normalise(['nonsense', None, 42,
+                                        {'step': {'kind': 'wibble'}}])
+
+        self.assertEqual(len(dial), 8)
+        self.assertEqual(self.dial_lib.filled(dial), [])
+
+    # -- what a button says ------------------------------------------------
+
+    def test_a_slot_with_no_name_says_what_it_does(self):
+        """So it works the moment it is filled, before anyone names it."""
+        slot = self.dial_lib.normalise_slot(
+            {'step': {'kind': 'scene', 'target': 'All Off'}})
+
+        self.assertEqual(self.dial_lib.label_for(slot), 'Scene: All Off')
+
+    def test_a_named_slot_says_its_name(self):
+        slot = self.dial_lib.normalise_slot(
+            {'label': 'Lights out', 'step': {'kind': 'scene',
+                                             'target': 'All Off'}})
+
+        self.assertEqual(self.dial_lib.label_for(slot), 'Lights out')
+
+    def test_a_device_slot_is_named_by_the_device_not_its_id(self):
+        app = self.app()
+        app._dial = self.dial_lib.normalise([
+            {'step': {'kind': 'power', 'driver': 'tuya',
+                      'target': 'WP9ABC#1', 'action': 'off'}}])
+
+        self.assertEqual(app.dial_label(app.dial[0]), 'Office Plug: Off')
+
+    def test_an_empty_slot_has_nothing_to_say(self):
+        self.assertEqual(self.dial_lib.label_for(self.dial_lib.empty_slot()),
+                         '')
+
+    def test_the_menu_row_counts_what_is_set(self):
+        dial = self.dial_lib.normalise([
+            {'step': {'kind': 'scene', 'target': 'All Off'}}])
+
+        self.assertEqual(self.dial_lib.describe(dial), '1 of 8 set')
+        self.assertEqual(self.dial_lib.describe(self.dial_lib.normalise([])),
+                         'nothing set yet')
+
+    def test_the_numbers_stay_put_when_a_slot_is_cleared(self):
+        """A thumb learns a position, so position three stays position three."""
+        dial = self.dial_lib.normalise([
+            {'step': {'kind': 'scene', 'target': 'All Off'}},
+            {'step': {'kind': 'power', 'target': 'Office Plug',
+                      'action': 'on'}},
+            {'step': {'kind': 'lock', 'target': 'Front Door'}},
+        ])
+        dial[1] = self.dial_lib.empty_slot()
+
+        self.assertEqual([number for number, _s in self.dial_lib.filled(dial)],
+                         [1, 3])
+
+    # -- pressing one ------------------------------------------------------
+
+    def test_pressing_a_slot_does_what_it_holds(self):
+        app = self.app()
+        app._dial = self.dial_lib.normalise([
+            {'step': {'kind': 'power', 'driver': 'tuya',
+                      'target': 'WP9ABC#1', 'action': 'off'}}])
+
+        self.assertTrue(app.run_dial_slot(1, announce=False))
+        self.assertEqual([c[:3] for c in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)])
+
+    def test_pressing_an_empty_slot_does_nothing_and_says_nothing(self):
+        """Not even a notification. An empty slot is not a failed one.
+
+        Without the guard it would reach the sequence engine, which would
+        correctly find no steps and say so -- "Speed dial has no steps yet" is
+        an answer to a question nobody asked.
+        """
+        app = self.app()
+        xbmcgui.reset()
+
+        self.assertFalse(app.run_dial_slot(4, announce=True))
+
+        self.assertEqual(self.recorder.calls, [])
+        self.assertEqual(xbmcgui.NOTIFICATIONS, [])
+
+    def test_slot_zero_does_not_run_the_last_slot(self):
+        """Python counts from the other end; a dial does not have a slot 0."""
+        app = self.app()
+        app._dial = self.dial_lib.normalise(
+            [{'step': None}] * 7
+            + [{'step': {'kind': 'power', 'driver': 'tuya',
+                         'target': 'WP9ABC#1', 'action': 'off'}}])
+
+        self.assertFalse(app.run_dial_slot(0, announce=False))
+        self.assertEqual(self.recorder.calls, [], 'slot 0 reached slot 8')
+
+    def test_a_slot_number_outside_the_eight_is_refused(self):
+        app = self.app()
+
+        for number in (0, -1, 9, 99):
+            self.assertFalse(app.run_dial_slot(number, announce=False),
+                             'slot %r ran' % number)
+
+    def test_a_slot_holding_a_sequence_runs_the_whole_sequence(self):
+        """Through expand, like anywhere else -- not a second way of running one."""
+        import sequences as sequence_lib
+
+        app = self.app()
+        app._sequences = [sequence_lib.make_sequence('Wind Down', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'WP9ABC#1',
+             'action': 'off'},
+            {'kind': 'lock', 'driver': 'switchbot', 'target': 'Front Door'},
+        ])]
+        app._dial = self.dial_lib.normalise([
+            {'step': {'kind': 'sequence', 'target': 'Wind Down'}}])
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertEqual([c[:2] for c in self.recorder.calls],
+                         [('turn', 'WP9ABC#1'), ('lock', 'LK1')])
+
+    def test_a_slot_that_unlocks_is_gated_like_everything_else(self):
+        """A dial press must not be a way round the box's permission."""
+        app = self.app()
+        opened = []
+
+        def _unlock(device):
+            raise ControlError('Unlocking is switched off on this box.')
+        self.recorder.unlock = _unlock
+        app._dial = self.dial_lib.normalise([
+            {'step': {'kind': 'unlock', 'driver': 'switchbot',
+                      'target': 'Front Door'}}])
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertEqual(opened, [])
+        self.assertEqual(self.recorder.calls, [])
+
+    def test_a_slot_survives_being_saved_and_read_back(self):
+        app = self.app()
+        dial = self.dial_lib.normalise([
+            {'label': 'Plugs', 'step': {'kind': 'power', 'driver': 'tuya',
+                                        'target': 'WP9ABC#1',
+                                        'action': 'off'}}])
+        app.save_dial(dial)
+
+        from paragon_home import ParagonHome
+        after_restart = ParagonHome()
+
+        self.assertEqual(after_restart.dial[0]['label'], 'Plugs')
+        self.assertTrue(self.dial_lib.is_filled(after_restart.dial[0]))
+
+    def test_a_satellite_keeps_the_master_dial_rather_than_its_own(self):
+        """Eight buttons disagreeing with the menus above them is worse than none."""
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        xbmcaddon.SETTINGS['master_ip'] = '10.0.0.1'
+        app = self.app()
+
+        saved = app.save_dial(self.dial_lib.normalise([
+            {'step': {'kind': 'scene', 'target': 'All Off'}}]))
+
+        self.assertFalse(saved)
+        xbmcaddon.reset()
+
+
 class TestLongPauses(unittest.TestCase):
     """A twelve-minute brew must not be twelve minutes nothing else can run.
 
@@ -14234,6 +14493,97 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertFalse(answer['data']['ok'])
         self.assertIn('cannot be unlocked', answer['data']['message'])
+
+    def test_the_snapshot_carries_the_dial_with_its_numbers(self):
+        import speeddial as dial_lib
+
+        self.app._dial = dial_lib.normalise([
+            {'label': 'Lights out', 'step': {'kind': 'scene',
+                                             'target': 'All Off'}},
+            {'step': None},
+            {'label': 'Lock up', 'step': {'kind': 'lock',
+                                          'target': 'Front Door'}},
+        ])
+        client = self.signed_in()
+
+        dial = client.state()['data']['dial']
+
+        # Numbered, and the gap kept: slot three is still slot three.
+        self.assertEqual([(d['slot'], d['label']) for d in dial],
+                         [(1, 'Lights out'), (3, 'Lock up')])
+
+    def test_a_box_with_no_dial_sends_an_empty_one(self):
+        client = self.signed_in()
+
+        self.assertEqual(client.state()['data']['dial'], [])
+
+    def test_pressing_a_dial_slot_says_it_started(self):
+        """It can hold a sequence with an hour of pauses; a phone cannot wait."""
+        import speeddial as dial_lib
+
+        self.app._dial = dial_lib.normalise([
+            {'label': 'Lights out', 'step': {'kind': 'scene',
+                                             'target': 'All Off'}}])
+        client = self.signed_in()
+
+        answer = client.act('dial', slot=1)
+
+        self.assertEqual(answer['status'], 202)
+        self.assertTrue(answer['data']['queued'])
+
+    def test_an_empty_or_impossible_slot_is_refused_and_named(self):
+        """Refused for the right reason, which is what the message is for."""
+        import speeddial as dial_lib
+
+        self.app._dial = dial_lib.normalise(
+            [{'step': {'kind': 'scene', 'target': 'All Off'}}])
+        client = self.serve(run_loop=False)
+
+        for number, expected in ((2, 'empty'), (0, 'No such'),
+                                 (99, 'No such'), ('x', 'No such'),
+                                 (None, 'No such')):
+            job = self.server.commands.submit('dial', {'slot': number})
+            self.server.pump(self.app)
+            self.assertTrue(job.wait(1.0))
+            self.assertFalse(job.result['ok'], 'slot %r ran' % number)
+            self.assertIn(expected, job.result['message'],
+                          'slot %r was refused for the wrong reason' % number)
+
+    def test_slot_zero_does_not_reach_the_last_slot_through_the_remote(self):
+        """Python counts from the other end and a dial does not have a slot 0."""
+        import speeddial as dial_lib
+
+        self.app._dial = dial_lib.normalise(
+            [{'step': None}] * 7
+            + [{'step': {'kind': 'scene', 'target': 'All Off'}}])
+        client = self.serve(run_loop=False)
+
+        job = self.server.commands.submit('dial', {'slot': 0})
+        self.server.pump(self.app)
+
+        self.assertTrue(job.wait(1.0))
+        self.assertFalse(job.result['ok'])
+        self.assertEqual(self.recorder.calls, [], 'slot 0 reached slot 8')
+
+    def test_the_dial_tab_is_absent_until_there_is_a_dial(self):
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        self.assertIn("document.getElementById('dialTab').hidden = "
+                      "!slots.length", page)
+
+    def test_a_remembered_tab_whose_panel_has_gone_falls_back_home(self):
+        """Otherwise every panel is hidden and the page is blank.
+
+        The dial can empty and the television can be uninstalled, and the tab
+        the browser remembers outlives both.
+        """
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        self.assertIn("if (which === 'dial' && !(state.dial || []).length)",
+                      page)
+        self.assertIn("if (which === 'tv' && !tvState().installed)", page)
 
     def test_a_waiting_sequence_says_what_it_is_waiting_on(self):
         """So the phone can show a brew in progress rather than a resting tile."""

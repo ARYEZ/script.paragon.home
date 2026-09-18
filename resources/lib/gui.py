@@ -24,6 +24,7 @@ import palette as palette_lib
 import reracks as rerack_lib
 import sequences as sequence_lib
 import scenes as scene_lib
+import speeddial as dial_lib
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
                      CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
                      CAP_STATE, CAP_UNLOCK,
@@ -189,6 +190,8 @@ class ControlPanel(object):
         rows.extend([
             ('Scenes...', self.scene_menu),
             ('Sequences...', self.sequence_menu),
+            ('Speed dial: %s' % dial_lib.describe(self.app.dial),
+             self.dial_menu),
         ])
         # A satellite has no reracks of its own: the master keeps the day's
         # shape for the whole house, and a satellite following its own copy
@@ -1791,6 +1794,94 @@ class ControlPanel(object):
                          'A Tuya local key is exactly 16 characters.\n\n'
                          'You gave %d.' % len(value.strip()))
 
+    # -- the speed dial ------------------------------------------------------
+
+    def dial_menu(self):
+        """Eight slots, each one thing worth a single press from a phone."""
+        while True:
+            dial = self.app.dial
+            rows = []
+            for number in range(1, dial_lib.SLOT_COUNT + 1):
+                slot = dial[number - 1]
+                label = (self.app.dial_label(slot)
+                         if dial_lib.is_filled(slot) else 'Empty')
+                rows.append(('%d.  %s' % (number, label), number))
+
+            choice = _select('Speed dial', [row for row, _n in rows])
+            if choice == BACK:
+                return
+            self.edit_dial_slot(rows[choice][1])
+
+    def edit_dial_slot(self, number):
+        """What one slot does, and what it is called on the button."""
+        while True:
+            dial = self.app.dial
+            slot = dial[number - 1]
+            filled = dial_lib.is_filled(slot)
+
+            rows = [('Does: %s' % (sequence_lib.describe_step(
+                slot['step'], self._target_name(slot['step']))
+                if filled else 'nothing yet'),
+                lambda: self._set_dial_step(number))]
+            if filled:
+                # Only once there is something to name. A label on an empty
+                # slot is a button that says a word and does nothing.
+                rows.append(('Called: %s'
+                             % (slot['label'] or 'whatever it does'),
+                             lambda: self._name_dial_slot(number)))
+                rows.append(('Try it now',
+                             lambda: self.app.run_dial_slot(number)))
+                rows.append(('Clear this slot',
+                             lambda: self._clear_dial_slot(number)))
+
+            choice = _select('Speed dial %d' % number,
+                             [label for label, _h in rows])
+            if choice == BACK:
+                return
+            if rows[choice][1]() is False:
+                return
+
+    def _set_dial_step(self, number):
+        """Pick what a slot does, from everything a sequence step can be."""
+        kinds = [('Scene', self._step_scene)]
+        if self.app.sequences:
+            kinds.append(('Sequence', lambda: self._step_sequence(None)))
+        for driver_id in self._driver_ids(self.app.enabled_devices):
+            kinds.append((self._driver_label(driver_id),
+                          lambda d=driver_id: self._step_device(d)))
+
+        choice = _select('Speed dial %d does what' % number,
+                         [label for label, _h in kinds])
+        if choice == BACK:
+            return
+
+        step = kinds[choice][1]()
+        if step is None:
+            return
+        dial = self.app.dial
+        dial[number - 1] = dial_lib.normalise_slot(
+            {'label': dial[number - 1].get('label'), 'step': step})
+        self.app.save_dial(dial)
+
+    def _name_dial_slot(self, number):
+        """A short name for the button, or nothing to use what it does."""
+        dial = self.app.dial
+        slot = dial[number - 1]
+        name = _dialog().input('Name for speed dial %d' % number,
+                               slot.get('label') or '')
+        if name is None:
+            return
+        dial[number - 1] = dial_lib.normalise_slot(
+            {'label': name, 'step': slot['step']})
+        self.app.save_dial(dial)
+
+    def _clear_dial_slot(self, number):
+        dial = self.app.dial
+        dial[number - 1] = dial_lib.empty_slot()
+        self.app.save_dial(dial)
+        utils.notify('Speed dial %d cleared' % number)
+        return False
+
     # -- sequences -----------------------------------------------------------
 
     def sequence_menu(self):
@@ -2655,8 +2746,15 @@ class ControlPanel(object):
         return {'kind': sequence_lib.KIND_SCENE,
                 'target': scenes[choice]['name']}
 
-    def _nestable(self, sequence):
-        """The sequences this one may run: not itself, and nothing that loops."""
+    def _nestable(self, sequence=None):
+        """The sequences this one may run: not itself, and nothing that loops.
+
+        A host of None means there is no host -- a speed dial slot, which sits
+        outside every sequence and so cannot be inside one. Everything is
+        offered there.
+        """
+        if sequence is None:
+            return list(self.app.sequences)
         return [other for other in self.app.sequences
                 if not sequence_lib.would_loop(self.app.sequences,
                                                sequence.get('name'),
@@ -2710,7 +2808,7 @@ class ControlPanel(object):
             # notification that does not fade behind whatever is playing.
             utils.force_notify('%s UNLOCKED' % heading)
 
-    def _step_sequence(self, sequence):
+    def _step_sequence(self, sequence=None):
         """Run another sequence's steps here, in place of retyping them."""
         choices = self._nestable(sequence)
         if not choices:

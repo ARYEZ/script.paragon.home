@@ -47,6 +47,7 @@ import xbmcvfs
 import addon_utils as utils
 import scenes as scene_lib
 import sequences as sequence_lib
+import speeddial as dial_lib
 import tv
 from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
                     same_secret, to_bytes, to_text)
@@ -113,10 +114,12 @@ COOKIE_NAME = 'paragon_remote'
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
              'command', 'position', 'states', 'cancel_sequence', 'lock',
              'unlock')
+# A dial press can be anything a step can be, including a sequence with an hour
+# of pauses in it, so it waits like one rather than being answered inline.
 # A satellite copying from its master reads five files over SSH, each with its
 # own timeout, so a master that is off can take longer than a handler is
 # willing to wait. Discovery is the same shape.
-BACKGROUND = ('sequence', 'refresh', 'sync')
+BACKGROUND = ('sequence', 'refresh', 'sync', 'dial')
 
 # The television half. Every one of these hands its work to Kodi and returns
 # -- executeJSONRPC is the call Kodi's own web server makes from its own
@@ -634,6 +637,23 @@ def perform(app, action, params, sleep_func=None, on_step=None):
         app.controller.unlock(device)
         return {'ok': True, 'message': '%s UNLOCKED' % device.name}
 
+    if action == 'dial':
+        try:
+            number = int(params.get('slot'))
+        except (TypeError, ValueError):
+            return {'ok': False, 'message': 'No such speed dial'}
+        slots = app.dial
+        if number < 1 or number > len(slots):
+            return {'ok': False, 'message': 'No such speed dial'}
+        slot = slots[number - 1]
+        if not dial_lib.is_filled(slot):
+            return {'ok': False, 'message': 'Speed dial %d is empty' % number}
+        label = app.dial_label(slot)
+        ran = app.run_dial_slot(number, announce=False,
+                                sleep_func=sleep_func, on_step=on_step)
+        return {'ok': bool(ran),
+                'message': label if ran else '%s did nothing' % label}
+
     if action == 'cancel_sequence':
         name = params.get('name') or params.get('value') or ''
         if app.cancel_pending(name):
@@ -795,6 +815,10 @@ def snapshot(app, states=None, allow_sequences=True):
                        'waiting': _waiting_for(app, sequence.get('name', ''),
                                                now)}
                       for sequence in app.sequences],
+        # Numbered, so an empty slot keeps its place: the thing a thumb knows
+        # is third stays third when the second is cleared.
+        'dial': [{'slot': number, 'label': app.dial_label(slot)}
+                 for number, slot in dial_lib.filled(app.dial)],
         'palette': [{'name': entry.get('name', ''),
                      'hex': _hex(entry.get('color'))}
                     for entry in app.palette],
@@ -1770,6 +1794,49 @@ button.ghost {
 }
 button.wide { width: 100%; }
 
+/* The speed dial: two columns of big keys, sized so a thumb finds one without
+   looking. The number stays even when the label is long, because the position
+   is the thing worth learning -- a slot's number never moves. */
+.dialgrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.dialkey {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  min-height: 92px;
+  padding: 13px 14px;
+  text-align: left;
+  background-color: var(--card);
+  background-image: var(--wash);
+  overflow: hidden;
+}
+.dialkey:active { background-color: #1d1d22; }
+.dialnum {
+  font-family: var(--display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--orange);
+}
+.diallabel {
+  font-family: var(--display);
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 1.2px;
+  line-height: 1.15;
+  color: var(--text);
+}
+/* Given real width, four across rather than two: a tablet on a wall has room
+   and a row of eight tall keys is a scroll. */
+@media (min-width: 640px) {
+  .dialgrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
 /* A scene or sequence: a panel you press, with the same lit top edge. */
 button.tile {
   position: relative;
@@ -2480,7 +2547,8 @@ button.chan {
       </div>
       <div class="tabs" id="tabs" hidden>
         <button data-tab="home" class="on">Home</button>
-        <button data-tab="tv">TV</button>
+        <button data-tab="dial" id="dialTab" hidden>Dial</button>
+        <button data-tab="tv" id="tvTab" hidden>TV</button>
       </div>
       <p class="status" id="status"></p>
       <div class="barside">
@@ -2553,6 +2621,13 @@ button.chan {
    <!-- The television, on its own tab. Only there when Paragon TV is
         installed on this box; a house with lights and no television never
         sees it. -->
+   <div id="dialPanel" hidden>
+    <section>
+      <h2 class="eyebrow">Speed dial</h2>
+      <div class="dialgrid" id="dial"></div>
+    </section>
+   </div>
+
    <div id="tvPanel" hidden>
    <div class="deck">
     <div class="pane">
@@ -3715,13 +3790,35 @@ function renderChannels() {
    screen choice, and for the same reason: the tablet on the wall is
    probably a television remote and the phone in a pocket probably is not. */
 function showTab(which) {
+  /* A remembered tab whose panel has since gone -- the dial emptied, the
+     television uninstalled -- would leave every panel hidden and the page
+     blank. Fall back to the one that is always there. */
+  if (which === 'dial' && !(state.dial || []).length) { which = 'home'; }
+  if (which === 'tv' && !tvState().installed) { which = 'home'; }
   var tabs = document.querySelectorAll('#tabs button');
   Array.prototype.forEach.call(tabs, function (button) {
     button.classList.toggle('on', button.getAttribute('data-tab') === which);
   });
   document.getElementById('homePanel').hidden = which !== 'home';
+  document.getElementById('dialPanel').hidden = which !== 'dial';
   document.getElementById('tvPanel').hidden = which !== 'tv';
   try { localStorage.setItem('paragon.tab', which); } catch (ignored) {}
+}
+
+function renderDial() {
+  var slots = state.dial || [];
+  var box = document.getElementById('dial');
+  box.textContent = '';
+  slots.forEach(function (entry) {
+    var node = el('button', 'dialkey');
+    node.appendChild(el('span', 'dialnum', String(entry.slot)));
+    node.appendChild(el('span', 'diallabel', entry.label));
+    node.addEventListener('click', function () {
+      act('dial', {slot: entry.slot});
+    });
+    box.appendChild(node);
+  });
+  document.getElementById('dialTab').hidden = !slots.length;
 }
 
 function wantedTab() {
@@ -3732,9 +3829,12 @@ function wantedTab() {
 function renderTv() {
   // No television on this box, no tab and no panel. Not disabled -- absent.
   var here = !!tvState().installed;
-  document.getElementById('tabs').hidden = !here;
+  document.getElementById('tvTab').hidden = !here;
+  // The bar shows as soon as there is anywhere else to go, which is either
+  // half: a house with a dial and no television still needs it.
+  document.getElementById('tabs').hidden =
+    !here && !(state.dial || []).length;
   if (!here) {
-    document.getElementById('homePanel').hidden = false;
     document.getElementById('tvPanel').hidden = true;
     return;
   }
@@ -3758,6 +3858,9 @@ function render() {
   renderSequences();
   renderPalette();
   renderDevices();
+  // Before renderTv, which decides whether the tab bar shows at all and needs
+  // to know whether there is a dial to show it for.
+  renderDial();
   renderTv();
 }
 

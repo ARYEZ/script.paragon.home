@@ -21,6 +21,7 @@ import palette as palette_lib
 import reracks as rerack_lib
 import satellite as satellite_lib
 import sequences as sequence_lib
+import speeddial as dial_lib
 import scenes as scene_lib
 from devices import (CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
                      TRANSPORT_CLOUD, TRANSPORT_LAN, build_hub)
@@ -61,6 +62,7 @@ class ParagonHome(object):
         self._devices = None
         self._scenes = None
         self._sequences = None
+        self._dial = None
         # What each shared file looked like when this session last read it.
         # See reload_changed.
         self._stamps = {}
@@ -974,6 +976,59 @@ class ParagonHome(object):
             return ''
         return time.strftime(' at %H:%M', time.localtime(stamp))
 
+    # -- the speed dial ----------------------------------------------------
+
+    @property
+    def dial(self):
+        """Eight slots, whatever the file holds."""
+        if self._dial is None:
+            self._dial = dial_lib.normalise(
+                utils.read_json(dial_lib.DIAL_FILE, default=[]))
+        return self._dial
+
+    def save_dial(self, dial=None):
+        if self._master_owns('scenes'):
+            # The master owns what the house can be told to do, and the dial is
+            # a shortcut to exactly that. A satellite holding its own would be
+            # eight buttons that disagreed with the menus above them.
+            return False
+        if dial is not None:
+            self._dial = dial_lib.normalise(dial)
+        utils.write_json(dial_lib.DIAL_FILE, self.dial)
+        return True
+
+    def run_dial_slot(self, number, announce=True, sleep_func=None,
+                      on_step=None):
+        """Press one slot. Returns True if it did something.
+
+        Run as a one-step sequence rather than by carrying the step out here,
+        so that a dial press and the same step inside a sequence go through the
+        same code: the unlock gate, a nested sequence being spliced in, a long
+        pause being handed back, the way a failure is reported.
+        """
+        index = int(number) - 1
+        if index < 0 or index >= len(self.dial):
+            return False
+        slot = self.dial[index]
+        if not dial_lib.is_filled(slot):
+            return False
+        return self.run_sequence(
+            dial_lib.as_sequence(slot, self.dial_label(slot)),
+            announce=announce, sleep_func=sleep_func, on_step=on_step,
+            defer=True)
+
+    def dial_label(self, slot):
+        """What to call a slot, with a device's friendly name where it has one."""
+        step = slot.get('step') or {}
+        name = None
+        if step.get('kind') not in (sequence_lib.KIND_SCENE,
+                                    sequence_lib.KIND_SEQUENCE,
+                                    sequence_lib.KIND_NONE):
+            found = sequence_lib.resolve_targets(step, self.devices)
+            if found:
+                name = found[0].name
+        return dial_lib.label_for(slot, name)
+
     # -- sequences part way through a long pause ----------------------------
     #
     # A sequence that stops at a long pause leaves an entry here saying what to
@@ -1412,6 +1467,7 @@ class ParagonHome(object):
         ('_devices', DEVICE_CACHE),
         ('_scenes', scene_lib.SCENE_FILE),
         ('_sequences', sequence_lib.SEQUENCE_FILE),
+        ('_dial', dial_lib.DIAL_FILE),
         ('_palette', palette_lib.PALETTE_FILE),
     )
 
