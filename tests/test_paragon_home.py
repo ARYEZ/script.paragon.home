@@ -13859,6 +13859,64 @@ class TestWebRemote(unittest.TestCase):
         self.assertIn('text/html', answer['type'])
         self.assertIn(b'Paragon Home', answer['body'])
 
+    # The remembered tab is the state that broke it: a page that loaded
+    # perfectly on a fresh browser was a black rectangle on the one it was
+    # actually for, because showTab only touched the snapshot when the stored
+    # tab was 'dial' or 'tv'.
+    REMEMBERED_TABS = (None, 'home', 'dial', 'tv')
+
+    def test_the_page_script_actually_runs_in_a_browser(self):
+        """The question reading the served HTML cannot answer.
+
+        The remote has gone blank twice, both times shipped by tests that
+        checked some text was present in the page. It was: the page was broken
+        around it. This one starts the script in a stub browser and fails if it
+        throws, once for each tab a browser might remember.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+
+        for tab in self.REMEMBERED_TABS:
+            seed = ("global.localStorage.setItem('paragon.tab', %r);\n"
+                    % tab if tab else '')
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+
+            self.assertEqual(
+                proc.returncode, 0,
+                'the page does not run with %r remembered:\n%s'
+                % (tab or 'nothing', said[:900]))
+
     def test_no_javascript_string_runs_off_the_end_of_its_line(self):
         """The page is a plain Python string, so a backslash-n in it is a real
         newline by the time a browser sees it -- and a real newline inside a

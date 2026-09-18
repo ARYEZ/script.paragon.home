@@ -3792,9 +3792,17 @@ function renderChannels() {
 function showTab(which) {
   /* A remembered tab whose panel has since gone -- the dial emptied, the
      television uninstalled -- would leave every panel hidden and the page
-     blank. Fall back to the one that is always there. */
-  if (which === 'dial' && !(state.dial || []).length) { which = 'home'; }
-  if (which === 'tv' && !tvState().installed) { which = 'home'; }
+     blank. Fall back to the one that is always there.
+
+     Only once there is a snapshot to ask. This runs at load as well, before
+     anything has been fetched, and `state` is null until the first one
+     arrives -- reading it then is a TypeError, and a TypeError here stops the
+     whole script and blanks the page it was meant to protect. The render pass
+     calls this again with the answer. */
+  if (state) {
+    if (which === 'dial' && !(state.dial || []).length) { which = 'home'; }
+    if (which === 'tv' && !tvState().installed) { which = 'home'; }
+  }
   var tabs = document.querySelectorAll('#tabs button');
   Array.prototype.forEach.call(tabs, function (button) {
     button.classList.toggle('on', button.getAttribute('data-tab') === which);
@@ -3862,6 +3870,10 @@ function render() {
   // to know whether there is a dial to show it for.
   renderDial();
   renderTv();
+  // Re-decided now that there is something to decide with. At load there was
+  // no snapshot, so a remembered tab was taken on trust; this is where a
+  // remembered one that no longer exists falls back.
+  showTab(wantedTab());
 }
 
 document.getElementById('fullscreen').addEventListener('click', function () {

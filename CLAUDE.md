@@ -56,4 +56,11 @@ that reason.
 The web remote's page is a plain triple-quoted string in `remote.py`, so a
 backslash-n in it becomes a real newline by the time a browser sees it. Inside a
 JavaScript string literal that is a syntax error that blanks the whole page.
-There is a test that walks the script for it.
+
+**The page has gone blank twice, and both times the tests said it was fine**,
+because they asked whether some text was present and it was — the page was
+broken around it. So `tests/js/browser.js` is a stub browser and there is a test
+that starts the script in it, once for each tab a browser might remember. That
+last part matters: the second blank page only happened when `paragon.tab` held
+`dial` or `tv`, so a fresh browser loaded it perfectly and the one it was for
+did not. Anything touching that script gets run, not read.
