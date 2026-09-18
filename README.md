@@ -491,6 +491,9 @@ Eight things worth one press from a phone. **Speed dial** on the first screen
 sets them up; a **Dial** tab appears on the web remote once any of them is
 filled.
 
+The keys are **one per row, full width**, so a name reads in a single line at a
+glance — which is the whole job of a speed dial.
+
 A slot holds **one sequence step**, and that is the whole design. Everything a
 step can already be, a slot can be — a scene, a whole sequence, a plug on or
 off, a blind to a percentage, an infrared code, lock the door, unlock it. Every

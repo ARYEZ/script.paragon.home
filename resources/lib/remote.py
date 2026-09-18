@@ -1794,21 +1794,29 @@ button.ghost {
 }
 button.wide { width: 100%; }
 
-/* The speed dial: two columns of big keys, sized so a thumb finds one without
-   looking. The number stays even when the label is long, because the position
-   is the thing worth learning -- a slot's number never moves. */
+/* The speed dial: one key per row, full width, at every size.
+
+   Two columns fitted more on a screen and made every label wrap -- "Sequence:
+   All Blinds Open" came out over two lines in half the width available. A row
+   gives the name the whole width, so it reads in one line at a glance, which
+   is the entire job of a speed dial.
+
+   The number sits to the left of the name rather than above it, kept in a
+   fixed column so the names line up with each other down the page. It is there
+   because the position is the thing worth learning -- a slot's number never
+   moves. */
 .dialgrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .dialkey {
   display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-start;
-  min-height: 92px;
-  padding: 13px 14px;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  min-height: 66px;
+  padding: 12px 16px;
   text-align: left;
   background-color: var(--card);
   background-image: var(--wash);
@@ -1816,25 +1824,24 @@ button.wide { width: 100%; }
 }
 .dialkey:active { background-color: #1d1d22; }
 .dialnum {
+  flex: 0 0 auto;
+  min-width: 14px;
   font-family: var(--display);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 1.4px;
   color: var(--orange);
 }
 .diallabel {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--display);
   text-transform: uppercase;
   font-weight: 700;
-  font-size: 16px;
+  font-size: 17px;
   letter-spacing: 1.2px;
-  line-height: 1.15;
+  line-height: 1.2;
   color: var(--text);
-}
-/* Given real width, four across rather than two: a tablet on a wall has room
-   and a row of eight tall keys is a scroll. */
-@media (min-width: 640px) {
-  .dialgrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 /* A scene or sequence: a panel you press, with the same lit top edge. */

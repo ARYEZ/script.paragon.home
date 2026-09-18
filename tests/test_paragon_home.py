@@ -14623,6 +14623,27 @@ class TestWebRemote(unittest.TestCase):
         self.assertFalse(job.result['ok'])
         self.assertEqual(self.recorder.calls, [], 'slot 0 reached slot 8')
 
+    def test_a_dial_key_takes_the_whole_row(self):
+        """One per row at every width, so a name reads in one line.
+
+        Two columns fitted more on a screen and made every label wrap: "Sequence:
+        All Blinds Open" came out over two lines in half the width available,
+        which is the opposite of what a speed dial is for.
+        """
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        grid = re.search(r'\.dialgrid \{([^}]*)\}', page)
+        self.assertIsNotNone(grid, 'the dial grid has gone')
+        columns = re.search(r'grid-template-columns:\s*([^;]+);',
+                            grid.group(1))
+        self.assertIsNotNone(columns)
+        self.assertEqual(columns.group(1).strip(), 'minmax(0, 1fr)')
+        # And nothing puts it back to several columns further down.
+        self.assertNotIn('.dialgrid { grid-template-columns: repeat', page)
+
     def test_the_dial_tab_is_absent_until_there_is_a_dial(self):
         client = self.serve()
         page = client.call('GET', '/', guard=False)['body'].decode('utf-8')

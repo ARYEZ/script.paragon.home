@@ -29,8 +29,8 @@ import sequences as sequence_lib
 
 DIAL_FILE = 'speeddial.json'
 
-# Eight is what fits on a phone at a size a thumb can hit without looking, in
-# two columns of four, without the page scrolling.
+# Eight is what fits on a phone at a size a thumb can hit without looking, as
+# eight full-width rows, without the page scrolling.
 SLOT_COUNT = 8
 
 # What a label may run to. Longer than this and the button either shrinks the
