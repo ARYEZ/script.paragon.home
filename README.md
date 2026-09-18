@@ -652,6 +652,38 @@ and a remembered position surviving that would be a guess wearing the clothes of
 a fact. It is **never** used to decide a step can be skipped; that still takes a
 reading or nothing.
 
+### What happened on the last run
+
+Every run records what became of **each step**, and keeps it. The Kodi log
+already carried all of this; the log is on one box, needs a file manager to
+read, and is no use at all for the 07:00 run nobody watched.
+
+**Last run:** in the sequence editor gives the counts — `2 done, 1 already
+done  (1 hour ago)` — and opens the detail:
+
+```
+Blinds Down  -  1 done, 1 FAILED  (12 min ago)
+
+1. Blind One: 0% open  --  done
+2. Blind Two: 0% open  --  FAILED: Blind Two is unreachable
+```
+
+The four words are the same everywhere: **done**, **already done**, **FAILED**,
+**waiting**. "Already done" is a step that was skipped by design because there
+was nothing left to do — which is the whole difference between *the blinds were
+already shut* and *the blinds did not close*, and is not recoverable from a
+count of what ran.
+
+A failure is visible **without opening anything**: the sequence list prefixes
+the row with `[1 FAILED]`, and on the phone the tile shows what it did last time
+instead of its schedule, with a red edge where that included a failure. What it
+will do matters less than what it did.
+
+A run interrupted by a long pause is **one run, not three** — a resume appends
+to the record rather than starting a new one, and says `still waiting` while it
+is. Deleting a sequence takes its record with it, and the file keeps the last 50
+names.
+
 ### Skipping what is already done
 
 **Skip what is already done** in the sequence editor, off by default. With it

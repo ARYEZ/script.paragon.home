@@ -807,6 +807,12 @@ def snapshot(app, states=None, allow_sequences=True):
         'sequences': [{'name': sequence.get('name', ''),
                        'schedule': sequence_lib.describe_schedule(sequence),
                        'steps': len(sequence_lib.filled_steps(sequence)),
+                       # What became of it last time. The phone is usually the
+                       # only place a scheduled run is ever seen from.
+                       'last': sequence_lib.describe_run(
+                           app.last_run(sequence.get('name', '')), now),
+                       'failed': (app.last_run(sequence.get('name', '')) or {}
+                                  ).get(sequence_lib.FAILED) or 0,
                        # Seconds still to wait if it is part way through a
                        # long pause, 0 if it is not. The page shows the wait
                        # and offers to stop it, because a sequence waiting is
@@ -1907,6 +1913,11 @@ button.tile .sub {
   margin-left: 5px;
   vertical-align: 2px;
 }
+
+/* Its last run had a failure in it. The edge only -- the tile is still a
+   button you press, not an error message. */
+button.tile.lastfailed::before { background: #ff5f5f; opacity: 1; }
+button.tile.lastfailed .sub { color: #ff5f5f; }
 
 button.tile.waiting { background-image: var(--hot); }
 button.tile.waiting::before { display: none; }
@@ -3020,13 +3031,17 @@ function renderSequences() {
        stops on a press instead of starting again -- pressing it twice must not
        leave one tail owed to two openings. It takes the lit ember the live
        channel wears, because it means the same thing. */
+    /* What it did last time, where there is one -- a scheduled run at seven in
+       the morning is usually seen from here or nowhere. The schedule is what
+       it will do and matters less than what it did. */
     var sub = waiting
       ? 'Waiting ' + saidWait(waiting) + ' - press to stop'
-      : sequence.steps + ' step(s) - ' + sequence.schedule;
+      : (sequence.last || (sequence.steps + ' step(s) - ' + sequence.schedule));
     var node = tile(sequence.name, sub, function () {
       act(waiting ? 'cancel_sequence' : 'sequence', {name: sequence.name});
     });
     if (waiting) { node.classList.add('waiting'); }
+    if (sequence.failed) { node.classList.add('lastfailed'); }
     box.appendChild(node);
   });
   document.getElementById('sequencesBlock').hidden = !list.length;

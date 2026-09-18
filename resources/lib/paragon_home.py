@@ -841,6 +841,7 @@ class ParagonHome(object):
             return False
         self._sequences.remove(existing)
         self.save_sequences()
+        self.forget_run(existing['name'])
         if self.sequence_state.pop(existing['name'], None) is not None:
             # Otherwise a new sequence given the same name would inherit a
             # "already ran today" it never earned.
@@ -870,20 +871,34 @@ class ParagonHome(object):
         flat = dict(sequence,
                     steps=sequence_lib.expand(sequence, self.sequences))
 
-        skipped = []
         states = self.states_for_skipping(flat) \
             if sequence.get('skip_done') else None
 
-        def _skipped(index, step):
-            skipped.append(index)
-            # What the step would have reached is already where it wants it, so
-            # nothing about the room changed and the reading still stands.
+        # What became of each step, kept so that "it did not do anything" can
+        # be told apart from "there was nothing left to do" after the fact.
+        # A resume appends to the run already recorded rather than starting a
+        # new one: a sequence that waited twelve minutes in the middle is one
+        # run, not three.
+        outcomes = list((self.last_run(name) or {}).get('steps') or []) \
+            if start else []
+
+        def _outcome(index, step, outcome, why):
+            outcomes.append({
+                'n': index + 1,
+                'what': sequence_lib.describe_step(step,
+                                                   self._step_target(step)),
+                'outcome': outcome,
+                'why': why,
+            })
 
         done, errors = sequence_lib.run(self, flat, log_func=utils.log,
                                       sleep_func=sleep_func, on_step=on_step,
                                       start=start,
                                       defer=_defer if defer else None,
-                                      states=states, on_skip=_skipped)
+                                      states=states, on_outcome=_outcome)
+        skipped = [entry for entry in outcomes
+                   if entry['outcome'] == sequence_lib.SKIPPED]
+        self.record_run(name, outcomes, waiting=bool(waited))
         if announce:
             if waited:
                 # Said out loud because the sequence is not over and the room
@@ -975,6 +990,90 @@ class ParagonHome(object):
         if not stamp:
             return ''
         return time.strftime(' at %H:%M', time.localtime(stamp))
+
+    # -- what happened on the last run --------------------------------------
+    #
+    # One record per name, holding every step and what became of it. The Kodi
+    # log already carries all of this, and the log is the wrong place: it is on
+    # one box, it needs a file manager to read, and a sequence that ran at
+    # 07:00 while nobody was watching is exactly the one worth asking about.
+
+    RUN_FILE = 'last_runs.json'
+
+    # How many names to keep. A house has a dozen sequences and eight dial
+    # slots; the cap is there so that renaming things for a year cannot grow
+    # the file without bound, not because anyone will reach it.
+    MAX_RUNS = 50
+
+    @property
+    def runs(self):
+        """Every name's last run, read fresh.
+
+        Not cached, for the reason the pending sequences are not: the menus and
+        the service are different interpreters and either can write this.
+        """
+        raw = utils.read_json(self.RUN_FILE, default={})
+        return raw if isinstance(raw, dict) else {}
+
+    def last_run(self, name):
+        """What happened the last time `name` ran, or None."""
+        found = self.runs.get((name or '').strip())
+        return found if isinstance(found, dict) else None
+
+    def record_run(self, name, outcomes, waiting=False, now=None):
+        """Note what became of every step, replacing the previous run."""
+        name = (name or '').strip()
+        if not name or not outcomes:
+            # A run of nothing is not a run. Recording it would replace a real
+            # answer with "0 steps" the next time an empty slot was pressed.
+            return None
+        record = {
+            'at': now if now is not None else time.time(),
+            'waiting': bool(waiting),
+            'steps': list(outcomes),
+        }
+        for outcome in (sequence_lib.DID, sequence_lib.SKIPPED,
+                        sequence_lib.FAILED):
+            record[outcome] = len([entry for entry in outcomes
+                                   if entry.get('outcome') == outcome])
+
+        runs = self.runs
+        runs[name] = record
+        if len(runs) > self.MAX_RUNS:
+            # Oldest out. Sorted by the stamp rather than by insertion, because
+            # a dict read back off disk has no insertion order worth trusting.
+            keep = sorted(runs.items(),
+                          key=lambda pair: (pair[1] or {}).get('at') or 0,
+                          reverse=True)[:self.MAX_RUNS]
+            runs = dict(keep)
+        utils.write_json(self.RUN_FILE, runs)
+        return record
+
+    def forget_run(self, name):
+        """Drop a name's record, so a deleted sequence leaves nothing behind."""
+        runs = self.runs
+        if (name or '').strip() not in runs:
+            return False
+        del runs[(name or '').strip()]
+        utils.write_json(self.RUN_FILE, runs)
+        return True
+
+    def _step_target(self, step):
+        """A step's device by its friendly name, for a record worth reading.
+
+        "Blind One: 0% open" rather than "BLIND#1: 0% open". The name is what
+        the record is read back with, months later, by somebody who does not
+        know the ids.
+        """
+        kind = step.get('kind')
+        if kind in (sequence_lib.KIND_SCENE, sequence_lib.KIND_SEQUENCE,
+                    sequence_lib.KIND_NONE):
+            return None
+        try:
+            found = sequence_lib.resolve_targets(step, self.devices)
+        except Exception:
+            return None
+        return found[0].name if found else None
 
     # -- the speed dial ----------------------------------------------------
 

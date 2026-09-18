@@ -652,6 +652,67 @@ def expand(sequence, sequences, _depth=0, _seen=None, _budget=None):
     return out
 
 
+# What became of a step. One vocabulary, so the runner, the menus and the phone
+# all say the same four words about the same four things -- and so that
+# "skipped" never has to be inferred from "not done and not failed".
+DID = 'done'
+SKIPPED = 'skipped'      # nothing left to do; see already_there
+FAILED = 'failed'
+WAITING = 'waiting'      # stopped here for a long pause, will carry on
+CANCELLED = 'cancelled'  # somebody backed out of the progress dialog
+
+
+def describe_run(record, now=None):
+    """One line for what became of a run, or '' if there has not been one.
+
+    Counts rather than a verdict, because "3 done" and "3 done, 2 failed" are
+    different answers to the question being asked and a single word for both
+    would be the thing this was built to stop.
+    """
+    if not isinstance(record, dict) or not record.get('steps'):
+        return ''
+    bits = []
+    for key, word in ((DID, 'done'), (SKIPPED, 'already done'),
+                      (FAILED, 'FAILED')):
+        count = record.get(key) or 0
+        if count:
+            bits.append('%d %s' % (count, word))
+    if record.get('waiting'):
+        bits.append('still waiting')
+    if not bits:
+        bits.append('nothing ran')
+    return '%s  (%s)' % (', '.join(bits), describe_when(record.get('at'), now))
+
+
+def describe_when(stamp, now=None):
+    """How long ago, said the way a person would.
+
+    Relative rather than a clock time: "2 hours ago" answers "did this morning's
+    one work" without anyone having to work out what time it is now.
+    """
+    if not stamp:
+        return 'at some point'
+    seconds = (now if now is not None else time_module.time()) - stamp
+    # Covers a clock that went backwards too: a negative gap is under ninety
+    # seconds, and "just now" is the right answer for both.
+    if seconds < 90:
+        return 'just now'
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return '%d min ago' % minutes
+    hours = int(minutes // 60)
+    if hours < 24:
+        return '%d hour%s ago' % (hours, '' if hours == 1 else 's')
+    days = int(hours // 24)
+    return '%d day%s ago' % (days, '' if days == 1 else 's')
+
+
+def describe_outcome(outcome):
+    """The one word a person would use for it."""
+    return {DID: 'done', SKIPPED: 'already done', FAILED: 'FAILED',
+            WAITING: 'waiting', CANCELLED: 'cancelled'}.get(outcome, outcome)
+
+
 def describe_wait(seconds):
     """A pause said the way a person would say it: "12 minutes", "90 seconds"."""
     seconds = int(seconds or 0)
@@ -771,7 +832,7 @@ def resolve_targets(step, devices):
 
 
 def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
-        start=0, defer=None, states=None, on_skip=None):
+        start=0, defer=None, states=None, on_outcome=None):
     """Run one sequence from `start` on. Returns (steps done, [failures]).
 
     One step failing does not stop the rest. A sequence is a list of separate
@@ -791,9 +852,15 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
 
     Pass `states` -- {device id: what it last said} -- to have a step leave
     alone whatever is already as it wants it. A step with nothing left to do is
-    not done, it is skipped: `on_skip` hears about it, it does not count toward
-    the total, and its pause does not happen either, because that pause is
-    there to let an action land and no action happened.
+    not done, it is skipped: it does not count toward the total, and its pause
+    does not happen either, because that pause is there to let an action land
+    and no action happened.
+
+    `on_outcome(index, step, outcome, why)` hears what became of every step it
+    reaches, in the vocabulary above. It is how anything downstream knows that
+    a step was skipped by design rather than quietly not run -- which is the
+    whole difference between "the blinds were already shut" and "the blinds did
+    not close", and is not recoverable from the (done, errors) pair.
     """
     from devices import ControlError
 
@@ -807,26 +874,33 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
         step = steps[index]
         if step.get('kind') == KIND_NONE:
             continue
+        def said(outcome, why=''):
+            if on_outcome is not None:
+                on_outcome(index, step, outcome, why)
+
         if on_step is not None and on_step(index, step) is False:
+            said(CANCELLED)
             log('Sequence "%s" cancelled at step %d'
                 % (sequence.get('name'), index + 1))
             break
 
         try:
             if _run_step(app, step, states) is False:
-                if on_skip is not None:
-                    on_skip(index, step)
+                said(SKIPPED)
                 log('Sequence "%s" step %d: already done'
                     % (sequence.get('name'), index + 1))
                 # No pause either: it is there to let an action land.
                 continue
             done += 1
+            said(DID)
         except ControlError as exc:
             errors.append('Step %d: %s' % (index + 1, exc))
+            said(FAILED, str(exc))
             log('Sequence "%s" step %d failed: %s'
                 % (sequence.get('name'), index + 1, exc))
         except Exception as exc:
             errors.append('Step %d: %s' % (index + 1, exc))
+            said(FAILED, str(exc))
             log('Sequence "%s" step %d raised: %s'
                 % (sequence.get('name'), index + 1, exc))
 
@@ -840,6 +914,9 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
         # would be bookkeeping for its own sake.
         if (defer is not None and pause >= LONG_PAUSE_SECONDS
                 and work_left(steps, index + 1)):
+            # No outcome said here. This step already reported what became of
+            # it; the waiting belongs to the sequence, and the caller knows
+            # about it because its own defer was the thing that just fired.
             defer(index + 1, pause)
             log('Sequence "%s": %d step(s) done, %d failed, waiting %s'
                 % (sequence.get('name'), done, len(errors),

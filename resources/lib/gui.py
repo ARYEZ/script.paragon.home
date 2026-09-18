@@ -1945,6 +1945,12 @@ class ControlPanel(object):
             rows = []
             for sequence in sequences:
                 summary = sequence_lib.describe(sequence)
+                # A failure is said in the list, not only inside the editor.
+                # "Did the 07:00 one work" should be answerable by looking.
+                failed = (self.app.last_run(sequence['name']) or {}).get(
+                    sequence_lib.FAILED) or 0
+                if failed:
+                    summary = '[%d FAILED]  %s' % (failed, summary)
                 if sequence_lib.scheduled(sequence):
                     summary = '%s  -  %s' % (
                         sequence_lib.describe_schedule(sequence), summary)
@@ -2077,6 +2083,10 @@ class ControlPanel(object):
                              lambda: self._show_used_by(sequence)))
             rows.append(('Runs: %s' % sequence_lib.describe_schedule(sequence),
                          lambda: self.schedule_sequence(sequence)))
+            last = self.app.last_run(sequence['name'])
+            if last:
+                rows.append(('Last run: %s' % sequence_lib.describe_run(last),
+                             lambda: self.show_last_run(sequence['name'])))
             rows.append(('Skip what is already done: %s'
                          % ('yes' if sequence.get('skip_done') else 'no'),
                          lambda: self._toggle_skip_done(sequence)))
@@ -2196,6 +2206,29 @@ class ControlPanel(object):
             utils.notify('Copied to "%s"' % name)
         self.edit_sequence(copied)
         return False
+
+    def show_last_run(self, name):
+        """Every step of the last run and what became of it.
+
+        The counts answer "did it work"; this answers "which bit did not", and
+        that is the one that takes you to the blind with the flat battery.
+        """
+        record = self.app.last_run(name)
+        if not record:
+            utils.force_notify('%s has not run yet' % name)
+            return
+        lines = ['%s  -  %s' % (name, sequence_lib.describe_run(record)), '']
+        for entry in record.get('steps') or []:
+            line = '%d. %s  --  %s' % (
+                entry.get('n', 0), entry.get('what', ''),
+                sequence_lib.describe_outcome(entry.get('outcome')))
+            why = (entry.get('why') or '').strip()
+            if why:
+                # The reason is the whole point of keeping this. "FAILED" on
+                # its own is what the log already said.
+                line += ': %s' % why
+            lines.append(line)
+        _dialog().ok(utils.ADDON_NAME, '\n'.join(lines))
 
     def _toggle_skip_done(self, sequence):
         """Ask the devices where they are, and leave alone what is already there.

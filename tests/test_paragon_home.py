@@ -3552,6 +3552,312 @@ class TestSkippingWhatIsDone(unittest.TestCase):
         self.assertIn('1 already done', said)
 
 
+class TestWhatHappenedOnTheLastRun(unittest.TestCase):
+    """Knowing the difference between "already done" and "did not happen".
+
+    All of it was already going to the Kodi log, which is on one box, needs a
+    file manager to read, and is exactly no use for the 07:00 run nobody
+    watched.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui',
+                     'speeddial'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.seq = sequences
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self, fail_on=None):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController(fail_on=fail_on)
+        self.recorder.capabilities = lambda d: {CAP_POWER, CAP_POSITION,
+                                                CAP_STATE}
+        app.controller = self.recorder
+        app._devices = [
+            Device('BLIND#1', name='Blind One', driver='switchbot'),
+            Device('BLIND#2', name='Blind Two', driver='switchbot'),
+        ]
+        app._scenes = []
+        return app
+
+    def blinds(self, skip_done=False):
+        return self.seq.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0'},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ], skip_done=skip_done)
+
+    # -- the record ---------------------------------------------------------
+
+    def test_a_run_records_what_became_of_every_step(self):
+        app = self.app()
+        app._sequences = [self.blinds()]
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        record = app.last_run('Blinds Down')
+        self.assertEqual([e['outcome'] for e in record['steps']],
+                         [self.seq.DID, self.seq.DID])
+        self.assertEqual(record['done'], 2)
+        self.assertEqual(record['failed'], 0)
+
+    def test_a_skipped_step_is_recorded_as_skipped_not_as_missing(self):
+        """The whole question: already shut, or never closed?"""
+        app = self.app()
+        app._sequences = [self.blinds(skip_done=True)]
+        self.recorder.states = {'BLIND#1': {'position': 0}}
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        record = app.last_run('Blinds Down')
+        self.assertEqual([e['outcome'] for e in record['steps']],
+                         [self.seq.SKIPPED, self.seq.DID])
+        self.assertEqual(record['skipped'], 1)
+        self.assertEqual(record['done'], 1)
+
+    def test_a_failed_step_records_why(self):
+        """"FAILED" on its own is what the log already said."""
+        app = self.app(fail_on={'BLIND#2'})
+        app._sequences = [self.blinds()]
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        record = app.last_run('Blinds Down')
+        failed = [e for e in record['steps']
+                  if e['outcome'] == self.seq.FAILED]
+        self.assertEqual(len(failed), 1)
+        self.assertIn('unreachable', failed[0]['why'])
+        self.assertEqual(record['failed'], 1)
+
+    def test_a_step_is_recorded_by_the_device_name_not_its_id(self):
+        """Read back months later by somebody who does not know the ids.
+
+        Targeted by id on purpose. A step written by name records that name
+        whether or not anything looks the device up, so a fixture that names
+        its devices cannot tell the two apart.
+        """
+        app = self.app()
+        app._sequences = [self.seq.make_sequence('By id', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'BLIND#1',
+             'action': '0'},
+        ])]
+
+        app.run_sequence_by_name('By id', announce=False)
+
+        self.assertEqual(app.last_run('By id')['steps'][0]['what'],
+                         'Blind One: 0% open')
+
+    def test_a_step_that_raises_something_unexpected_records_why_too(self):
+        """Not every failure is a ControlError, and the odd one matters most."""
+        app = self.app()
+        app._sequences = [self.blinds()]
+
+        def _explode(device, percent):
+            raise RuntimeError('the cloud fell over')
+        self.recorder.set_position = _explode
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        record = app.last_run('Blinds Down')
+        self.assertEqual(record['failed'], 2)
+        self.assertIn('the cloud fell over', record['steps'][0]['why'])
+
+    def test_a_record_survives_the_session_that_made_it(self):
+        app = self.app()
+        app._sequences = [self.blinds()]
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        from paragon_home import ParagonHome
+
+        self.assertEqual(ParagonHome().last_run('Blinds Down')['done'], 2)
+
+    def test_a_second_run_replaces_the_first(self):
+        app = self.app()
+        app._sequences = [self.blinds()]
+        app.run_sequence_by_name('Blinds Down', announce=False)
+        self.recorder.fail_on = {'BLIND#1', 'BLIND#2'}
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        record = app.last_run('Blinds Down')
+        self.assertEqual(len(record['steps']), 2, 'the runs were stacked')
+        self.assertEqual(record['failed'], 2)
+
+    def test_a_sequence_that_has_never_run_has_no_record(self):
+        app = self.app()
+
+        self.assertIsNone(app.last_run('Blinds Down'))
+        self.assertEqual(self.seq.describe_run(None), '')
+
+    def test_a_run_of_nothing_is_not_recorded(self):
+        """It would replace a real answer with "0 steps"."""
+        app = self.app()
+        app._sequences = [self.seq.make_sequence('Empty')]
+
+        app.run_sequence_by_name('Empty', announce=False)
+
+        self.assertIsNone(app.last_run('Empty'))
+
+    def test_deleting_a_sequence_takes_its_record_with_it(self):
+        app = self.app()
+        app.save_sequence(self.blinds())
+        app.run_sequence_by_name('Blinds Down', announce=False)
+
+        app.delete_sequence(app.sequence_by_name('Blinds Down'))
+
+        self.assertIsNone(app.last_run('Blinds Down'))
+
+    def test_the_file_does_not_grow_without_bound(self):
+        app = self.app()
+
+        for number in range(app.MAX_RUNS + 10):
+            app.record_run('Run %d' % number,
+                           [{'n': 1, 'what': 'x', 'outcome': self.seq.DID,
+                             'why': ''}],
+                           now=1000.0 + number)
+
+        runs = app.runs
+        self.assertEqual(len(runs), app.MAX_RUNS)
+        # The newest kept, the oldest dropped.
+        self.assertIn('Run %d' % (app.MAX_RUNS + 9), runs)
+        self.assertNotIn('Run 0', runs)
+
+    # -- where it is read ---------------------------------------------------
+
+    def test_the_menus_list_every_step_with_what_became_of_it(self):
+        """The screen that answers "which bit did not", not just "did it"."""
+        import gui
+
+        app = self.app(fail_on={'BLIND#2'})
+        app._sequences = [self.blinds()]
+        app.run_sequence_by_name('Blinds Down', announce=False)
+        xbmcgui.reset()
+
+        gui.ControlPanel(app).show_last_run('Blinds Down')
+
+        said = xbmcgui.OK_DIALOGS[-1][1]
+        self.assertIn('1. Blind One: 0% open  --  done', said)
+        self.assertIn('2. Blind Two: 0% open  --  FAILED', said)
+        self.assertIn('unreachable', said, 'the reason was dropped')
+
+    def test_the_menus_say_so_when_it_has_never_run(self):
+        import gui
+
+        app = self.app()
+        xbmcgui.reset()
+
+        gui.ControlPanel(app).show_last_run('Blinds Down')
+
+        self.assertEqual(xbmcgui.OK_DIALOGS, [])
+        self.assertIn('has not run yet',
+                      ' '.join(str(n) for n in xbmcgui.NOTIFICATIONS))
+
+    def test_the_sequence_list_flags_a_failure_without_opening_anything(self):
+        """"Did the seven o'clock one work" should be answerable by looking."""
+        import gui
+
+        app = self.app(fail_on={'BLIND#1', 'BLIND#2'})
+        app.save_sequence(self.blinds())
+        app.run_sequence_by_name('Blinds Down', announce=False)
+        panel = gui.ControlPanel(app)
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.append(-1)     # look at the list, then back out
+
+        panel.sequence_menu()
+
+        offered = xbmcgui.SELECT_CALLS[-1][1]
+        self.assertTrue(any('[2 FAILED]' in row for row in offered),
+                        'the list said nothing: %r' % (offered,))
+
+    def test_a_clean_run_puts_no_warning_on_the_list(self):
+        import gui
+
+        app = self.app()
+        app.save_sequence(self.blinds())
+        app.run_sequence_by_name('Blinds Down', announce=False)
+        panel = gui.ControlPanel(app)
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.append(-1)
+
+        panel.sequence_menu()
+
+        offered = xbmcgui.SELECT_CALLS[-1][1]
+        self.assertFalse(any('FAILED' in row for row in offered))
+
+    # -- a long pause is one run, not three ---------------------------------
+
+    def test_a_resumed_sequence_appends_rather_than_starting_over(self):
+        """Twelve minutes in the middle does not make it two runs."""
+        app = self.app()
+        slow = self.seq.make_sequence('Blinds Down', [
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind One',
+             'action': '0', 'pause': 600},
+            {'kind': 'position', 'driver': 'switchbot', 'target': 'Blind Two',
+             'action': '0'},
+        ])
+        app._sequences = [slow]
+
+        app.run_sequence_by_name('Blinds Down', announce=False)
+        halfway = app.last_run('Blinds Down')
+        self.assertEqual(len(halfway['steps']), 1)
+        self.assertTrue(halfway['waiting'], 'the wait was not recorded')
+
+        app.run_due_resumes(now=time.time() + 601)
+
+        record = app.last_run('Blinds Down')
+        self.assertEqual([e['outcome'] for e in record['steps']],
+                         [self.seq.DID, self.seq.DID])
+        self.assertFalse(record['waiting'])
+
+    # -- how it reads -------------------------------------------------------
+
+    def test_a_run_says_its_counts_rather_than_a_verdict(self):
+        said = self.seq.describe_run(
+            {'at': 1000.0, 'steps': [1, 2, 3], 'done': 2, 'skipped': 1,
+             'failed': 0}, now=1000.0 + 3700)
+
+        self.assertEqual(said, '2 done, 1 already done  (1 hour ago)')
+
+    def test_a_failure_is_shouted_in_the_summary(self):
+        said = self.seq.describe_run(
+            {'at': 1000.0, 'steps': [1], 'done': 0, 'skipped': 0,
+             'failed': 1}, now=1000.0 + 30)
+
+        self.assertIn('1 FAILED', said)
+
+    def test_a_run_still_waiting_says_so(self):
+        said = self.seq.describe_run(
+            {'at': 1000.0, 'steps': [1], 'done': 1, 'waiting': True},
+            now=1000.0 + 30)
+
+        self.assertIn('still waiting', said)
+
+    def test_how_long_ago_is_said_the_way_a_person_would(self):
+        when = self.seq.describe_when
+        self.assertEqual(when(1000.0, now=1000.0 + 10), 'just now')
+        self.assertEqual(when(1000.0, now=1000.0 + 600), '10 min ago')
+        self.assertEqual(when(1000.0, now=1000.0 + 3700), '1 hour ago')
+        self.assertEqual(when(1000.0, now=1000.0 + 7300), '2 hours ago')
+        self.assertEqual(when(1000.0, now=1000.0 + 90000), '1 day ago')
+        self.assertEqual(when(None), 'at some point')
+
+    def test_a_clock_that_went_backwards_does_not_read_as_the_future(self):
+        """Handled by the same check that handles a run a minute old."""
+        self.assertEqual(self.seq.describe_when(2000.0, now=1000.0),
+                         'just now')
+
+
 class TestTheSpeedDial(unittest.TestCase):
     """Eight things worth one press, each of them a sequence step.
 
@@ -14796,6 +15102,43 @@ class TestWebRemote(unittest.TestCase):
         self.assertIn("if (which === 'dial' && !(state.dial || []).length)",
                       page)
         self.assertIn("if (which === 'tv' && !tvState().installed)", page)
+
+    def test_a_sequence_tile_says_what_it_did_last_time(self):
+        """A scheduled run is usually seen from the phone or from nowhere."""
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Blinds Down')]
+        self.app.record_run('Blinds Down',
+                            [{'n': 1, 'what': 'Blind One: 0% open',
+                              'outcome': 'done', 'why': ''},
+                             {'n': 2, 'what': 'Blind Two: 0% open',
+                              'outcome': 'failed', 'why': 'unreachable'}])
+        client = self.signed_in()
+
+        tile = client.state()['data']['sequences'][0]
+
+        self.assertIn('1 done', tile['last'])
+        self.assertIn('1 FAILED', tile['last'])
+        self.assertEqual(tile['failed'], 1)
+
+    def test_a_sequence_that_has_never_run_falls_back_to_its_schedule(self):
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence('Bedtime')]
+        client = self.signed_in()
+
+        tile = client.state()['data']['sequences'][0]
+
+        self.assertEqual(tile['last'], '')
+        self.assertEqual(tile['failed'], 0)
+
+    def test_the_page_prefers_what_it_did_over_what_it_will_do(self):
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        self.assertIn("(sequence.last || (sequence.steps + ' step(s) - '", page)
+        self.assertIn("if (sequence.failed) { node.classList.add('lastfailed')",
+                      page)
 
     def test_a_waiting_sequence_says_what_it_is_waiting_on(self):
         """So the phone can show a brew in progress rather than a resting tile."""
