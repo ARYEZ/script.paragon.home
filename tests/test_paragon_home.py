@@ -3859,7 +3859,7 @@ class TestWhatHappenedOnTheLastRun(unittest.TestCase):
 
 
 class TestTheSpeedDial(unittest.TestCase):
-    """Eight things worth one press, each of them a sequence step.
+    """Ten things worth one press, each of them a sequence step.
 
     The design is the reuse: a slot holds a step, so every kind a step can be
     is already a kind a slot can be, and running one goes through the sequence
@@ -3909,11 +3909,11 @@ class TestTheSpeedDial(unittest.TestCase):
 
     # -- shape -------------------------------------------------------------
 
-    def test_a_dial_always_has_eight_slots(self):
+    def test_a_dial_always_has_ten_slots(self):
         """Numbered and fixed, like the sequence steps and the Transit slots."""
         self.assertEqual(len(self.dial_lib.normalise([])),
                          self.dial_lib.SLOT_COUNT)
-        self.assertEqual(self.dial_lib.SLOT_COUNT, 8)
+        self.assertEqual(self.dial_lib.SLOT_COUNT, 10)
 
     def test_a_file_with_too_many_or_too_few_is_trimmed_and_padded(self):
         short = self.dial_lib.normalise([{'step': {'kind': 'scene',
@@ -3921,8 +3921,8 @@ class TestTheSpeedDial(unittest.TestCase):
         long = self.dial_lib.normalise([{'step': {'kind': 'scene',
                                                   'target': 'All Off'}}] * 20)
 
-        self.assertEqual(len(short), 8)
-        self.assertEqual(len(long), 8)
+        self.assertEqual(len(short), 10)
+        self.assertEqual(len(long), 10)
         self.assertTrue(self.dial_lib.is_filled(short[0]))
         self.assertFalse(self.dial_lib.is_filled(short[1]))
 
@@ -3958,7 +3958,7 @@ class TestTheSpeedDial(unittest.TestCase):
         dial = self.dial_lib.normalise(['nonsense', None, 42,
                                         {'step': {'kind': 'wibble'}}])
 
-        self.assertEqual(len(dial), 8)
+        self.assertEqual(len(dial), 10)
         self.assertEqual(self.dial_lib.filled(dial), [])
 
     # -- what a button says ------------------------------------------------
@@ -3993,7 +3993,7 @@ class TestTheSpeedDial(unittest.TestCase):
         dial = self.dial_lib.normalise([
             {'step': {'kind': 'scene', 'target': 'All Off'}}])
 
-        self.assertEqual(self.dial_lib.describe(dial), '1 of 8 set')
+        self.assertEqual(self.dial_lib.describe(dial), '1 of 10 set')
         self.assertEqual(self.dial_lib.describe(self.dial_lib.normalise([])),
                          'nothing set yet')
 
@@ -4035,11 +4035,13 @@ class TestTheSpeedDial(unittest.TestCase):
         self.assertEqual(self.names(moved)[:3], ['Two', 'Three', 'One'])
 
     def test_moving_never_changes_how_many_slots_there_are(self):
-        """Eight before and eight after, however far a slot travels."""
-        moved = self.dial_lib.move(self.three_set(), 0, 7)
+        """As many before as after, however far a slot travels."""
+        last = self.dial_lib.SLOT_COUNT - 1
+        moved = self.dial_lib.move(self.three_set(), 0, last)
 
         self.assertEqual(len(moved), self.dial_lib.SLOT_COUNT)
-        self.assertEqual(moved[7]['label'], 'One')
+        self.assertEqual(moved[last]['label'], 'One',
+                         'a slot can travel the whole length of the dial')
 
     def test_a_slot_can_be_moved_into_an_empty_position(self):
         """Which is how a dial with a gap at the top gets reordered at all."""
@@ -4171,20 +4173,26 @@ class TestTheSpeedDial(unittest.TestCase):
         self.assertEqual(xbmcgui.NOTIFICATIONS, [])
 
     def test_slot_zero_does_not_run_the_last_slot(self):
-        """Python counts from the other end; a dial does not have a slot 0."""
+        """Python counts from the other end; a dial does not have a slot 0.
+
+        The only slot filled is the last one, so dial[0 - 1] is the one thing
+        that would fire if the guard went.
+        """
         app = self.app()
         app._dial = self.dial_lib.normalise(
-            [{'step': None}] * 7
+            [{'step': None}] * (self.dial_lib.SLOT_COUNT - 1)
             + [{'step': {'kind': 'power', 'driver': 'tuya',
                          'target': 'WP9ABC#1', 'action': 'off'}}])
 
         self.assertFalse(app.run_dial_slot(0, announce=False))
-        self.assertEqual(self.recorder.calls, [], 'slot 0 reached slot 8')
+        self.assertEqual(self.recorder.calls, [],
+                         'slot 0 reached the last slot')
 
-    def test_a_slot_number_outside_the_eight_is_refused(self):
+    def test_a_slot_number_past_the_last_one_is_refused(self):
+        """One past the end included: the off-by-one is the whole risk here."""
         app = self.app()
 
-        for number in (0, -1, 9, 99):
+        for number in (0, -1, self.dial_lib.SLOT_COUNT + 1, 99):
             self.assertFalse(app.run_dial_slot(number, announce=False),
                              'slot %r ran' % number)
 
@@ -9839,13 +9847,31 @@ class TestTheTelevisionHalf(unittest.TestCase):
         """
         page = WebRemote_PAGE = self.page()
 
-        panel = page.index('#homePanel, #tvPanel {')
+        panel = page.index('#homePanel, #tvPanel, #dialPanel {')
         rule = page[panel:page.index('}', panel)]
 
         self.assertIn('flex: 1', rule)
         self.assertIn('min-height: 0', rule)
         self.assertIn('display: flex', rule)
         self.assertIn('flex-direction: column', rule)
+
+    def test_the_dial_panel_has_something_that_scrolls_inside_it(self):
+        """The same chain, and the dial is the one panel that nearly missed it.
+
+        Home and TV each hold a .deck, and the deck is what takes the rest of
+        the height. The dial holds one column of full-width keys and no deck --
+        a two-column deck would make each key a quarter of a wall panel wide --
+        so nothing between .wrap and the keys was bounded, and on a short
+        window body's `overflow: hidden` cut off whatever was past the fold
+        with no way to scroll to it. Eight rows made that rare; ten does not.
+        """
+        page = self.page()
+
+        self.assertIn('<div id="dialPanel" hidden>\n    <div class="pane">',
+                      page,
+                      'the keys need a pane to scroll inside')
+        self.assertIn('#dialPanel > .pane { flex: 1; min-height: 0; }', page,
+                      'a pane that is not bounded never scrolls')
 
     def test_hiding_a_panel_still_beats_showing_it(self):
         """The panels are display: flex, and hidden ones must stay hidden.
@@ -15051,7 +15077,7 @@ class TestWebRemote(unittest.TestCase):
         import speeddial as dial_lib
 
         self.app._dial = dial_lib.normalise(
-            [{'step': None}] * 7
+            [{'step': None}] * (dial_lib.SLOT_COUNT - 1)
             + [{'step': {'kind': 'scene', 'target': 'All Off'}}])
         client = self.serve(run_loop=False)
 
@@ -15060,7 +15086,8 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertTrue(job.wait(1.0))
         self.assertFalse(job.result['ok'])
-        self.assertEqual(self.recorder.calls, [], 'slot 0 reached slot 8')
+        self.assertEqual(self.recorder.calls, [],
+                         'slot 0 reached the last slot')
 
     def test_a_dial_key_takes_the_whole_row(self):
         """One per row at every width, so a name reads in one line.

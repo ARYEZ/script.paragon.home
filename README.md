@@ -487,12 +487,15 @@ is collected and reported together at the end.
 
 ## Speed dial
 
-Eight things worth one press from a phone. **Speed dial** on the first screen
+Ten things worth one press from a phone. **Speed dial** on the first screen
 sets them up; a **Dial** tab appears on the web remote once any of them is
 filled.
 
 The keys are **one per row, full width**, so a name reads in a single line at a
-glance — which is the whole job of a speed dial.
+glance — which is the whole job of a speed dial. Ten of those rows are taller
+than a small phone's screen, so the last one or two need a short scroll — the
+dial scrolls inside itself on a wall panel, where the page as a whole does
+not.
 
 A slot holds **one sequence step**, and that is the whole design. Everything a
 step can already be, a slot can be — a scene, a whole sequence, a plug on or
@@ -518,7 +521,7 @@ blank and the button says what the slot does (`Scene: All Off`), which means a
 slot works the moment it is filled and is worth naming only when the description
 is longer than the button.
 
-A satellite takes the master's dial along with everything else. Eight buttons
+A satellite takes the master's dial along with everything else. Ten buttons
 disagreeing with the menus above them would be worse than none.
 
 ### What a scene does to each light

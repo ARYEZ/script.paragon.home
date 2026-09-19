@@ -2095,13 +2095,20 @@ footer button { flex: 1 1 auto; }
      `display: flex` here is safe against `hidden`: the `[hidden]` rule near
      the top of this sheet is !important precisely so a display rule cannot
      un-hide something. */
-  #homePanel, #tvPanel {
+  #homePanel, #tvPanel, #dialPanel {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
   }
   .deck { flex: 1; min-height: 0; }
+  /* The dial has no deck to take the rest of the height -- one column of
+     full-width keys is the whole panel, and halving it into a two-column
+     deck would make each key a quarter of a wall panel wide. So its pane
+     takes the height directly. Without this the keys past the fold are
+     unreachable on a short window: ten rows is taller than the two before
+     it were, and body is overflow: hidden here. */
+  #dialPanel > .pane { flex: 1; min-height: 0; }
   .pane {
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -2636,16 +2643,21 @@ button.chan {
    </div>
    </div>
 
-   <!-- The television, on its own tab. Only there when Paragon TV is
-        installed on this box; a house with lights and no television never
-        sees it. -->
+   <!-- The speed dial, on its own tab. Only there once a slot is filled.
+        The .pane is not decoration: on a wall panel the page itself does not
+        scroll, so whatever holds the keys has to be the thing that does. -->
    <div id="dialPanel" hidden>
+    <div class="pane">
     <section>
       <h2 class="eyebrow">Speed dial</h2>
       <div class="dialgrid" id="dial"></div>
     </section>
+    </div>
    </div>
 
+   <!-- The television, on its own tab. Only there when Paragon TV is
+        installed on this box; a house with lights and no television never
+        sees it. -->
    <div id="tvPanel" hidden>
    <div class="deck">
     <div class="pane">

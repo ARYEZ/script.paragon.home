@@ -5,7 +5,7 @@ Creator: Aryez
 Year: 2026
 Part of: Paragon TV Project
 
-The speed dial: eight things worth one press from a phone.
+The speed dial: ten things worth one press from a phone.
 
 A slot holds a sequence step and nothing more. That is the whole design, and it
 is why this file is short: a step already knows how to be a scene, a sequence,
@@ -19,7 +19,7 @@ What a slot adds is a label. A step describes itself well enough for a menu row
 -- "Office Plug All outlets: On" -- and badly for a button on a phone, where
 there is room for "Plugs" and the point is recognising it at a glance.
 
-Eight, fixed, numbered, and empty until filled. Named after the sequence editor
+Ten, fixed, numbered, and empty until filled. Named after the sequence editor
 and the Transit slots for the same reason both of those are: slot 4 is slot 4,
 so the thing your thumb knows is in the third position stays in the third
 position when the second one is cleared.
@@ -29,9 +29,13 @@ import sequences as sequence_lib
 
 DIAL_FILE = 'speeddial.json'
 
-# Eight is what fits on a phone at a size a thumb can hit without looking, as
-# eight full-width rows, without the page scrolling.
-SLOT_COUNT = 8
+# Ten full-width rows at a size a thumb can hit without looking. Eight was
+# what a phone showed without scrolling; ten is what was asked for, and the
+# last row or two need a short scroll on a small screen. That is a fair trade
+# -- scrolling to slot 10 still beats not having a slot 10 -- but it is why
+# the number is not simply raised again: past here the dial stops being
+# something you press without looking and becomes a list you read.
+SLOT_COUNT = 10
 
 # What a label may run to. Longer than this and the button either shrinks the
 # text until it cannot be read across a room or wraps to three lines and stops
@@ -108,7 +112,7 @@ def label_for(slot, device_name=None):
 
 
 def describe(dial):
-    """One line for a menu row: how many of the eight are in use."""
+    """One line for a menu row: how many of the ten are in use."""
     count = len(filled(dial))
     if not count:
         return 'nothing set yet'

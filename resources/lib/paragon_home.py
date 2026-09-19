@@ -1000,7 +1000,7 @@ class ParagonHome(object):
 
     RUN_FILE = 'last_runs.json'
 
-    # How many names to keep. A house has a dozen sequences and eight dial
+    # How many names to keep. A house has a dozen sequences and ten dial
     # slots; the cap is there so that renaming things for a year cannot grow
     # the file without bound, not because anyone will reach it.
     MAX_RUNS = 50
@@ -1079,7 +1079,7 @@ class ParagonHome(object):
 
     @property
     def dial(self):
-        """Eight slots, whatever the file holds."""
+        """Ten slots, whatever the file holds."""
         if self._dial is None:
             self._dial = dial_lib.normalise(
                 utils.read_json(dial_lib.DIAL_FILE, default=[]))
@@ -1089,7 +1089,7 @@ class ParagonHome(object):
         if self._master_owns('scenes'):
             # The master owns what the house can be told to do, and the dial is
             # a shortcut to exactly that. A satellite holding its own would be
-            # eight buttons that disagreed with the menus above them.
+            # ten buttons that disagreed with the menus above them.
             return False
         if dial is not None:
             self._dial = dial_lib.normalise(dial)

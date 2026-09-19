@@ -1797,7 +1797,7 @@ class ControlPanel(object):
     # -- the speed dial ------------------------------------------------------
 
     def dial_menu(self):
-        """Eight slots, each one thing worth a single press from a phone."""
+        """Ten slots, each one thing worth a single press from a phone."""
         while True:
             dial = self.app.dial
             rows = [(label, number + 1) for number, label
@@ -1821,8 +1821,8 @@ class ControlPanel(object):
         """Move slots about, staying on the screen between moves.
 
         The sequence editor's reordering, on the dial. A mode of its own rather
-        than a "move up" on every slot: dragging one from eighth to first a row
-        at a time is seven trips through the menu and the seventh is where the
+        than a "move up" on every slot: dragging one from tenth to first a row
+        at a time is nine trips through the menu and the ninth is where the
         mistake gets made.
         """
         while True:
