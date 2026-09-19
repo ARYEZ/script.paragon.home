@@ -468,3 +468,162 @@ def run_kasa(app, timeout=6.0):
                      device.get('model'), device.get('relay_state')))
     utils.log('--- end Kasa diagnostics ---')
     return kasa_summary(report), report
+
+
+# ---------------------------------------------------------------------------
+# Broadlink search
+# ---------------------------------------------------------------------------
+#
+# The other diagnostics answer "is it there at all". This one mostly answers
+# "is it still where we think it is", because that is the way a blaster fails.
+# It has no state to read and nothing to report between commands, so a moved
+# address is invisible until a sequence runs at two in the morning and the
+# only trace is an authentication timeout against an address nothing holds.
+#
+# So the comparison, not just the list: what answered, against what the add-on
+# has written down.
+
+def _stored_blasters(app):
+    """The blasters in devices.json, keyed by MAC as discovery spells it."""
+    stored = {}
+    for device in (getattr(app, 'devices', None) or []):
+        if getattr(device, 'driver', '') != 'broadlink':
+            continue
+        stored[(getattr(device, 'device_id', '') or '').upper()] = device
+    return stored
+
+
+def compare_blasters(found, stored):
+    """Sort what answered into moved, unchanged, unknown and missing.
+
+    Split out from the search so it can be exercised without a network: the
+    interesting part of this diagnostic is the comparison, and a test that
+    needs a blaster on the LAN is a test that never runs.
+    """
+    moved, unchanged, unknown = [], [], []
+    answered = set()
+
+    for entry in found:
+        mac = (entry.get('mac') or '').upper()
+        answered.add(mac)
+        known = stored.get(mac)
+        here = entry.get('ip') or ''
+        if known is None:
+            unknown.append({'ip': here, 'mac': mac,
+                            'label': entry.get('label') or '?'})
+        elif (getattr(known, 'ip', '') or '') != here:
+            moved.append({'name': known.name, 'was': known.ip or '?',
+                          'now': here})
+        else:
+            unchanged.append({'name': known.name, 'ip': here})
+
+    missing = [{'name': device.name, 'was': device.ip or '?'}
+               for mac, device in sorted(stored.items())
+               if mac not in answered]
+
+    return {'moved': moved, 'unchanged': unchanged,
+            'unknown': unknown, 'missing': missing}
+
+
+def broadlink_summary(report):
+    """What answered, and whether it is where the add-on thinks it is."""
+    if report.get('error'):
+        return 'The search could not be sent.\n\n%s' % report['error']
+
+    lines = []
+
+    # First, because it is the answer when there is one. A moved address is
+    # the only finding here that is both certainly wrong and certainly
+    # fixable, and burying it under a list of everything that is fine is how
+    # it gets missed.
+    for entry in report.get('moved') or []:
+        lines.append('%s HAS MOVED: %s -> %s'
+                     % (entry['name'], entry['was'], entry['now']))
+    if report.get('moved'):
+        lines.append('')
+        lines.append('Run "Refresh devices" to take the new address. Names '
+                     'and learned codes are kept.')
+        lines.append('')
+
+    for entry in report.get('missing') or []:
+        lines.append('%s did not answer (stored as %s)'
+                     % (entry['name'], entry['was']))
+    if report.get('missing'):
+        lines.append('')
+        lines.append('A refresh will not mend this one: a blaster that does '
+                     'not answer is kept as it is, so its name and codes '
+                     'survive. It is powered off, off the WiFi, or on '
+                     'another subnet from Kodi.')
+        lines.append('')
+
+    for entry in report.get('unknown') or []:
+        lines.append('%s  %s  -- answered, not known here yet'
+                     % (entry['ip'], entry['label']))
+    if report.get('unknown'):
+        lines.append('')
+        lines.append('Run "Refresh devices" to add them.')
+        lines.append('')
+
+    for entry in report.get('unchanged') or []:
+        lines.append('%s  %s  -- where it should be'
+                     % (entry['name'], entry['ip']))
+    if report.get('unchanged'):
+        lines.append('')
+
+    if not (report.get('moved') or report.get('missing')
+            or report.get('unknown') or report.get('unchanged')):
+        lines.append('No Broadlink blaster answered, and none is known here.')
+        lines.append('')
+        lines.append('A blaster answers a broadcast on UDP %d, and a '
+                     'broadcast does not cross subnets:' % report.get('port', 0))
+        lines.append('1. The blaster is on a different network from Kodi -- '
+                     'a guest SSID or a separate VLAN. These are 2.4GHz only.')
+        lines.append('2. Inbound UDP is blocked for Kodi by the firewall.')
+        lines.append('3. It is powered off, or still in setup mode.')
+        lines.append('')
+
+    lines.append('Searched from: %s'
+                 % ', '.join(report.get('addresses') or ['?']))
+    lines.append('%d answered in %.0fs.'
+                 % (len(report.get('devices') or []), report.get('listened', 0)))
+    return '\n'.join(lines)
+
+
+def run_broadlink(app, timeout=3.0):
+    """Broadcast for blasters and compare what answers with what is stored.
+
+    Read-only: it discovers and reports, and writes nothing. Somebody running
+    a diagnostic wants to know what is true, and a diagnostic that quietly
+    repairs what it finds cannot be run to find out whether it needs running.
+    """
+    import broadlink_lan
+    from govee_lan import local_addresses
+
+    report = {'devices': [], 'error': '', 'listened': timeout,
+              'port': broadlink_lan.BROADCAST_PORT,
+              'addresses': list(local_addresses()) + ['default route'],
+              'moved': [], 'unchanged': [], 'unknown': [], 'missing': []}
+
+    utils.log('--- Paragon Home Broadlink diagnostics ---')
+    utils.log('Broadcasting UDP %d from: %s'
+              % (report['port'], ', '.join(report['addresses'])))
+    try:
+        transport = broadlink_lan.BroadlinkTransport(log_func=utils.debug)
+        report['devices'] = transport.discover(timeout=timeout)
+    except Exception as exc:
+        report['error'] = str(exc)
+        utils.log('Broadlink search failed: %s' % exc)
+
+    report.update(compare_blasters(report['devices'], _stored_blasters(app)))
+
+    for entry in report['devices']:
+        utils.log('  %s  %s  %s'
+                  % (entry.get('mac'), entry.get('ip'), entry.get('label')))
+    for entry in report['moved']:
+        utils.log('  MOVED: %s was %s, now %s'
+                  % (entry['name'], entry['was'], entry['now']))
+    for entry in report['missing']:
+        utils.log('  no answer: %s (stored as %s)'
+                  % (entry['name'], entry['was']))
+    utils.log('--- end Broadlink diagnostics ---')
+    return broadlink_summary(report), report

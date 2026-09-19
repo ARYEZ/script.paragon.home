@@ -119,7 +119,8 @@ device.
 
 A driver appears once it has found something. **Diagnose device search** stays
 at the top level on purpose: the time you need it is when a driver found
-nothing and so has no menu of its own.
+nothing and so has no menu of its own. It covers Govee, Tuya, Kasa and
+Broadlink, and each one reports the way that kind of device actually fails.
 
 Picking a driver gives you its own devices and nothing else:
 
@@ -1235,6 +1236,57 @@ python3 tools/kasa_klap_probe.py 10.0.0.195 you@example.com
 
 The password is prompted for, never printed, never written down and never
 sent anywhere but the plug on your own network.
+
+---
+
+## Infrared blasters (Broadlink)
+
+### When a blaster stops working
+
+A blaster is the one device that cannot tell you it has a problem. It has no
+state to read and reports nothing between commands, so an address it has left
+is invisible until something tries to use it — usually a sequence at seven in
+the morning, leaving `Could not authenticate with 10.0.0.233 … did not answer
+within 5s` in that sequence's **Last run**. That message is a timeout, not a
+refusal: nothing at that address answered. A blaster that answered and refused
+would give an error code and the note about being locked in the Broadlink app.
+
+**Diagnose device search → Broadlink blasters** answers the question that
+follows, which is not *is it there* but *is it still where we wrote it down*.
+It broadcasts, and compares what answers against what the add-on has stored:
+
+```
+Office Broadlink HAS MOVED: 10.0.0.233 -> 10.0.0.51
+
+Run "Refresh devices" to take the new address. Names and learned codes are
+kept.
+
+Living Room  10.0.0.90  -- where it should be
+```
+
+A move is said first, before the list of what is fine, because buried under
+reassurance is how a finding gets missed. The search **writes nothing** — a
+diagnostic that quietly repairs what it finds cannot be run to ask whether
+repair is needed.
+
+Three findings, needing three different responses:
+
+| It says | What it means |
+|---|---|
+| **HAS MOVED** | The address changed. `Refresh devices` takes the new one. |
+| **did not answer** | A refresh will *not* mend it. A device that misses a search is kept as it was, on purpose, so its name and learned codes survive a sleeping radio. It is powered off, off the WiFi, or on another subnet. |
+| **answered, not known here yet** | A blaster nobody has added. `Refresh devices` adds it. |
+
+### A DHCP reservation does not move a device
+
+Reserving an address in the router only decides what it hands out **the next
+time the device asks**. A blaster holding a lease keeps that address until the
+lease expires — a day or a week on most routers. Power-cycle it to make it ask
+again, then run a search.
+
+Paragon Home stores **what discovery found**, never what the router intends.
+So a refresh that finds a blaster still on its old address correctly writes
+down the old address. Nothing is stuck; it is recording what is true.
 
 ---
 

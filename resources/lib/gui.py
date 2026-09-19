@@ -146,8 +146,28 @@ class ControlPanel(object):
             if self._first_run():
                 return
         while True:
+            # Another interpreter may have rewritten any of the shared files
+            # since the last pass. The web remote and the schedule run in the
+            # service, the menus are their own script, and a satellite syncs
+            # on a timer -- so a search started from a phone moves a blaster's
+            # address in devices.json and these menus never hear about it.
+            # Four stat calls a pass, against a blaster being dialled at an
+            # address it left until Kodi is restarted.
+            self.app.reload_changed()
             if self.main_menu() == BACK:
                 return
+
+    def _current(self, device):
+        """The device as devices.json has it now, not as this screen opened it.
+
+        What matters to a command is the address it will actually be sent to,
+        and that is a fact about the file rather than about the menu, so it is
+        looked up again each time round rather than remembered. Falls back to
+        the device it was handed, which is what a forgotten device or a
+        satellite mid-sync leaves behind.
+        """
+        self.app.reload_changed()
+        return self.app.device_by_id(device.device_id) or device
 
     def _first_run(self):
         """Offer a discovery pass when the cache is empty. True = give up."""
@@ -334,7 +354,8 @@ class ControlPanel(object):
         """Which search to look into. Each driver fails its own way."""
         rows = [('Govee lights', self.diagnose),
                 ('Tuya plugs', self.diagnose_tuya),
-                ('Kasa plugs', self.diagnose_kasa)]
+                ('Kasa plugs', self.diagnose_kasa),
+                ('Broadlink blasters', self.diagnose_broadlink)]
         choice = _select('Diagnose device search',
                          [label for label, _handler in rows])
         if choice == BACK:
@@ -347,6 +368,19 @@ class ControlPanel(object):
 
         self._diagnose('Kasa', 'Searching for Kasa devices...',
                        lambda: diagnostics.run_kasa(self.app))
+
+    def diagnose_broadlink(self):
+        """Broadcast for blasters and say whether they have moved.
+
+        The others ask whether a device is there. This one mostly asks whether
+        it is still at the address written down for it, because that is how a
+        blaster fails: it reports nothing between commands, so an address it
+        left is invisible until something tries to use it.
+        """
+        import diagnostics
+
+        self._diagnose('Broadlink', 'Searching for Broadlink blasters...',
+                       lambda: diagnostics.run_broadlink(self.app))
 
     def _diagnose(self, label, busy, run):
         progress = xbmcgui.DialogProgressBG()
@@ -1479,6 +1513,7 @@ class ControlPanel(object):
         """Rename, enable, identify and forget. Scoped to one kind of device
         when it is reached from that kind's menu."""
         while True:
+            self.app.reload_changed()
             devices = self.app.devices
             if driver_id is not None:
                 devices = self._devices_for(driver_id, devices)
@@ -1620,6 +1655,7 @@ class ControlPanel(object):
         """
         from devices import CAP_COMMANDS, CAP_POWER
 
+        device = self._current(device)
         capabilities = self.app.controller.capabilities(device)
         driver = self.app.controller.driver_for(device)
         emitter = CAP_COMMANDS in capabilities
@@ -3053,6 +3089,7 @@ class ControlPanel(object):
     def command_menu(self, device):
         """The codes a blaster knows: fire one, learn another, delete one."""
         while True:
+            device = self._current(device)
             names = self.app.controller.commands(device)
             rows = list(names)
             # A satellite copies the codes down from the master along with

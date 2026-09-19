@@ -9232,6 +9232,366 @@ class TestKasaDiagnostics(unittest.TestCase):
         self.assertIn('no interfaces', text)
 
 
+class TestBroadlinkDiagnostics(unittest.TestCase):
+    """Mostly one question: is the blaster still where we wrote it down?
+
+    The other searches ask whether a device is there at all. A blaster reports
+    nothing between commands and has no state to read, so an address it has
+    left is invisible until a sequence tries to use it at two in the morning
+    and leaves an authentication timeout against an address nobody holds.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        for name in ('addon_utils', 'diagnostics', 'broadlink_lan'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def compare(self, found, stored):
+        import diagnostics
+
+        return diagnostics.compare_blasters(
+            found, dict((d.device_id.upper(), d) for d in stored))
+
+    def summary(self, report):
+        import diagnostics
+
+        return diagnostics.broadlink_summary(report)
+
+    def answered(self, mac, ip, label='RM4 Pro'):
+        return {'mac': mac, 'ip': ip, 'label': label}
+
+    def blaster(self, mac, ip, name='Office Broadlink'):
+        return Device(mac, name=name, driver='broadlink', ip=ip, lan=True)
+
+    # -- the comparison ----------------------------------------------------
+
+    def test_a_blaster_at_a_new_address_is_reported_as_moved(self):
+        """The finding the whole diagnostic exists for."""
+        report = self.compare([self.answered('AA:BB:CC', '10.0.0.51')],
+                              [self.blaster('AA:BB:CC', '10.0.0.233')])
+
+        self.assertEqual(report['moved'],
+                         [{'name': 'Office Broadlink', 'was': '10.0.0.233',
+                           'now': '10.0.0.51'}])
+        self.assertEqual(report['missing'], [])
+        self.assertEqual(report['unchanged'], [])
+
+    def test_a_blaster_where_it_should_be_is_not_reported_as_moved(self):
+        """Or every search would read as a fault."""
+        report = self.compare([self.answered('AA:BB:CC', '10.0.0.233')],
+                              [self.blaster('AA:BB:CC', '10.0.0.233')])
+
+        self.assertEqual(report['moved'], [])
+        self.assertEqual(report['unchanged'],
+                         [{'name': 'Office Broadlink', 'ip': '10.0.0.233'}])
+
+    def test_a_blaster_that_did_not_answer_is_not_confused_with_a_moved_one(self):
+        """They need opposite responses, so they must not read alike.
+
+        A moved blaster is mended by a refresh. One that did not answer is
+        not: a device that misses a search is kept as it was, on purpose, so
+        its name and its learned codes survive a sleeping WiFi radio.
+        """
+        report = self.compare([], [self.blaster('AA:BB:CC', '10.0.0.233')])
+
+        self.assertEqual(report['missing'],
+                         [{'name': 'Office Broadlink', 'was': '10.0.0.233'}])
+        self.assertEqual(report['moved'], [])
+
+    def test_a_blaster_nobody_has_added_yet_is_its_own_finding(self):
+        report = self.compare([self.answered('DD:EE:FF', '10.0.0.77')], [])
+
+        self.assertEqual(len(report['unknown']), 1)
+        self.assertEqual(report['unknown'][0]['ip'], '10.0.0.77')
+        self.assertEqual(report['missing'], [])
+
+    def test_the_mac_is_matched_whatever_case_it_arrives_in(self):
+        """Discovery spells it upper, a file read back need not."""
+        report = self.compare([self.answered('aa:bb:cc', '10.0.0.51')],
+                              [self.blaster('AA:BB:CC', '10.0.0.233')])
+
+        self.assertEqual(len(report['moved']), 1,
+                         'the same blaster was taken for two')
+        self.assertEqual(report['unknown'], [])
+
+    def test_two_blasters_are_judged_apart(self):
+        """One moving must not implicate the other."""
+        report = self.compare(
+            [self.answered('AA:BB:CC', '10.0.0.51'),
+             self.answered('DD:EE:FF', '10.0.0.90')],
+            [self.blaster('AA:BB:CC', '10.0.0.233', 'Office'),
+             self.blaster('DD:EE:FF', '10.0.0.90', 'Living Room')])
+
+        self.assertEqual([e['name'] for e in report['moved']], ['Office'])
+        self.assertEqual([e['name'] for e in report['unchanged']],
+                         ['Living Room'])
+
+    # -- what it says ------------------------------------------------------
+
+    def test_a_move_is_said_first_and_says_what_to_do(self):
+        """Buried under a list of what is fine is how a finding gets missed."""
+        text = self.summary({
+            'moved': [{'name': 'Office Broadlink', 'was': '10.0.0.233',
+                       'now': '10.0.0.51'}],
+            'unchanged': [{'name': 'Living Room', 'ip': '10.0.0.90'}],
+            'devices': [1, 2], 'addresses': ['10.0.0.5'], 'listened': 3})
+
+        self.assertIn('HAS MOVED', text)
+        self.assertIn('10.0.0.233', text)
+        self.assertIn('10.0.0.51', text)
+        self.assertIn('Refresh devices', text)
+        self.assertLess(text.index('HAS MOVED'), text.index('Living Room'),
+                        'the finding must come before the reassurance')
+
+    def test_silence_from_one_blaster_says_a_refresh_will_not_mend_it(self):
+        """Because the next thing anyone does is run one and believe it."""
+        text = self.summary({
+            'missing': [{'name': 'Office Broadlink', 'was': '10.0.0.233'}],
+            'devices': [], 'addresses': ['10.0.0.5'], 'listened': 3})
+
+        self.assertIn('did not answer', text)
+        self.assertIn('will not mend', text)
+
+    def test_silence_from_everything_names_the_causes(self):
+        text = self.summary({'devices': [], 'addresses': ['10.0.0.5'],
+                             'listened': 3, 'port': 80})
+
+        self.assertIn('different network', text)
+        self.assertIn('firewall', text)
+        self.assertIn('UDP 80', text)
+        self.assertIn('10.0.0.5', text)
+
+    def test_a_send_failure_is_reported_rather_than_read_as_silence(self):
+        text = self.summary({'devices': [], 'error': 'no interfaces'})
+
+        self.assertIn('could not be sent', text)
+        self.assertIn('no interfaces', text)
+        self.assertNotIn('different network', text,
+                         'a search that never ran is not evidence')
+
+    def test_the_search_writes_nothing_down(self):
+        """A diagnostic that repairs what it finds cannot be used to ask
+        whether repair is needed."""
+        import diagnostics
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        app._devices = [self.blaster('AA:BB:CC', '10.0.0.233')]
+        app.save_devices()
+        import addon_utils as utils
+
+        before = utils.read_json('devices.json', default=None)
+        self.assertTrue(before, 'nothing was written to compare against')
+
+        class Moved(object):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def discover(self, timeout=3.0):
+                return [{'mac': 'AA:BB:CC', 'ip': '10.0.0.51',
+                         'label': 'RM4 Pro'}]
+
+        import broadlink_lan
+        original = broadlink_lan.BroadlinkTransport
+        broadlink_lan.BroadlinkTransport = Moved
+        try:
+            text, report = diagnostics.run_broadlink(app)
+        finally:
+            broadlink_lan.BroadlinkTransport = original
+
+        self.assertIn('HAS MOVED', text)
+        self.assertEqual(len(report['moved']), 1)
+        self.assertEqual(app.devices[0].ip, '10.0.0.233',
+                         'the diagnostic changed what it was reporting on')
+        # The list in memory is only half of it: what must not move is the
+        # file, because that is what every other process reads.
+        self.assertEqual(utils.read_json('devices.json', default=None), before,
+                         'the diagnostic wrote to devices.json')
+
+
+class TestTheMenusNoticeAnotherProcess(unittest.TestCase):
+    """The menus are their own interpreter, and were the only one not looking.
+
+    Kodi gives a script its own process, so the service -- which runs the
+    schedule and serves the web remote -- and the menus each hold their own
+    copy of devices.json. The service re-reads whatever moved on every pass.
+    The menus did not, so a device search started from the phone moved a
+    blaster's address in the file while an open menu went on dialling the one
+    it read at startup.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def app_holding(self, ip):
+        """An app that has read a blaster at `ip` and stamped the file."""
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        app._devices = [Device('AA:BB:CC', name='Office Broadlink',
+                               driver='broadlink', ip=ip, lan=True)]
+        app.save_devices()
+        app._devices = None
+        self.assertEqual(app.devices[0].ip, ip)
+        # The first look never counts as a change, which is what the first
+        # pass round the menu loop is for. Without it nothing below moves.
+        app.reload_changed()
+        return app
+
+    def other_process_finds_it_at(self, ip):
+        """Another interpreter runs a search and writes down a new address.
+
+        The two addresses are deliberately different lengths: a file is judged
+        moved on its modification time and its size, and a test that rewrote
+        it within the same clock tick at the same length would be leaning on
+        the timestamp alone.
+        """
+        from paragon_home import ParagonHome
+
+        other = ParagonHome()
+        other._devices = [Device('AA:BB:CC', name='Office Broadlink',
+                                 driver='broadlink', ip=ip, lan=True)]
+        other.save_devices()
+
+    def panel(self, app):
+        import gui
+
+        return gui.ControlPanel(app)
+
+    def test_a_device_is_looked_up_again_rather_than_remembered(self):
+        app = self.app_holding('10.0.0.233')
+        opened_with = app.devices[0]
+
+        self.other_process_finds_it_at('10.0.0.51')
+
+        self.assertEqual(self.panel(app)._current(opened_with).ip,
+                         '10.0.0.51')
+        self.assertEqual(opened_with.ip, '10.0.0.233',
+                         'the object the screen opened with is untouched')
+
+    def test_a_device_that_has_since_been_forgotten_falls_back(self):
+        """Rather than raising in a menu that is already open."""
+        from paragon_home import ParagonHome
+
+        app = self.app_holding('10.0.0.233')
+        opened_with = app.devices[0]
+
+        other = ParagonHome()
+        other._devices = []
+        other.save_devices()
+
+        self.assertIs(self.panel(app)._current(opened_with), opened_with)
+
+    def test_every_pass_round_the_main_menu_checks_the_files(self):
+        """Backing out to the top is where a stale list gets dropped."""
+        app = self.app_holding('10.0.0.233')
+        panel = self.panel(app)
+
+        looks = []
+        real = app.reload_changed
+        app.reload_changed = lambda: (looks.append(1), real())[1]
+        passes = [0]
+
+        import gui
+
+        def main_menu():
+            passes[0] += 1
+            return gui.BACK if passes[0] >= 3 else None
+
+        panel.main_menu = main_menu
+        panel.run()
+
+        self.assertEqual(len(looks), 3, 'the files were not checked each pass')
+
+    def test_the_device_list_shows_the_address_another_process_found(self):
+        app = self.app_holding('10.0.0.233')
+        panel = self.panel(app)
+
+        self.other_process_finds_it_at('10.0.0.51')
+
+        xbmcgui.SELECT_QUEUE.append(-1)
+        panel.manage_devices()
+
+        self.assertEqual(app.devices[0].ip, '10.0.0.51')
+
+    def test_test_connection_reaches_the_address_the_blaster_is_on_now(self):
+        """The whole point of the two above, at the one screen that matters.
+
+        Test connection is the row somebody presses to find out whether a
+        blaster answers. Dialling the address it has left and reporting a
+        timeout is worse than not offering the row: it is evidence, and it is
+        wrong.
+        """
+        app = self.app_holding('10.0.0.233')
+        app.controller = RecordingController()
+        app.controller.commands = lambda device: []
+        tried = []
+        app.test_device = lambda device: (tried.append(device.ip), (True, 'ok'))[1]
+        panel = self.panel(app)
+        device = app.devices[0]
+
+        self.other_process_finds_it_at('10.0.0.51')
+
+        row, _labels = menu_row(lambda: panel.command_menu(device),
+                                'Test connection')
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.extend([row, -1])
+        panel.command_menu(device)
+
+        self.assertEqual(tried, ['10.0.0.51'])
+
+    def test_one_device_s_own_menu_is_built_from_the_file_not_the_list(self):
+        """It is reached from a list, and the list may be a moment old.
+
+        This is the screen with Test connection on it for everything that is
+        not a blaster, and with Switch on and off for a plug -- all of which
+        go to an address. Rebuilding it from the file costs four stat calls.
+        """
+        from paragon_home import ParagonHome
+
+        app = self.app_holding('10.0.0.233')
+        app.controller = RecordingController()
+        app.controller.capabilities = lambda device: set()
+        app.controller.driver_for = lambda device: None
+        panel = self.panel(app)
+        opened_with = app.devices[0]
+
+        other = ParagonHome()
+        other._devices = [Device('AA:BB:CC', name='Hall Blaster',
+                                 driver='broadlink', ip='10.0.0.51',
+                                 lan=True)]
+        other.save_devices()
+
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.append(-1)
+        panel._edit_device(opened_with)
+
+        self.assertEqual(xbmcgui.SELECT_CALLS[-1][0], 'Hall Blaster',
+                         'the screen was built from the list, not the file')
+
+    def test_the_diagnose_menu_offers_the_blasters(self):
+        """The one search that could not be looked into from here."""
+        app = self.app_holding('10.0.0.233')
+        panel = self.panel(app)
+
+        row, labels = menu_row(panel.diagnose_menu, 'Broadlink')
+
+        self.assertIn('Broadlink blasters', labels[row])
+
+
 class TestKasaDriver(unittest.TestCase):
     """Switching a Kasa plug, against a device speaking the real protocol."""
 
