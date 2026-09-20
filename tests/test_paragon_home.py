@@ -4524,6 +4524,124 @@ class TestLongPauses(unittest.TestCase):
         self.assertEqual(self.recorder.calls, [])
         self.assertFalse(app.cancel_pending('Coffee'), 'stopped twice')
 
+    # -- pressed from the speed dial ---------------------------------------
+    #
+    # A slot holding a sequence used to run it wrapped in a one-step sequence
+    # named after the button -- "Sequence: Coffee". The name is the key a long
+    # pause is written down under, and the key the resume looks up, so the
+    # tail was owed to a name that is not a sequence and was dropped fifteen
+    # minutes later. The first half ran, the second half never did, and the
+    # only trace was two lines in the log.
+
+    def dial_holding(self, app, target):
+        """A dial whose first slot runs the sequence called `target`."""
+        import speeddial as dial_lib
+
+        app._dial = dial_lib.normalise(
+            [{'step': {'kind': 'sequence', 'target': target}}])
+        return app
+
+    def test_a_dial_press_that_waits_finishes_when_the_wait_is_over(self):
+        """The whole bug, in one test: press, wait, and the tail must run."""
+        app = self.dial_holding(self.app(), 'Coffee')
+        app._sequences = [self.coffee()]
+
+        self.assertTrue(app.run_dial_slot(1, announce=False))
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', True)], 'the brew did not start')
+        self.recorder.calls[:] = []
+
+        ran = app.run_due_resumes(now=time.time() + 721)
+
+        self.assertEqual(ran, ['Coffee'])
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)],
+                         'the coffee maker was left on')
+
+    def test_a_dial_press_waits_under_the_sequence_s_own_name(self):
+        """Which is what the countdown, a press to stop, and the resume use.
+
+        Asserted apart from the tail running, because a name that is merely
+        consistent with itself would pass that one: it is findable by the name
+        the rest of the add-on knows that matters.
+        """
+        app = self.dial_holding(self.app(), 'Coffee')
+        app._sequences = [self.coffee()]
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertIsNotNone(app.pending_for('Coffee'),
+                             'the wait was invisible to everything that asks')
+        self.assertEqual([e['name'] for e in app.pending_sequences], ['Coffee'])
+
+    def test_what_a_dial_press_did_is_recorded_against_the_sequence(self):
+        """Last run is looked up by sequence name, so it has to be that."""
+        app = self.dial_holding(self.app(), 'Coffee')
+        app._sequences = [self.coffee()]
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertIsNotNone(app.last_run('Coffee'))
+        self.assertEqual([r for r in app.runs if r != 'Coffee'], [])
+
+    def test_a_slot_naming_a_sequence_that_is_gone_still_says_so(self):
+        """The wrapper is kept for that case, so the step reports it.
+
+        Unwrapping a slot whose sequence cannot be found would leave nothing
+        to run and nothing to explain why, which is the one thing worse than
+        the failure itself.
+        """
+        app = self.dial_holding(self.app(), 'Coffee')
+        app._sequences = []
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertEqual(self.recorder.calls, [])
+        record = app.last_run('Sequence: Coffee')
+        self.assertIsNotNone(record, 'the failure was not written down')
+        self.assertEqual(record['failed'], 1)
+        self.assertIn('Coffee', record['steps'][0]['why'])
+
+    def test_a_slot_that_is_not_a_sequence_is_unaffected(self):
+        """Only a slot holding a sequence is unwrapped; the rest are as they were."""
+        import speeddial as dial_lib
+
+        app = self.app()
+        app._sequences = []
+        app._dial = dial_lib.normalise([{'step': {
+            'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+            'action': 'on'}}])
+
+        self.assertTrue(app.run_dial_slot(1, announce=False))
+
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#2', True)])
+
+    def test_a_device_slot_is_not_answered_by_a_sequence_of_the_same_name(self):
+        """What the kind check is for, and it is not hypothetical.
+
+        A step's target is a device name, a scene name or a sequence name
+        depending on its kind, and nothing stops the same word being two of
+        those -- a "Lamp" sequence beside a lamp. Looking the target up as a
+        sequence without first asking what kind of step it is would switch on
+        whatever that sequence switches on, from a button that says Lamp.
+        """
+        import speeddial as dial_lib
+
+        app = self.app()
+        app._sequences = [self.sequences.make_sequence('Lamp', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'on'}])]
+        app._dial = dial_lib.normalise([{'step': {
+            'kind': 'power', 'driver': 'tuya', 'target': 'Lamp',
+            'action': 'on'}}])
+
+        app.run_dial_slot(1, announce=False)
+
+        self.assertEqual([call[:3] for call in self.recorder.calls],
+                         [('turn', 'WP9ABC#2', True)],
+                         'the sequence called Lamp answered for the lamp')
+
     def test_a_tail_owed_to_a_deleted_sequence_is_dropped_quietly(self):
         app = self.app()
         app._sequences = []

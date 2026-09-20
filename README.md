@@ -506,6 +506,13 @@ one of those already has a picker in the menus, and pressing a slot runs it
 nested sequence being spliced in, a long pause being handed back and the way a
 failure is reported are all the ones you already know.
 
+**A slot holding a sequence runs that sequence, under its own name.** It is
+the same press either way, but the name is not decoration: it is the key a
+long pause is written down under, and the key the resume, the countdown on the
+phone, a press to stop it and the **Last run** record all look up. So pressing
+a slot that runs *Coffee* waits as `Coffee` and is found by everything that
+asks about `Coffee`.
+
 **Reorder the dial...** moves slots about, the way the sequence editor moves
 steps: pick one, say where it goes, and the rest slide along. It stays on the
 screen between moves, because reordering is rarely one move. Empty slots are

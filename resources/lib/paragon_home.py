@@ -1104,6 +1104,23 @@ class ParagonHome(object):
         so that a dial press and the same step inside a sequence go through the
         same code: the unlock gate, a nested sequence being spliced in, a long
         pause being handed back, the way a failure is reported.
+
+        A slot holding a sequence is the exception: it runs that sequence
+        itself, under the sequence's own name, rather than wrapped in a
+        one-step sequence named after the button.
+
+        The wrapper was named after the button -- "Sequence: hardboiled" --
+        and a name is not decoration here. It is the key a long pause is
+        written down under, and the key the resume, the countdown on the
+        phone, a press to cancel and the last-run record all look up. None of
+        them could find a name that is a button label rather than a sequence,
+        so pressing a slot holding a sequence with a long pause in it ran the
+        first half, waited, and silently dropped the rest.
+
+        Nothing is lost by unwrapping: a slot cannot carry a pause of its own,
+        so the wrapper added a name and no behaviour. A slot naming a sequence
+        that is no longer there keeps the wrapper, so that missing sequence is
+        reported by the step that runs it, in the one place that says it.
         """
         index = int(number) - 1
         if index < 0 or index >= len(self.dial):
@@ -1111,10 +1128,17 @@ class ParagonHome(object):
         slot = self.dial[index]
         if not dial_lib.is_filled(slot):
             return False
+
+        step = slot.get('step') or {}
+        sequence = None
+        if step.get('kind') == sequence_lib.KIND_SEQUENCE:
+            sequence = self.sequence_by_name(step.get('target') or '')
+        if sequence is None:
+            sequence = dial_lib.as_sequence(slot, self.dial_label(slot))
+
         return self.run_sequence(
-            dial_lib.as_sequence(slot, self.dial_label(slot)),
-            announce=announce, sleep_func=sleep_func, on_step=on_step,
-            defer=True)
+            sequence, announce=announce, sleep_func=sleep_func,
+            on_step=on_step, defer=True)
 
     def dial_label(self, slot):
         """What to call a slot, with a device's friendly name where it has one."""
