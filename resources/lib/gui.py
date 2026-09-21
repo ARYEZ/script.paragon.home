@@ -25,6 +25,7 @@ import reracks as rerack_lib
 import sequences as sequence_lib
 import scenes as scene_lib
 import speeddial as dial_lib
+import voice as voice_lib
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
                      CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
                      CAP_STATE, CAP_UNLOCK,
@@ -212,6 +213,8 @@ class ControlPanel(object):
             ('Sequences...', self.sequence_menu),
             ('Speed dial: %s' % dial_lib.describe(self.app.dial),
              self.dial_menu),
+            ('Phrases: %s' % voice_lib.describe(self.app.phrases),
+             self.phrase_menu),
         ])
         # A satellite has no reracks of its own: the master keeps the day's
         # shape for the whole house, and a satellite following its own copy
@@ -1971,6 +1974,236 @@ class ControlPanel(object):
         self.app.save_dial(dial)
         utils.notify('Speed dial %d cleared' % number)
         return False
+
+    # -- the phrase book -----------------------------------------------------
+
+    def phrase_menu(self):
+        """What the house has been taught to hear.
+
+        Nothing here listens. A microphone is another machine's job and what
+        reaches this is text, so the same screens build the book, try it and
+        turn a miss into another way of asking -- all of which work today,
+        with a keyboard, before anything has a microphone at all.
+        """
+        while True:
+            book = self.app.phrases
+            rows = [(voice_lib.describe_entry(
+                entry, self.app.phrase_target(entry)),
+                lambda e=entry: self.edit_phrase(e)) for entry in book]
+
+            if self.app.owns_data:
+                rows.append(('Teach it something...', self.new_phrase))
+            # Only when there is one. An empty row saying nothing was missed
+            # is a row that has to be pressed to find that out.
+            misses = self.app.unheard
+            if misses and self.app.owns_data:
+                rows.append(('Heard but not known (%d)...' % len(misses),
+                             self.unheard_menu))
+            rows.append(('Try saying something...', self.try_phrase))
+
+            choice = _select('Phrases', [label for label, _h in rows])
+            if choice == BACK:
+                return
+            rows[choice][1]()
+
+    def try_phrase(self):
+        """Type what you would say, and watch what the house does about it.
+
+        The whole point of the phrase book being text: it can be exercised
+        from here, with the real matcher and the real actions, months before
+        anything in the house has ears.
+        """
+        said = _dialog().input('Say something')
+        if not said or not said.strip():
+            return
+        ran, message = self.app.run_phrase(said, announce=False)
+        _dialog().ok('%s - %s' % (utils.ADDON_NAME,
+                                  'did it' if ran else 'did nothing'),
+                     message)
+
+    def new_phrase(self):
+        """A phrase and what it does, in that order.
+
+        The phrase first because it is the part being invented. What it does
+        is picked from what already exists, and asking for that first means
+        backing out of a keyboard loses the choice.
+        """
+        said = _dialog().input('What will you say')
+        if not said or not said.strip():
+            return
+        phrase = voice_lib.normalise(said)
+        if not phrase:
+            utils.force_notify('That is not something to say')
+            return
+        _index, existing = voice_lib.find_phrase(self.app.phrases, phrase)
+        if existing is not None:
+            _dialog().ok(utils.ADDON_NAME,
+                         '"%s" already does this:\n\n%s'
+                         % (phrase, sequence_lib.describe_step(
+                             existing['step'],
+                             self.app.phrase_target(existing))))
+            return
+
+        step = self._pick_phrase_step('"%s" does what' % phrase)
+        if step is None:
+            return
+        book = self.app.phrases
+        book.append({'phrases': [phrase], 'step': step})
+        self.app.save_phrases(book)
+        self.app.forget_unheard(phrase)
+        utils.notify('"%s" is set' % phrase)
+
+    def _pick_phrase_step(self, heading):
+        """What a phrase does, from everything a step can be bar one.
+
+        Unlocking is not offered. A phrase is not a PIN -- anyone within
+        earshot is authenticated, including through an open window -- and the
+        door is the one device where that matters enough to take the choice
+        away rather than leave it to be got right.
+        """
+        kinds = [('Scene', self._step_scene)]
+        if self.app.sequences:
+            kinds.append(('Sequence', lambda: self._step_sequence(None)))
+        for driver_id in self._driver_ids(self.app.enabled_devices):
+            kinds.append((self._driver_label(driver_id),
+                          lambda d=driver_id: self._step_device(d)))
+
+        choice = _select(heading, [label for label, _h in kinds])
+        if choice == BACK:
+            return None
+        step = kinds[choice][1]()
+        if step is None:
+            return None
+        if (step or {}).get('kind') == sequence_lib.KIND_UNLOCK:
+            _dialog().ok(utils.ADDON_NAME,
+                         'A phrase cannot unlock a door.\n\n'
+                         'Anyone who can be heard from the room can say it, '
+                         'and that includes through an open window. Locking '
+                         'is offered; unlocking is not.')
+            return None
+        return step
+
+    def edit_phrase(self, entry):
+        """One action, the ways of asking for it, and the way to be rid of it."""
+        while True:
+            index, current = voice_lib.find_phrase(self.app.phrases,
+                                                   entry['phrases'][0])
+            if current is None:
+                return
+            rows = [('Does: %s' % sequence_lib.describe_step(
+                current['step'], self.app.phrase_target(current)), None)]
+            for phrase in current['phrases']:
+                rows.append(('"%s"' % phrase, phrase))
+
+            labels = [label for label, _p in rows]
+            extras = ['Another way of saying it...', 'Try it now',
+                      'Forget this phrase']
+            choice = _select('Phrase', labels + extras)
+            if choice == BACK:
+                return
+            if choice < len(rows):
+                if rows[choice][1] is None:
+                    continue
+                self._drop_phrase(index, rows[choice][1])
+                continue
+            extra = extras[choice - len(rows)]
+            if extra.startswith('Another'):
+                self._add_phrase(index)
+            elif extra.startswith('Try'):
+                ran, message = self.app.run_phrase(current['phrases'][0],
+                                                   announce=False)
+                _dialog().ok('%s - %s' % (utils.ADDON_NAME,
+                                          'did it' if ran else 'did nothing'),
+                             message)
+            else:
+                if _dialog().yesno(utils.ADDON_NAME,
+                                   'Forget every way of asking for this?'):
+                    book = self.app.phrases
+                    del book[index]
+                    self.app.save_phrases(book)
+                    return
+
+    def _add_phrase(self, index, said=None):
+        """Another way of asking for what entry `index` already does."""
+        if said is None:
+            said = _dialog().input('Another way of saying it')
+        if not said or not said.strip():
+            return
+        phrase = voice_lib.normalise(said)
+        if not phrase:
+            return
+        book = self.app.phrases
+        where, existing = voice_lib.find_phrase(book, phrase)
+        if existing is not None:
+            if where != index:
+                utils.force_notify('"%s" already does something else' % phrase)
+            return
+        book[index]['phrases'].append(phrase)
+        self.app.save_phrases(book)
+        self.app.forget_unheard(phrase)
+        utils.notify('"%s" added' % phrase)
+
+    def _drop_phrase(self, index, phrase):
+        """Forget one way of asking, keeping the rest and what they do."""
+        book = self.app.phrases
+        if len(book[index]['phrases']) == 1:
+            utils.force_notify('That is the only way to ask for this. '
+                               'Forget the phrase instead.')
+            return
+        if not _dialog().yesno(utils.ADDON_NAME,
+                               'Stop answering to "%s"?' % phrase):
+            return
+        book[index]['phrases'] = [p for p in book[index]['phrases']
+                                  if p != phrase]
+        self.app.save_phrases(book)
+
+    def unheard_menu(self):
+        """What was said that meant nothing, and what to do about it.
+
+        This is the screen that makes the book converge. Speech recognition
+        will hear "make me a coffee" as "make me coffee", and the fix is
+        another way of asking rather than a cleverer matcher -- so a miss is
+        one press from becoming one.
+        """
+        while True:
+            misses = self.app.unheard
+            if not misses:
+                return
+            rows = [(voice_lib.describe_miss(entry), entry)
+                    for entry in misses]
+            choice = _select('Heard but not known',
+                             [label for label, _e in rows])
+            if choice == BACK:
+                return
+            self._use_miss(rows[choice][1]['text'])
+
+    def _use_miss(self, said):
+        """Turn one miss into a phrase, or be rid of it."""
+        book = self.app.phrases
+        rows = [('Make it a new phrase', None)]
+        for index, entry in enumerate(book):
+            rows.append(('Another way to say: %s'
+                         % sequence_lib.describe_step(
+                             entry['step'], self.app.phrase_target(entry)),
+                         index))
+        rows.append(('Forget it was ever said', -1))
+
+        choice = _select('"%s"' % said, [label for label, _i in rows])
+        if choice == BACK:
+            return
+        where = rows[choice][1]
+        if where is None:
+            step = self._pick_phrase_step('"%s" does what' % said)
+            if step is None:
+                return
+            book.append({'phrases': [said], 'step': step})
+            self.app.save_phrases(book)
+            self.app.forget_unheard(said)
+            utils.notify('"%s" is set' % said)
+        elif where == -1:
+            self.app.forget_unheard(said)
+        else:
+            self._add_phrase(where, said)
 
     # -- sequences -----------------------------------------------------------
 

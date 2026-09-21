@@ -22,6 +22,7 @@ import reracks as rerack_lib
 import satellite as satellite_lib
 import sequences as sequence_lib
 import speeddial as dial_lib
+import voice as voice_lib
 import scenes as scene_lib
 from devices import (CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
                      TRANSPORT_CLOUD, TRANSPORT_LAN, build_hub)
@@ -63,6 +64,8 @@ class ParagonHome(object):
         self._scenes = None
         self._sequences = None
         self._dial = None
+        self._phrases = None
+        self._unheard = None
         # What each shared file looked like when this session last read it.
         # See reload_changed.
         self._stamps = {}
@@ -1129,16 +1132,40 @@ class ParagonHome(object):
         if not dial_lib.is_filled(slot):
             return False
 
-        step = slot.get('step') or {}
-        sequence = None
-        if step.get('kind') == sequence_lib.KIND_SEQUENCE:
-            sequence = self.sequence_by_name(step.get('target') or '')
-        if sequence is None:
-            sequence = dial_lib.as_sequence(slot, self.dial_label(slot))
-
         return self.run_sequence(
-            sequence, announce=announce, sleep_func=sleep_func,
-            on_step=on_step, defer=True)
+            self.sequence_for_step(slot.get('step'), self.dial_label(slot)),
+            announce=announce, sleep_func=sleep_func, on_step=on_step,
+            defer=True)
+
+    def sequence_for_step(self, step, fallback_name):
+        """The sequence that carries out one step, named so it can be resumed.
+
+        A step naming a sequence gives back that sequence, under its own name.
+        Anything else is wrapped in a sequence of one called `fallback_name`.
+
+        The name is the point. It is the key a long pause is written down
+        under, and the key the resume, the countdown on the phone, a press to
+        stop it and the last-run record all look up -- so a wrapper named
+        after a button, or after a phrase somebody said, is a name none of
+        them can find. That is not hypothetical: it is what dropped the second
+        half of every dial press that waited.
+
+        The check is on the step's kind, not merely on whether the target
+        names a sequence. A target is a device, a scene or a sequence
+        depending on the kind, and nothing stops the same word being two of
+        those -- a "Lamp" sequence beside a lamp. Looking it up without asking
+        the kind first would run the sequence from a button that says Lamp.
+
+        A step naming a sequence that is no longer there keeps the wrapper, so
+        the missing name is reported by the step that runs it rather than
+        disappearing into a run of nothing.
+        """
+        step = step or {}
+        if step.get('kind') == sequence_lib.KIND_SEQUENCE:
+            found = self.sequence_by_name(step.get('target') or '')
+            if found is not None:
+                return found
+        return sequence_lib.one_step(step, fallback_name)
 
     def dial_label(self, slot):
         """What to call a slot, with a device's friendly name where it has one."""
@@ -1151,6 +1178,90 @@ class ParagonHome(object):
             if found:
                 name = found[0].name
         return dial_lib.label_for(slot, name)
+
+    # -- the phrase book ---------------------------------------------------
+    #
+    # What somebody said, and what the house does about it. Nothing here
+    # listens: a microphone is somebody else's machine, and what reaches this
+    # is text. That split is deliberate -- it keeps the part with the rules in
+    # it testable without a microphone, and it means the ears can be replaced
+    # without touching what the words mean.
+
+    @property
+    def phrases(self):
+        """The phrase book, read fresh."""
+        if self._phrases is None:
+            self._phrases = voice_lib.normalise_book(
+                utils.read_json(voice_lib.PHRASE_FILE, default=[]))
+        return self._phrases
+
+    def save_phrases(self, book=None):
+        if self._master_owns('phrases'):
+            return False
+        if book is not None:
+            self._phrases = voice_lib.normalise_book(book)
+        utils.write_json(voice_lib.PHRASE_FILE, self.phrases)
+        return True
+
+    @property
+    def unheard(self):
+        """What was said that matched nothing, newest first."""
+        if self._unheard is None:
+            self._unheard = voice_lib.normalise_unheard(
+                utils.read_json(voice_lib.HEARD_FILE, default=[]))
+        return self._unheard
+
+    def note_unheard(self, text, now=None):
+        """Write down a phrase that matched nothing.
+
+        Kept rather than only logged, because this is the list that makes the
+        book converge. A phrase that missed is exactly the phrase worth adding
+        as another way of asking, and the alternative is reading a log on a
+        different machine to find out what the microphone really heard.
+        """
+        moment = now if now is not None else time.time()
+        self._unheard = voice_lib.remember_miss(self.unheard, text, now=moment)
+        utils.write_json(voice_lib.HEARD_FILE, self._unheard)
+
+    def forget_unheard(self, text):
+        """Drop one miss, which is what adding it as a phrase should do."""
+        self._unheard = voice_lib.forget_miss(self.unheard, text)
+        utils.write_json(voice_lib.HEARD_FILE, self._unheard)
+
+    def phrase_target(self, entry):
+        """A phrase's device by its friendly name, for a row worth reading."""
+        return self._step_target((entry or {}).get('step') or {})
+
+    def run_phrase(self, text, announce=True, sleep_func=None, on_step=None,
+                   now=None):
+        """Do what somebody said. Returns (it ran, what to say back).
+
+        A phrase is matched exactly against the book and nothing else. No
+        nearest match: a house acting on an approximation of what it heard
+        does something nobody asked for, and the way you find that out is the
+        time it was the door.
+        """
+        entry = voice_lib.match(self.phrases, text)
+        if entry is None:
+            self.note_unheard(text, now=now)
+            said = voice_lib.normalise(text)
+            utils.log('Voice: nothing is set for "%s"' % said)
+            return False, 'Nothing is set for "%s"' % said
+
+        step = entry['step']
+        if step.get('kind') == sequence_lib.KIND_UNLOCK:
+            # The second of two refusals; the picker does not offer an unlock
+            # either. Both, because this file can be edited by hand and copied
+            # between boxes, and because a phrase is not a PIN: anyone within
+            # earshot is authenticated, including through an open window.
+            utils.log('Voice: refused to unlock a door')
+            return False, 'Paragon Home will not unlock a door by voice'
+
+        label = sequence_lib.describe_step(step, self._step_target(step))
+        ran = self.run_sequence(
+            self.sequence_for_step(step, label), announce=announce,
+            sleep_func=sleep_func, on_step=on_step, defer=True)
+        return bool(ran), label if ran else '%s did nothing' % label
 
     # -- sequences part way through a long pause ----------------------------
     #
@@ -1591,6 +1702,10 @@ class ParagonHome(object):
         ('_scenes', scene_lib.SCENE_FILE),
         ('_sequences', sequence_lib.SEQUENCE_FILE),
         ('_dial', dial_lib.DIAL_FILE),
+        ('_phrases', voice_lib.PHRASE_FILE),
+        # The misses especially: whatever is listening writes these from its
+        # own request, and the menus are where they are turned into phrases.
+        ('_unheard', voice_lib.HEARD_FILE),
         ('_palette', palette_lib.PALETTE_FILE),
     )
 

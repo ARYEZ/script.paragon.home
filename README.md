@@ -532,6 +532,57 @@ is longer than the button.
 A satellite takes the master's dial along with everything else. Ten buttons
 disagreeing with the menus above them would be worse than none.
 
+## Phrases
+
+A phrase book, not an interpreter. **"Make me a coffee"** runs the sequence
+called *barista* because somebody wrote that down — not because anything
+worked out that coffee is a drink and barista makes drinks. **"I'm thirsty"**
+does nothing, on purpose.
+
+That is the design, and it is the opposite of what people expect. A closed
+list can be read back: every phrase is one you chose, so the answer to *why
+did the kitchen light come on* is always a line in a file. It is also what
+makes local speech recognition good enough — telling apart forty known phrases
+is a far smaller job than transcribing English, and it runs on a Raspberry Pi
+with nothing leaving the house.
+
+**Nothing in Paragon Home listens.** A microphone is another machine's job;
+what arrives here is text. That split keeps the half with the rules in it
+testable without a microphone, and it means the ears can be swapped without
+touching what the words mean.
+
+An entry is **one action and every way of asking for it**:
+
+```
+"make me a coffee" (+2 more)  ->  Sequence: barista
+```
+
+Aliases are the whole trick. Speech recognition will hear *make me a coffee*
+as *make me coffee* often enough that a single exact phrase feels broken, so
+three spellings pointing at one action stay exact — which is to say
+predictable — while absorbing what the microphone actually does.
+
+Case, punctuation and spacing are ignored, and `please` and `thanks` are
+dropped from either end. All of those are things a recogniser decides and a
+person does not. Nothing else is: there is no nearest match and no part of
+one, because a house that acts on an approximation of what it heard does
+something nobody asked for.
+
+**Heard but not known** is what makes the book converge. A phrase that matched
+nothing is written down with a count, and a miss said three times is one press
+from becoming another way of asking. Without it the only way to learn what the
+microphone really heard is to read a log on a different machine.
+
+**Try saying something...** takes typed text and runs it through the real
+matcher and the real actions, so the book can be built and exercised today,
+with a keyboard, long before anything in the house has ears.
+
+**A phrase cannot unlock a door.** Not offered when setting one, and refused
+when running one — two guards, because the file can be edited by hand or
+copied between boxes. A phrase is not a PIN: anyone within earshot is
+authenticated, including through an open window. Locking is offered; it harms
+nobody.
+
 ### What a scene does to each light
 
 **What it does to each light...** in the scene editor lists every light the

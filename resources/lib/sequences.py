@@ -300,6 +300,27 @@ def make_sequence(name, steps=None, time=None, days=None, phase=None,
                       'skip_done': skip_done})
 
 
+def one_step(step, name):
+    """One step, as a sequence, so that it can be run like anything else.
+
+    The speed dial and the phrase book both hold a single step and both have
+    to run it. Everything that carries a step out is reached through a
+    sequence -- the lock gate, a nested sequence being spliced in, a long
+    pause handed back, the way a failure is collected -- so a sequence of one
+    gets all of that rather than a second copy of any of it.
+
+    The name is the caller's, and it matters: it is the key a long pause is
+    written down under, and the key the resume, the countdown and the last-run
+    record all look up. A caller with a real sequence to run should run that,
+    under its own name, rather than wrapping it in one of these.
+    """
+    steps = [step or empty_step()]
+    while len(steps) < STEP_COUNT:
+        steps.append(empty_step())
+    return {'name': name, 'description': '', 'time': '', 'days': [],
+            'phase': 0, 'skip_done': False, 'steps': steps}
+
+
 def _clean_int(value, low, high, default=0):
     try:
         number = int(value)

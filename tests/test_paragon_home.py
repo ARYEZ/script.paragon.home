@@ -4258,6 +4258,351 @@ class TestTheSpeedDial(unittest.TestCase):
         xbmcaddon.reset()
 
 
+class TestThePhraseBook(unittest.TestCase):
+    """A list of phrases somebody wrote down, and nothing cleverer.
+
+    "Make me a coffee" runs barista because it says so in a file. "I'm
+    thirsty" does nothing, on purpose: a closed list is a list that can be
+    read back, so the answer to "why did that happen" is always a line
+    somebody put there.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'voice',
+                     'speeddial', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import voice
+
+        self.voice = voice
+
+    def tearDown(self):
+        clean_profile()
+
+    def book(self, *entries):
+        return self.voice.normalise_book(list(entries))
+
+    def coffee(self, *phrases):
+        return {'phrases': list(phrases),
+                'step': {'kind': 'sequence', 'target': 'barista'}}
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {CAP_POWER, CAP_LOCK,
+                                                CAP_UNLOCK, CAP_STATE}
+        self.recorder.lock = lambda d: self.recorder.calls.append(
+            ('lock', d.device_id))
+        self.recorder.unlock = lambda d: self.recorder.calls.append(
+            ('unlock', d.device_id))
+        app.controller = self.recorder
+        app._devices = [
+            Device('WP9ABC#1', name='Coffee Maker', driver='tuya', lan=True,
+                   native_id='wp9abc'),
+            Device('LK1', name='Front Door', driver='switchbot',
+                   model='Lock Vision', cloud=True),
+        ]
+        app._scenes = [scene_lib.make_scene('All Off',
+                                            power=scene_lib.POWER_OFF)]
+        app._sequences = []
+        return app
+
+    # -- what counts as the same phrase ------------------------------------
+
+    def test_case_punctuation_and_spacing_are_not_different_phrases(self):
+        """All three are decisions a recogniser makes and a person does not."""
+        book = self.book(self.coffee('make me a coffee'))
+
+        for said in ('Make me a coffee', 'make me a coffee.',
+                     '  MAKE  me a coffee!! ', 'Make, me a coffee'):
+            self.assertIsNotNone(self.voice.match(book, said),
+                                 '%r did not match' % said)
+
+    def test_politeness_at_either_end_is_not_part_of_the_phrase(self):
+        book = self.book(self.coffee('make me a coffee'))
+
+        for said in ('make me a coffee please', 'please make me a coffee',
+                     'make me a coffee thanks'):
+            self.assertIsNotNone(self.voice.match(book, said),
+                                 '%r did not match' % said)
+
+    def test_politeness_inside_a_phrase_is_left_alone(self):
+        """"Say please now" keeps its please; the word is filler only at the ends.
+
+        Asserted on normalise itself rather than through a match. Through a
+        match, a version that stripped the word everywhere would still match a
+        phrase against itself -- both sides mangled the same way -- and the
+        test would pass while the phrase book quietly answered to the wrong
+        words.
+        """
+        self.assertEqual(self.voice.normalise('say please now'),
+                         'say please now')
+        self.assertEqual(self.voice.normalise('Please, say please now!'),
+                         'say please now')
+
+    def test_nothing_is_matched_by_being_close(self):
+        """The whole design: no nearest match, and no part of one.
+
+        A house that acts on an approximation of what it heard does something
+        nobody asked for, and the way you find that out is the time it was the
+        door.
+        """
+        book = self.book(self.coffee('make me a coffee'))
+
+        for said in ("I'm thirsty", 'coffee', 'make me a coffee now',
+                     'could you make me a coffee', 'make'):
+            self.assertIsNone(self.voice.match(book, said),
+                              '%r matched something' % said)
+
+    def test_an_empty_phrase_matches_nothing_rather_than_everything(self):
+        book = self.book(self.coffee('make me a coffee'))
+
+        for said in ('', '   ', '...', None, 'please'):
+            self.assertIsNone(self.voice.match(book, said),
+                              '%r matched' % said)
+
+    # -- the book ----------------------------------------------------------
+
+    def test_several_ways_of_asking_reach_one_action(self):
+        """Aliases are the trick that makes an exact match usable at all."""
+        book = self.book(self.coffee('make me a coffee', 'make coffee',
+                                     'start the coffee'))
+
+        self.assertEqual(len(book), 1)
+        for said in ('make me a coffee', 'make coffee', 'start the coffee'):
+            self.assertEqual(self.voice.match(book, said)['step']['target'],
+                             'barista')
+
+    def test_a_phrase_with_nothing_behind_it_is_not_kept(self):
+        """It would be a phrase the house appears to know and then ignores."""
+        book = self.book({'phrases': ['do the thing'], 'step': None})
+
+        self.assertEqual(book, [])
+
+    def test_an_action_nobody_can_ask_for_is_not_kept(self):
+        book = self.book({'phrases': [],
+                          'step': {'kind': 'scene', 'target': 'All Off'}})
+
+        self.assertEqual(book, [])
+
+    def test_one_entry_needs_both_halves_to_survive_on_its_own(self):
+        """normalise_entry promises this, so it is held to it directly.
+
+        Through normalise_book both halves look tested, because the book drops
+        an entry with no phrases for its own reasons. Each is the other's
+        alibi there; here neither has one.
+        """
+        scene = {'kind': 'scene', 'target': 'All Off'}
+
+        self.assertIsNone(self.voice.normalise_entry({'phrases': [],
+                                                      'step': scene}))
+        self.assertIsNone(self.voice.normalise_entry({'phrases': ['lights out'],
+                                                      'step': None}))
+        self.assertIsNotNone(self.voice.normalise_entry(
+            {'phrases': ['lights out'], 'step': scene}))
+
+    def test_a_phrase_claimed_twice_belongs_to_the_first_that_claimed_it(self):
+        """Decided by the file, once, so every box agrees on what fires."""
+        book = self.book(
+            self.coffee('make me a coffee'),
+            {'phrases': ['make me a coffee', 'lights out'],
+             'step': {'kind': 'scene', 'target': 'All Off'}})
+
+        self.assertEqual(self.voice.match(book, 'make me a coffee')['step'
+                                                                    ]['target'],
+                         'barista')
+        # The loser keeps its other phrases rather than vanishing.
+        self.assertEqual(self.voice.match(book, 'lights out')['step']['target'],
+                         'All Off')
+
+    def test_an_entry_left_with_no_phrases_of_its_own_is_dropped(self):
+        book = self.book(self.coffee('make me a coffee'),
+                         self.coffee('Make me a coffee'))
+
+        self.assertEqual(len(book), 1)
+
+    def test_rubbish_in_the_file_is_ignored_rather_than_believed(self):
+        book = self.voice.normalise_book(
+            ['nonsense', None, 42, {'phrases': 'make coffee',
+                                    'step': {'kind': 'sequence',
+                                             'target': 'barista'}}])
+
+        self.assertEqual(len(book), 1, 'a bare string phrase was refused')
+        self.assertEqual(book[0]['phrases'], ['make coffee'])
+
+    def test_the_menu_row_counts_phrases_and_actions_apart(self):
+        """Three ways to ask for two things is not three things."""
+        self.assertEqual(self.voice.describe([]), 'nothing said yet')
+        self.assertEqual(
+            self.voice.describe(self.book(self.coffee('a', 'b'))),
+            '2 phrases, 1 action')
+        self.assertEqual(
+            self.voice.describe(self.book(self.coffee('a'))), '1 phrase')
+
+    # -- doing what was said -----------------------------------------------
+
+    def test_a_known_phrase_runs_what_it_was_taught(self):
+        app = self.app()
+        app._phrases = self.book(
+            {'phrases': ['lights out'],
+             'step': {'kind': 'power', 'driver': 'tuya',
+                      'target': 'Coffee Maker', 'action': 'off'}})
+
+        ran, message = app.run_phrase('Lights out!', announce=False)
+
+        self.assertTrue(ran)
+        self.assertEqual([c[:3] for c in self.recorder.calls],
+                         [('turn', 'WP9ABC#1', False)])
+        self.assertIn('Coffee Maker', message)
+
+    def test_a_phrase_holding_a_sequence_runs_it_under_its_own_name(self):
+        """The same rule the speed dial needed, and for the same reason.
+
+        A long pause is written down by name, so a phrase that ran a sequence
+        under the words somebody said would lose everything after the pause.
+        """
+        import sequences as sequence_lib
+
+        app = self.app()
+        app._sequences = [sequence_lib.make_sequence('barista', [
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'on', 'pause': 720},
+            {'kind': 'power', 'driver': 'tuya', 'target': 'Coffee Maker',
+             'action': 'off'}])]
+        app._phrases = self.book(self.coffee('make me a coffee'))
+
+        app.run_phrase('make me a coffee', announce=False,
+                       sleep_func=lambda seconds: None)
+
+        self.assertIsNotNone(app.pending_for('barista'),
+                             'the wait was filed under something else')
+        self.assertEqual([e['name'] for e in app.pending_sequences],
+                         ['barista'])
+
+    def test_an_unknown_phrase_does_nothing_and_says_so(self):
+        app = self.app()
+        app._phrases = self.book(self.coffee('make me a coffee'))
+
+        ran, message = app.run_phrase("I'm thirsty", announce=False)
+
+        self.assertFalse(ran)
+        self.assertEqual(self.recorder.calls, [])
+        self.assertIn('thirsty', message)
+
+    def test_an_unknown_phrase_is_written_down_to_be_taught_later(self):
+        """The list that makes the book converge on what is really said."""
+        app = self.app()
+        app._phrases = self.book(self.coffee('make me a coffee'))
+
+        app.run_phrase('make me one coffee', announce=False, now=1000.0)
+
+        self.assertEqual([e['text'] for e in app.unheard],
+                         ['make me one coffee'])
+
+    def test_a_miss_said_again_is_counted_not_listed_twice(self):
+        """Said once it was a slip; said five times it is a phrase to add."""
+        app = self.app()
+        app._phrases = []
+
+        for _ in range(3):
+            app.run_phrase('make me one coffee', announce=False, now=1000.0)
+
+        self.assertEqual(len(app.unheard), 1)
+        self.assertEqual(app.unheard[0]['count'], 3)
+
+    def test_the_newest_miss_comes_first(self):
+        app = self.app()
+        app._phrases = []
+
+        app.run_phrase('one', announce=False, now=1000.0)
+        app.run_phrase('two', announce=False, now=1001.0)
+
+        self.assertEqual([e['text'] for e in app.unheard], ['two', 'one'])
+
+    def test_the_misses_do_not_grow_without_bound(self):
+        app = self.app()
+        app._phrases = []
+
+        for number in range(self.voice.MAX_UNHEARD + 10):
+            app.run_phrase('phrase number %d' % number, announce=False,
+                           now=1000.0 + number)
+
+        self.assertEqual(len(app.unheard), self.voice.MAX_UNHEARD)
+
+    def test_a_known_phrase_is_not_written_down_as_a_miss(self):
+        app = self.app()
+        app._phrases = self.book(
+            {'phrases': ['lights out'],
+             'step': {'kind': 'scene', 'target': 'All Off'}})
+
+        app.run_phrase('lights out', announce=False)
+
+        self.assertEqual(app.unheard, [])
+
+    def test_a_miss_survives_the_session_that_heard_it(self):
+        """Whatever is listening writes these from its own interpreter."""
+        from paragon_home import ParagonHome
+
+        app = self.app()
+        app._phrases = []
+        app.run_phrase('make me one coffee', announce=False, now=1000.0)
+
+        self.assertEqual([e['text'] for e in ParagonHome().unheard],
+                         ['make me one coffee'])
+
+    # -- the door ----------------------------------------------------------
+
+    def test_a_phrase_will_not_unlock_a_door(self):
+        """A phrase is not a PIN: anyone within earshot is authenticated.
+
+        Tested apart from the picker refusing to offer it, because two guards
+        covering each other is two guards neither of which is tested. This one
+        is the guard that holds for a file edited by hand or copied from
+        another box.
+        """
+        app = self.app()
+        app._phrases = self.book(
+            {'phrases': ['open the front door'],
+             'step': {'kind': 'unlock', 'driver': 'switchbot',
+                      'target': 'Front Door'}})
+
+        ran, message = app.run_phrase('open the front door', announce=False)
+
+        self.assertFalse(ran)
+        self.assertEqual(self.recorder.calls, [], 'the door was opened')
+        self.assertIn('unlock', message.lower())
+
+    def test_a_phrase_may_still_lock_a_door(self):
+        """Refusing both would be safety theatre: locking harms nobody."""
+        app = self.app()
+        app._phrases = self.book(
+            {'phrases': ['lock up'],
+             'step': {'kind': 'lock', 'driver': 'switchbot',
+                      'target': 'Front Door'}})
+
+        ran, _message = app.run_phrase('lock up', announce=False)
+
+        self.assertTrue(ran)
+        self.assertEqual(self.recorder.calls, [('lock', 'LK1')])
+
+    def test_the_picker_does_not_offer_unlocking_either(self):
+        """The other guard, tested on its own for the same reason."""
+        import gui
+
+        app = self.app()
+        panel = gui.ControlPanel(app)
+        panel._step_device = lambda driver_id: {
+            'kind': 'unlock', 'driver': 'switchbot', 'target': 'Front Door'}
+        xbmcgui.SELECT_QUEUE.append(1)      # a driver, whichever it is
+
+        self.assertIsNone(panel._pick_phrase_step('does what'))
+
+
 class TestLongPauses(unittest.TestCase):
     """A twelve-minute brew must not be twelve minutes nothing else can run.
 

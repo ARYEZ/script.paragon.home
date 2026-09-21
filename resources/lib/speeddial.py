@@ -126,14 +126,9 @@ def as_sequence(slot, name=None):
     lock gate, a nested sequence being spliced in, a long pause being handed
     back, the way a failure is collected and reported. Running a slot as a
     sequence of one gets all of that rather than a second copy of any of it.
+
+    The wrapping itself lives in sequences, because the phrase book needs the
+    same thing and what a sequence looks like is that file's business.
     """
-    steps = [slot.get('step') or sequence_lib.empty_step()]
-    while len(steps) < sequence_lib.STEP_COUNT:
-        steps.append(sequence_lib.empty_step())
-    return {'name': name or label_for(slot) or 'Speed dial',
-            'description': '',
-            'time': '',
-            'days': [],
-            'phase': 0,
-            'skip_done': False,
-            'steps': steps}
+    return sequence_lib.one_step(slot.get('step'),
+                                 name or label_for(slot) or 'Speed dial')
