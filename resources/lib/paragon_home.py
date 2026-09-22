@@ -36,6 +36,10 @@ class ParagonHome(object):
 
     CODE_FILE = 'broadlink_codes.json'
     KEY_FILE = 'tuya_keys.json'
+    # Which clips each speaker holds, read from the Pi at each search. Kept
+    # here for the reason the codes are: the menus offer them without a
+    # network call, and a satellite gets them with everything else.
+    CLIP_FILE = 'speaker_clips.json'
 
     def __init__(self):
         # Before anything is read: the add-on id changed in v2.19,
@@ -52,6 +56,9 @@ class ParagonHome(object):
         self._tuya_keys = utils.read_json(self.KEY_FILE, default={}) or {}
         settings['tuya_keys'] = self._tuya_keys
         settings['save_tuya_keys'] = self.save_tuya_keys
+        self._clips = utils.read_json(self.CLIP_FILE, default={}) or {}
+        settings['speaker_clips'] = self._clips
+        settings['save_speaker_clips'] = self.save_clips
         settings['known_ips'] = self.known_ips
         settings['kasa_username'] = utils.get_setting('kasa_username')
         settings['kasa_password'] = utils.get_setting('kasa_password')
@@ -100,6 +107,11 @@ class ParagonHome(object):
         if self._master_owns('learned commands'):
             return False
         return utils.write_json(self.CODE_FILE, self._codes or {})
+
+    def save_clips(self):
+        """The speakers' clip lists. A cache of what each Pi holds, like the
+        addresses in devices.json, so a satellite may write it too."""
+        return utils.write_json(self.CLIP_FILE, self._clips or {})
 
     def known_ips(self):
         """Addresses of every device already known, whatever its brand.
@@ -1687,6 +1699,9 @@ class ParagonHome(object):
             self._tuya_keys.clear()
             self._tuya_keys.update(
                 utils.read_json(self.KEY_FILE, default={}) or {})
+            self._clips.clear()
+            self._clips.update(
+                utils.read_json(self.CLIP_FILE, default={}) or {})
             self._stamp_sync(at)
         return copied, problems
 
@@ -1731,7 +1746,8 @@ class ParagonHome(object):
         # dicts and kept, so these are emptied and refilled rather than
         # replaced -- rebinding would leave each driver holding the old one.
         for filename, store in ((self.CODE_FILE, self._codes),
-                                (self.KEY_FILE, self._tuya_keys)):
+                                (self.KEY_FILE, self._tuya_keys),
+                                (self.CLIP_FILE, self._clips)):
             if not self._moved(filename):
                 continue
             store.clear()

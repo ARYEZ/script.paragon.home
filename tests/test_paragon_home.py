@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -290,14 +291,21 @@ class RecordingController(object):
     class _StandIn(object):
         """What the Hub would hand back for this device's driver."""
 
-        def __init__(self, has_transports):
+        def __init__(self, has_transports, learns=False):
             self.HAS_TRANSPORTS = has_transports
+            if learns:
+                # The menus decide whether to offer a Learn row by asking the
+                # driver whether it can, the way test_device asks whether it
+                # can be tested. A stand-in for the blaster driver learns;
+                # one for a speaker -- clips are files on a Pi -- does not.
+                self.start_learning = lambda device: True
 
     def driver_for(self, device):
         # Answering None made every driver look alike, which cannot catch a
         # menu tagging a plug with a transport it has no choice about.
-        return self._StandIn(
-            (getattr(device, 'driver', None) or 'govee') == 'govee')
+        driver_id = getattr(device, 'driver', None) or 'govee'
+        return self._StandIn(driver_id == 'govee',
+                             learns=driver_id == 'broadlink')
 
     def _record(self, name, device, *args):
         if device.device_id in self.fail_on:
@@ -4601,6 +4609,593 @@ class TestThePhraseBook(unittest.TestCase):
         xbmcgui.SELECT_QUEUE.append(1)      # a driver, whichever it is
 
         self.assertIsNone(panel._pick_phrase_step('does what'))
+
+
+class FakeSpeaker(object):
+    """A Paragon speaker Pi, in-process: answers the hello, lists, plays.
+
+    Speaks the same wire format as tools/paragon_speaker.py so the transport
+    is exercised for real, on loopback, without a subprocess. What it "plays"
+    is recorded rather than heard.
+    """
+
+    def __init__(self, name='Kitchen Speaker', device_id='AA:BB:CC:DD:EE:01',
+                 clips=None, answer_hello=True):
+        import speaker_lan
+
+        self.name = name
+        self.device_id = device_id
+        self.clips = list(clips if clips is not None else
+                          ['hardboiled complete', 'goodnight'])
+        self.answer_hello = answer_hello
+        self.played = []
+        self.hellos = 0
+        self.refuse_play = False
+        # How many hellos to ignore before answering: a Pi busy playing
+        # something misses a datagram, and the search must not give up.
+        self.miss_hellos = 0
+        # A 200 with this body instead of {"ok": true}, for holding the
+        # transport to its contract rather than to this fake's good manners.
+        self.play_answer = None
+
+        speaker = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def _send(self, code, payload):
+                body = json.dumps(payload).encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == '/clips':
+                    self._send(200, {'clips': list(speaker.clips)})
+                else:
+                    self._send(404, {'error': 'no such path'})
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                body = json.loads(self.rfile.read(length).decode('utf-8'))
+                name = body.get('clip')
+                if self.path != '/play':
+                    self._send(404, {'error': 'no such path'})
+                elif speaker.play_answer is not None:
+                    self._send(200, speaker.play_answer)
+                elif speaker.refuse_play:
+                    self._send(503, {'ok': False,
+                                     'error': 'nothing installed can play it'})
+                elif name not in speaker.clips:
+                    self._send(404, {'ok': False,
+                                     'error': 'no clip called "%s"' % name})
+                else:
+                    speaker.played.append(name)
+                    self._send(200, {'ok': True, 'error': ''})
+
+            def log_message(self, fmt, *args):
+                pass
+
+        self.http = HTTPServer(('127.0.0.1', 0), _Handler)
+        self.port = self.http.server_address[1]
+        self.http_thread = threading.Thread(target=self.http.serve_forever)
+        self.http_thread.daemon = True
+        self.http_thread.start()
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(('127.0.0.1', 0))
+        self.discovery_port = self.sock.getsockname()[1]
+        self.sock.settimeout(0.2)
+        self.running = True
+        self.udp_thread = threading.Thread(target=self._serve_hello)
+        self.udp_thread.daemon = True
+        self.udp_thread.start()
+        self.HELLO = speaker_lan.HELLO
+
+    def _serve_hello(self):
+        while self.running:
+            try:
+                data, sender = self.sock.recvfrom(4096)
+            except socket.error:
+                continue
+            if data.strip() != self.HELLO:
+                continue
+            self.hellos += 1
+            if not self.answer_hello:
+                continue
+            if self.miss_hellos > 0:
+                self.miss_hellos -= 1
+                continue
+            reply = json.dumps({'paragon': 'speaker', 'id': self.device_id,
+                                'name': self.name, 'port': self.port,
+                                'clips': list(self.clips)})
+            try:
+                self.sock.sendto(reply.encode('utf-8'), sender)
+            except socket.error:
+                pass
+
+    def close(self):
+        self.running = False
+        self.udp_thread.join(2.0)
+        self.sock.close()
+        self.http.shutdown()
+        self.http.server_close()
+        self.http_thread.join(2.0)
+
+
+class TestTheSpeaker(unittest.TestCase):
+    """A speaker is a blaster that emits sound.
+
+    No state, nothing to switch, a set of named things it can emit and a step
+    that says "emit this one on that device". So it claims the capability the
+    blaster claims, and its clips are its commands -- which is what lets the
+    step picker, the sequence editor, the speed dial, a phrase and the
+    last-run record all work on it without knowing that it is one.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        # Not 'devices': the driver raises devices.ControlError, and this
+        # module imported that class at the top. Reloading devices here would
+        # make the driver raise a second, unrelated ControlError class that
+        # every assertRaises below fails to recognise.
+        for name in ('addon_utils', 'paragon_home', 'speaker_driver',
+                     'speaker_lan', 'hub', 'gui', 'satellite'):
+            if name in sys.modules:
+                del sys.modules[name]
+        self.pi = FakeSpeaker()
+        self.addCleanup(self.pi.close)
+        import speaker_lan
+
+        self.lan = speaker_lan
+
+    def tearDown(self):
+        clean_profile()
+
+    def transport(self):
+        return self.lan.SpeakerTransport(bind_address='127.0.0.1',
+                                         timeout=2.0)
+
+    def driver(self, clips=None):
+        """The driver, discovering on loopback rather than by broadcast."""
+        from speaker_driver import SpeakerDriver
+
+        transport = self.transport()
+        targets = [('127.0.0.1', self.pi.discovery_port)]
+        real = transport.discover
+        transport.discover = lambda timeout=3.0: real(timeout=min(timeout, 0.6),
+                                                     targets=targets)
+        self.saved = []
+        return SpeakerDriver(transport=transport,
+                             clips=clips if clips is not None else {},
+                             save_clips=lambda: self.saved.append(True))
+
+    def device(self, clips=None):
+        return Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': self.pi.port})
+
+    # -- discovery ---------------------------------------------------------
+
+    def test_a_search_finds_the_speaker_with_its_name_and_its_clips(self):
+        driver = self.driver()
+
+        devices, warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([d.name for d in devices], ['Kitchen Speaker'])
+        self.assertEqual(devices[0].device_id, 'AA:BB:CC:DD:EE:01')
+        self.assertEqual(devices[0].driver, 'speaker')
+        self.assertEqual(devices[0].driver_data.get('port'), self.pi.port,
+                         'the command port did not travel with the device')
+        self.assertEqual(driver.commands(devices[0]),
+                         ['hardboiled complete', 'goodnight'])
+
+    def test_a_search_writes_the_clip_list_down(self):
+        """So the menus can offer clips with no network call, and so that a
+        satellite gets them with everything else."""
+        driver = self.driver()
+
+        driver.discover(timeout=0.6)
+
+        self.assertEqual(self.saved, [True])
+        self.assertEqual(driver.clips['AA:BB:CC:DD:EE:01'],
+                         ['hardboiled complete', 'goodnight'])
+
+    def test_a_file_dropped_on_the_pi_appears_after_the_next_search(self):
+        """The whole point of the clip list living on the Pi."""
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+        self.saved[:] = []
+
+        self.pi.clips.append('eggs are done')
+        devices, _w = driver.discover(timeout=0.6)
+
+        self.assertIn('eggs are done', driver.commands(devices[0]))
+        self.assertEqual(self.saved, [True], 'the new clip was not saved')
+
+    def test_a_search_that_changes_nothing_does_not_write(self):
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+        self.saved[:] = []
+
+        driver.discover(timeout=0.6)
+
+        self.assertEqual(self.saved, [])
+
+    def test_a_search_that_finds_nothing_says_nothing_wrong(self):
+        """Silence is not an error; a house without speakers is normal."""
+        self.pi.answer_hello = False
+        driver = self.driver()
+
+        devices, warnings = driver.discover(timeout=0.4)
+
+        self.assertEqual(devices, [])
+        self.assertEqual(warnings, [])
+
+    def test_a_pi_that_misses_the_first_hello_is_still_found(self):
+        """UDP has no retransmission, so one hello is one chance. A Pi busy
+        playing something misses a datagram; the search asks again."""
+        self.pi.miss_hellos = 1
+        driver = self.driver()
+
+        devices, _w = driver.discover(timeout=0.9)
+
+        self.assertEqual([d.name for d in devices], ['Kitchen Speaker'])
+        self.assertGreaterEqual(self.pi.hellos, 2, 'the hello went out once')
+
+    def test_only_a_speaker_s_reply_counts_as_a_speaker(self):
+        """The discovery port is a broadcast port; other things answer."""
+        for wrong in (b'not json', b'{"paragon": "toaster", "id": "X"}',
+                      b'{"paragon": "speaker"}', b'[]', b'{"id": "X"}'):
+            self.assertIsNone(self.lan.parse_hello(wrong, '10.0.0.5'),
+                              '%r was taken for a speaker' % wrong)
+
+    def test_a_reply_is_read_strictly_but_forgivingly(self):
+        entry = self.lan.parse_hello(
+            b'{"paragon": "speaker", "id": "aa:bb", "name": " Hall ",'
+            b' "port": "9000", "clips": ["one", "", "one", 2, "two"]}',
+            '10.0.0.5')
+
+        self.assertEqual(entry['id'], 'AA:BB')
+        self.assertEqual(entry['name'], 'Hall')
+        self.assertEqual(entry['port'], 9000)
+        self.assertEqual(entry['ip'], '10.0.0.5')
+        self.assertEqual(entry['clips'], ['one', '2', 'two'])
+
+    # -- playing -----------------------------------------------------------
+
+    def test_a_clip_is_played_by_name(self):
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['hardboiled complete']})
+
+        self.assertTrue(driver.send_command(self.device(),
+                                            'hardboiled complete'))
+
+        self.assertEqual(self.pi.played, ['hardboiled complete'])
+
+    def test_a_clip_the_speaker_does_not_have_is_refused_by_name(self):
+        """Before anything goes on the wire, and naming both halves.
+
+        The Pi would refuse it too, as HTTP 404. This is what stands between
+        a sequence and a message that was renamed on the Pi last week, and it
+        says which clip on which speaker rather than a status code.
+        """
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(self.device(), 'hardboiled complete')
+
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+        self.assertIn('hardboiled complete', str(caught.exception))
+        self.assertEqual(self.pi.played, [], 'it went on the wire anyway')
+
+    def test_a_speaker_that_cannot_play_says_so_in_its_own_words(self):
+        """The Pi's reason reaches the last-run record, not a status code."""
+        self.pi.refuse_play = True
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(self.device(), 'goodnight')
+
+        self.assertIn('nothing installed can play', str(caught.exception))
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+
+    def test_a_200_that_does_not_say_ok_is_not_a_play(self):
+        """The contract is {"ok": true}, not "anything with a 200 on it".
+        Something else on the port -- a captive portal, a stale service --
+        answering 200 must not be reported as a message delivered."""
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        for body in ([], {'ok': False, 'error': ''}, {'played': True}):
+            self.pi.play_answer = body
+            with self.assertRaises(ControlError, msg=repr(body)):
+                driver.send_command(self.device(), 'goodnight')
+
+    def test_a_speaker_that_is_off_fails_by_name(self):
+        """An unplugged Pi fails the way an unplugged plug fails."""
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+        gone = Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': _free_port()})
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(gone, 'goodnight')
+
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+        self.assertEqual(self.pi.played, [])
+
+    def test_playing_does_not_wait_for_the_clip_to_end(self):
+        """That is what a pause on the step is for."""
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        started = time.time()
+        driver.send_command(self.device(), 'goodnight')
+
+        self.assertLess(time.time() - started, 1.0)
+
+    def test_a_speaker_claims_commands_and_nothing_else(self):
+        """The capability set is the real guard: the hub only ever calls a
+        verb a device claims. The verbs raising is the belt to that braces,
+        and a set that also said power would have a scene switching it."""
+        driver = self.driver()
+
+        self.assertEqual(driver.capabilities(self.device()),
+                         set([CAP_COMMANDS]))
+
+    def test_a_speaker_cannot_be_switched(self):
+        driver = self.driver()
+
+        for verb in (lambda: driver.turn(self.device(), True),
+                     lambda: driver.set_brightness(self.device(), 50)):
+            self.assertRaises(ControlError, verb)
+        self.assertIsNone(driver.get_state(self.device()))
+
+    # -- test connection ---------------------------------------------------
+
+    def test_test_connection_asks_over_the_path_a_command_takes(self):
+        """The hello proves the Pi is there; this proves HTTP, which is what
+        play goes through -- and it refreshes the clips while it is there."""
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['stale']})
+
+        ok, message = driver.test_connection(self.device())
+
+        self.assertTrue(ok)
+        self.assertIn('hardboiled complete', message)
+        self.assertEqual(driver.commands(self.device()),
+                         ['hardboiled complete', 'goodnight'])
+        self.assertEqual(self.saved, [True])
+
+    def test_test_connection_on_a_dead_speaker_reports_rather_than_raises(self):
+        driver = self.driver()
+        gone = Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': _free_port()})
+
+        ok, message = driver.test_connection(gone)
+
+        self.assertFalse(ok)
+        self.assertIn('127.0.0.1', message)
+
+    # -- through the hub and the menus -------------------------------------
+
+    def test_the_hub_builds_a_speaker_driver(self):
+        from devices import build_hub
+
+        hub = build_hub({'log_func': lambda m: None, 'speaker_clips': {},
+                         'save_speaker_clips': lambda: None})
+
+        self.assertIsNotNone(hub.driver('speaker'))
+        self.assertEqual(hub.driver('speaker').DRIVER_LABEL, 'Speaker')
+
+    def test_the_hub_hands_the_driver_the_app_s_clip_dict(self):
+        """The very dict, so a search saves without a round trip."""
+        from devices import build_hub
+
+        clips = {}
+        hub = build_hub({'log_func': lambda m: None, 'speaker_clips': clips,
+                         'save_speaker_clips': lambda: None})
+
+        self.assertIs(hub.driver('speaker').clips, clips)
+
+    def test_a_clip_is_a_step_in_the_picker_and_reads_as_one(self):
+        """The row that makes the whole thing worth building:
+        "Kitchen Speaker: hardboiled complete", picked, not typed."""
+        import gui
+        import sequences as sequence_lib
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        recorder = RecordingController(caps=['commands'])
+        recorder.command_map = {self.pi.device_id: ['hardboiled complete',
+                                                    'goodnight']}
+        app.controller = recorder
+        app._devices = [self.device()]
+        panel = gui.ControlPanel(app)
+
+        # Which speaker, then which clip.
+        xbmcgui.SELECT_QUEUE.extend([1, 0])
+        step = panel._step_device('speaker')
+
+        self.assertEqual(step['kind'], sequence_lib.KIND_COMMAND)
+        self.assertEqual(step['target'], self.pi.device_id)
+        self.assertEqual(step['action'], 'hardboiled complete')
+        self.assertEqual(
+            sequence_lib.describe_step(step, 'Kitchen Speaker'),
+            'Kitchen Speaker: hardboiled complete')
+
+    def test_a_speaker_s_menu_offers_clips_and_no_learning(self):
+        """A speaker emits what it was given. A Learn row would say no."""
+        import gui
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        recorder = RecordingController(caps=['commands'])
+        recorder.command_map = {self.pi.device_id: ['goodnight']}
+        app.controller = recorder
+        app._devices = [self.device()]
+        panel = gui.ControlPanel(app)
+
+        _row, labels = menu_row(lambda: panel._edit_device(self.device()),
+                                'Clips')
+        self.assertIn('Clips (1)...', labels)
+        self.assertNotIn('Commands (1 learned)...', labels)
+
+        xbmcgui.reset()
+        _row, labels = menu_row(lambda: panel.command_menu(self.device()),
+                                'goodnight')
+        self.assertIn('Test connection', labels)
+        self.assertNotIn('Learn a new command...', labels)
+        self.assertNotIn('Learn an RF command...', labels)
+
+    def test_a_blaster_s_menu_still_offers_learning(self):
+        """The narrowing must not cost the Broadlink its Learn rows."""
+        import gui
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        recorder = RecordingController(caps=['commands'])
+        blaster = Device('EE:FF', name='Bedroom RM', driver='broadlink',
+                         lan=True)
+        recorder.command_map = {'EE:FF': ['TV power']}
+        app.controller = recorder
+        app._devices = [blaster]
+        panel = gui.ControlPanel(app)
+
+        _row, labels = menu_row(lambda: panel._edit_device(blaster),
+                                'Commands')
+        self.assertIn('Commands (1 learned)...', labels)
+
+    def test_a_satellite_copies_the_clip_lists_down(self):
+        """A step naming a clip is checked against the list before the wire,
+        so a satellite without it would refuse every announcement."""
+        import satellite
+
+        self.assertIn('speaker_clips.json', satellite.SHARED_FILES)
+
+    def test_the_app_reloads_clips_another_process_wrote(self):
+        """The service searches; the menus must see the new clip."""
+        from paragon_home import ParagonHome
+        import addon_utils as utils
+
+        app = ParagonHome()
+        app.reload_changed()
+        utils.write_json(app.CLIP_FILE, {'AA:BB': ['new one']})
+
+        app.reload_changed()
+
+        self.assertEqual(app._clips, {'AA:BB': ['new one']})
+        self.assertIs(app.controller.driver('speaker').clips, app._clips)
+
+
+class TestThePiListener(unittest.TestCase):
+    """tools/paragon_speaker.py, run as the Pi runs it, against the real
+    transport -- so the two halves of the wire are held to each other."""
+
+    def setUp(self):
+        clean_profile()
+        for name in ('addon_utils', 'speaker_driver', 'speaker_lan'):
+            if name in sys.modules:
+                del sys.modules[name]
+        self.folder = tempfile.mkdtemp()
+        self.log = os.path.join(self.folder, 'played.log')
+        # A "player" that writes what it was handed. What matters is that
+        # the right file reached a player, not that anything was heard.
+        self.player = os.path.join(self.folder, 'player.sh')
+        with open(self.player, 'w') as handle:
+            handle.write('#!/bin/sh\necho "$1" >> "%s"\n' % self.log)
+        os.chmod(self.player, 0o755)
+        self.clips = os.path.join(self.folder, 'clips')
+        os.makedirs(self.clips)
+        for name in ('hardboiled complete.wav', 'goodnight.mp3',
+                     'notes.txt', 'Thumbs.db'):
+            with open(os.path.join(self.clips, name), 'wb') as handle:
+                handle.write(b'x')
+        self.discovery_port = _free_port()
+        self.port = _free_port()
+        self.proc = subprocess.Popen(
+            [sys.executable, os.path.join(ROOT, 'tools', 'paragon_speaker.py'),
+             '--name', 'Kitchen Speaker', '--folder', self.clips,
+             '--port', str(self.port), '--discovery-port',
+             str(self.discovery_port), '--id', 'AA:BB:CC:DD:EE:01',
+             '--player', self.player],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(self._stop)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                socket.create_connection(('127.0.0.1', self.port),
+                                         timeout=0.2).close()
+                break
+            except socket.error:
+                time.sleep(0.05)
+        import speaker_lan
+
+        self.transport = speaker_lan.SpeakerTransport(
+            bind_address='127.0.0.1', timeout=2.0)
+
+    def _stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        shutil.rmtree(self.folder, ignore_errors=True)
+        clean_profile()
+
+    def test_the_real_listener_answers_the_real_search(self):
+        found = self.transport.discover(
+            timeout=0.6, targets=[('127.0.0.1', self.discovery_port)])
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]['name'], 'Kitchen Speaker')
+        self.assertEqual(found[0]['port'], self.port)
+        # Named by filename, extension dropped, sorted; the .txt and the
+        # Thumbs.db are not clips.
+        self.assertEqual(found[0]['clips'],
+                         ['goodnight', 'hardboiled complete'])
+
+    def test_the_real_listener_plays_the_file_the_name_points_at(self):
+        self.transport.play('127.0.0.1', self.port, 'hardboiled complete')
+
+        deadline = time.time() + 3
+        while time.time() < deadline and not os.path.exists(self.log):
+            time.sleep(0.05)
+        with open(self.log) as handle:
+            played = handle.read().strip()
+        self.assertEqual(played,
+                         os.path.join(self.clips, 'hardboiled complete.wav'))
+
+    def test_the_listener_answers_the_hello_and_nothing_else(self):
+        """The discovery port is a broadcast port. Answering every datagram
+        that lands on it would make the Pi a reply-to-anything on the LAN."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.6)
+        try:
+            for junk in (b'hello?', b'PARAGON_SPEAKER', b'{"paragon":"x"}',
+                         b''):
+                sock.sendto(junk, ('127.0.0.1', self.discovery_port))
+            with self.assertRaises(socket.timeout):
+                sock.recvfrom(4096)
+            sock.sendto(b'PARAGON_SPEAKER?', ('127.0.0.1',
+                                                self.discovery_port))
+            data, _sender = sock.recvfrom(4096)
+        finally:
+            sock.close()
+        self.assertEqual(json.loads(data.decode('utf-8'))['paragon'],
+                         'speaker')
+
+    def test_a_name_is_looked_up_never_joined_onto_a_path(self):
+        """A request for a path is a request for a clip that does not exist."""
+        import speaker_lan
+
+        for name in ('../player.sh', '/etc/passwd', 'notes', 'goodnight.mp3'):
+            with self.assertRaises(speaker_lan.SpeakerError) as caught:
+                self.transport.play('127.0.0.1', self.port, name)
+            self.assertIn('404', str(caught.exception), name)
+        self.assertFalse(os.path.exists(self.log), 'something was played')
 
 
 class TestLongPauses(unittest.TestCase):

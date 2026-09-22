@@ -54,7 +54,7 @@ BACK = -1
 # appears, after these, under its own name.
 DRIVER_ORDER = ('govee', 'broadlink', 'tuya', 'kasa')
 DRIVER_LABELS = {'govee': 'Govee', 'broadlink': 'Broadlink',
-                 'tuya': 'Tuya', 'kasa': 'Kasa'}
+                 'tuya': 'Tuya', 'kasa': 'Kasa', 'speaker': 'Speaker'}
 
 HIGHLIGHT_COLOR = (255, 0, 255)
 HIGHLIGHT_BRIGHTNESS = 100
@@ -1688,9 +1688,13 @@ class ControlPanel(object):
 
         if emitter:
             # An IR blaster has no light to flash and nothing to identify by,
-            # so its menu is about the codes it knows instead.
-            rows.append(('Commands (%d learned)...'
-                         % len(self.app.controller.commands(device)),
+            # so its menu is about the codes it knows instead. A speaker's
+            # are clips it was given, not commands it learned, and the row
+            # says which so nobody goes looking for a Learn that is not there.
+            count = len(self.app.controller.commands(device))
+            rows.append((('Commands (%d learned)...' % count
+                          if hasattr(driver, 'start_learning')
+                          else 'Clips (%d)...' % count),
                          lambda: self.command_menu(device)))
         else:
             # The keys travel down from the master with everything else, so
@@ -3328,11 +3332,17 @@ class ControlPanel(object):
             # A satellite copies the codes down from the master along with
             # everything else, so it can fire them and nothing more.
             owns = self.app.owns_data
+            # Only a driver that can learn is offered a Learn row. A speaker
+            # emits what it was given -- its clips are files on the Pi --
+            # and a row that led to a learning mode it does not have would be
+            # a row that says no when pressed.
+            learns = hasattr(self.app.controller.driver_for(device),
+                             'start_learning')
             # Named rather than counted. What follows the codes has grown
             # from one row to three, and every version of this that worked
             # out which by subtracting broke the first time it did.
             extras = []
-            if owns:
+            if owns and learns:
                 extras.append(('Learn a new command...',
                                lambda: self.learn_command(device)))
                 extras.append(('Learn an RF command...',

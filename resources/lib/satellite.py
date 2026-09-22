@@ -55,6 +55,10 @@ SHARED_FILES = (
     'palette.json',
     'tuya_keys.json',
     'broadlink_codes.json',
+    # Which clips each speaker holds. A sequence step naming one is checked
+    # against this before anything goes on the wire, so a satellite without
+    # it would refuse every announcement the master can make.
+    'speaker_clips.json',
 )
 
 # What a satellite never copies: the master's reracks and its record of what
@@ -126,7 +130,7 @@ def pull(master_ip, run=None, write=None, wanted=None):
             # palette.json until the colours are first edited. Neither is a
             # problem worth showing.
             if name in ('tuya_keys.json', 'palette.json',
-                        'broadlink_codes.json'):
+                        'broadlink_codes.json', 'speaker_clips.json'):
                 continue
             problems.append('%s could not be read' % name)
             continue

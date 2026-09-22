@@ -20,6 +20,11 @@ Built for **Kodi 17.6 (Krypton)** — `xbmc.python 2.25.0`, Python 2.7.
 
 * **Govee lights** over the Govee LAN protocol, the Govee cloud API, or both —
   power, brightness, RGB colour and colour temperature.
+* **Speakers** — a Raspberry Pi with a speaker on it, running one script,
+  that plays a named audio file as a step in a sequence. *"The eggs are
+  done"* in the kitchen, fifteen minutes after you walked away. Nothing is
+  learned or uploaded: the Pi that plays the message is the one place the
+  message lives.
 * **Broadlink RM blasters** — learn an infrared or radio code from a remote
   and send it back, over the LAN with no Broadlink account. Radio needs a
   Pro-class blaster; a Mini has no transmitter for it.
@@ -1345,6 +1350,105 @@ again, then run a search.
 Paragon Home stores **what discovery found**, never what the router intends.
 So a refresh that finds a blaster still on its old address correctly writes
 down the old address. Nothing is stuck; it is recording what is true.
+
+---
+
+## Speakers (Raspberry Pi)
+
+**A speaker is a blaster that emits sound.** It has no state to read and
+nothing to switch; what it has is a set of named things it can emit, and a
+step that says *emit this one on that device*. So it claims the one capability
+a Broadlink claims, and its **clips are its commands**:
+
+```
+3. Kitchen Speaker: hardboiled complete
+```
+
+built with the same picker you use for TV remote codes. Everything that
+already knows what to do with a command — the sequence editor, nesting, the
+speed dial, a phrase, the web remote, **Last run** — works on a speaker
+without learning that it is one. A speaker that is unplugged fails the way a
+plug that is unplugged fails, and says so in the same words.
+
+Each step names **one** speaker, the way each step names one plug. Two
+messages in the bedtime sequence go to the bedroom Pi; the kitchen and office
+are no more involved than the office plug is when you switch the bedroom lamp.
+
+### Setting up a Pi
+
+Any Pi with a speaker plugged in — a Zero 2 W is plenty. Copy
+`tools/paragon_speaker.py` onto it and run:
+
+```
+python3 paragon_speaker.py --name "Kitchen Speaker" --folder ~/paragon-clips
+```
+
+Standard library only; nothing to install. It plays through whatever is
+present — `aplay` for WAV (on every Raspberry Pi OS), `mpg123` for MP3.
+
+**Drop audio files in the folder.** Each one is a clip named by its filename
+with the extension dropped: `hardboiled complete.wav` is the clip
+`hardboiled complete`. Then **Refresh devices** on the Kodi box. The speaker
+appears under its own kind, and its clips appear in the step picker.
+
+**Adding a message is copying a file.** Nothing to edit in Kodi, nothing to
+learn, nothing to sync. The next search picks up the new name. That is also
+why each message should live only on the Pi that plays it: the picker then
+cannot offer you an impossible step, because choosing `Bedroom Speaker` shows
+you what the bedroom Pi actually has.
+
+To keep it running across reboots, a systemd unit:
+
+```
+[Unit]
+Description=Paragon speaker
+After=network-online.target sound.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/paragon_speaker.py --name "Kitchen Speaker" --folder /home/pi/paragon-clips
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### How it is reached
+
+Two ports, both on the LAN, nothing leaving the house:
+
+| | |
+|---|---|
+| UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and clips |
+| HTTP 8766 | `GET /clips` lists them; `POST /play` starts one |
+
+The clip list rides along in the discovery reply, so **one search is one
+complete answer** — which is why a refresh is what picks up a new file. The
+lists are kept in `speaker_clips.json` the way learned IR codes are kept, so
+the menus offer clips without a network call, and a satellite gets them with
+everything else.
+
+**Playing does not wait for the clip to end.** A step that plays a ten-second
+message and then switches a plug off should not sit out the ten seconds unless
+told to — and if it should, that is what a pause on the step is for, and it
+works the same as everywhere else. Two clips in a row: put a pause on the first
+as long as it plays for.
+
+**Test connection** on a speaker asks it what it can play, over the HTTP path a
+command takes — the hello proves the Pi is on the network; this proves the
+half that `play` goes through — and refreshes the clip list while it is there.
+
+**A clip the speaker does not have is refused by name, before anything goes on
+the wire.** The Pi would refuse it too, as `HTTP 404`; this says which clip on
+which speaker, and it is what stands between a sequence and a message that
+was renamed on the Pi last week.
+
+### On the Pi, a name is never a path
+
+The clip name in a request is looked up in a listing of the folder, never
+joined onto a path. A request for `../../etc/passwd` is a request for a clip
+that does not exist, and nothing more — the same rule the web remote's route
+table follows, for the same reason.
 
 ---
 

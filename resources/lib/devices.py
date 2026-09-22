@@ -582,6 +582,20 @@ def build_hub(settings):
             save_codes=settings.get('save_broadlink_codes'),
             log_func=settings.get('log_func')))
 
+    if settings.get('speaker_enabled', True):
+        # A speaker is a blaster that emits sound: same capability, same
+        # step, and its clips are kept the way learned codes are.
+        from speaker_driver import SpeakerDriver
+        from speaker_lan import SpeakerTransport
+        drivers.append(SpeakerDriver(
+            transport=SpeakerTransport(
+                bind_address=settings.get('bind_address', ''),
+                timeout=settings.get('speaker_timeout', 5),
+                log_func=settings.get('log_func')),
+            clips=settings.get('speaker_clips'),
+            save_clips=settings.get('save_speaker_clips'),
+            log_func=settings.get('log_func')))
+
     # Off unless this box has been told otherwise. A house has several Kodi
     # boxes and they all show the same menus, so the question is not "may this
     # house unlock the front door" but "may it be unlocked from this room".
