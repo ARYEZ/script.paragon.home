@@ -28,6 +28,13 @@ from speaker_lan import COMMAND_PORT, SpeakerError, SpeakerTransport
 
 CLIP_FILE = 'speaker_clips.json'
 
+# The one command every speaker has that is not a clip. Offered first in the
+# list, so it is a step, a dial slot and a phrase like any clip is -- "Aurora,
+# stop the music" costs nothing more than any other phrase. A clip that
+# happens to be named this is hidden rather than fought over; the verb wins,
+# and the README says not to name one that.
+STOP = 'Stop'
+
 
 class SpeakerDriver(object):
     """Finds speakers and plays their clips."""
@@ -80,7 +87,9 @@ class SpeakerDriver(object):
         return set([CAP_COMMANDS])
 
     def commands(self, device):
-        return list(self.clips.get(device.device_id, []))
+        """Stop, then the clips. Stop is always there, clips or no clips."""
+        return [STOP] + [name for name in self.clips.get(device.device_id, [])
+                         if name != STOP]
 
     # -- commands ----------------------------------------------------------
 
@@ -101,6 +110,15 @@ class SpeakerDriver(object):
         which clip and which speaker -- and it is what stands between a
         sequence and a message that was renamed on the Pi last week.
         """
+        if name == STOP:
+            try:
+                stopped = self.transport.stop(device.ip, self._port(device))
+            except SpeakerError as exc:
+                raise ControlError('%s: %s' % (device.name, exc))
+            self._log('Stopped %s on %s' % ('"%s"' % stopped if stopped
+                                            else 'nothing', device.name))
+            return True
+
         known = self.commands(device)
         if name not in known:
             raise ControlError('%s has no clip called "%s"'

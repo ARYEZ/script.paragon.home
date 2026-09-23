@@ -22,11 +22,18 @@ Two things listen:
     UDP  8765   discovery. Paragon Home broadcasts PARAGON_SPEAKER? and this
                 answers with who it is and what it can play.
     HTTP 8766   GET  /clips            -> {"clips": [...]}
-                POST /play {"clip": n} -> {"ok": true}, having started it
+                POST /play {"clip": n} -> {"ok": true, "stopped": prev},
+                                          having started it
+                POST /stop             -> {"ok": true, "stopped": name}
 
-Playback starts and the request returns; it does not wait for the clip to
-end. A pause on the step in Paragon Home is how two clips are kept apart,
-the same way a pause spaces anything else.
+One thing plays at a time. Starting a clip stops whatever was playing, and
+says which, so "the eggs are done" lands when it was sent rather than after
+an hour of whatever album was on. Playback starts and the request returns;
+it does not wait for the clip to end. A pause on the step in Paragon Home is
+how two clips are kept apart, the same way a pause spaces anything else.
+
+Stopping the listener stops the player with it: a service restart must not
+leave an hour of music running with nothing left that can end it.
 
 Standard library only, so it runs on a fresh Raspberry Pi OS with nothing
 installed. Playback shells out to whichever player is present: aplay for
@@ -41,6 +48,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -131,6 +139,44 @@ class Speaker(object):
         self.device_id = device_id or stable_id()
         self.log = log
         self.player = player
+        # The one thing playing, if anything: the process and the clip name.
+        # Guarded, because the HTTP handler and the shutdown path both
+        # touch it.
+        self._lock = threading.Lock()
+        self._proc = None
+        self._playing = None
+
+    def now_playing(self):
+        """The clip playing right now, or None. A finished player is let go."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is not None:
+                self._proc = None
+                self._playing = None
+            return self._playing
+
+    def stop(self):
+        """End whatever is playing. Returns the clip name, or None.
+
+        Terminate, then kill: a player that ignores the polite request for
+        half a second gets the other one. Nothing here waits longer than
+        that, because the request that asked is still open.
+        """
+        with self._lock:
+            proc, name = self._proc, self._playing
+            self._proc, self._playing = None, None
+        if proc is None or proc.poll() is not None:
+            return None
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=0.5)
+        except OSError:
+            pass
+        self.log('Stopped "%s"' % name)
+        return name
 
     def hello(self):
         return json.dumps({
@@ -142,28 +188,34 @@ class Speaker(object):
         }).encode('utf-8')
 
     def play(self, name):
-        """Start a clip. Returns (HTTP status, message).
+        """Start a clip, stopping whatever was playing.
+
+        Returns (HTTP status, message, what was stopped or None).
 
         404 is "no such clip" and nothing else. A clip that is there but
         cannot be played is a fault on this Pi, not a name Paragon Home got
         wrong, and the two need different responses -- one is fixed by a
-        search, the other by apt-get.
+        search, the other by apt-get. Neither of those stops what is playing:
+        a request that could not be honoured should not cost the music.
         """
         path = self.folder.path_for(name)
         if path is None:
-            return 404, 'no clip called "%s"' % name
+            return 404, 'no clip called "%s"' % name, None
         command = player_for(path, self.player)
         if command is None:
             return 503, 'nothing installed can play %s' % \
-                os.path.basename(path)
+                os.path.basename(path), None
+        stopped = self.stop()
         try:
-            subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
         except OSError as exc:
-            return 503, 'could not start %s: %s' % (command[0], exc)
+            return 503, 'could not start %s: %s' % (command[0], exc), stopped
+        with self._lock:
+            self._proc, self._playing = proc, name
         self.log('Playing "%s"' % name)
-        return 200, 'playing'
+        return 200, 'playing', stopped
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -184,7 +236,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {'error': 'no such path'})
 
     def do_POST(self):
-        if self.path.split('?')[0] != '/play':
+        path = self.path.split('?')[0]
+        if path == '/stop':
+            stopped = self.server.speaker.stop()
+            self._send(200, {'ok': True, 'stopped': stopped})
+            return
+        if path != '/play':
             self._send(404, {'error': 'no such path'})
             return
         try:
@@ -197,9 +254,10 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             self._send(400, {'error': 'no clip named'})
             return
-        status, message = self.server.speaker.play(name)
+        status, message, stopped = self.server.speaker.play(name)
         ok = status == 200
-        self._send(status, {'ok': ok, 'error': '' if ok else message})
+        self._send(status, {'ok': ok, 'error': '' if ok else message,
+                            'stopped': stopped})
 
     def log_message(self, fmt, *args):
         # Quiet: one line per play from Speaker.play is plenty.
@@ -271,6 +329,16 @@ def main(argv=None):
     server = HTTPServer(('', args.port), Handler)
     server.speaker = speaker
     speaker.log('Taking commands on HTTP %d' % args.port)
+
+    # systemctl stop sends SIGTERM, and Python's answer to SIGTERM is to exit
+    # on the spot without running a finally -- which would leave the player
+    # running with nothing left that can stop it. Turned into the same unwind
+    # Ctrl+C gets, so a service restart ends the music the way a keyboard
+    # would.
+    def _terminated(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _terminated)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -278,6 +346,9 @@ def main(argv=None):
     finally:
         stop.set()
         server.server_close()
+        # A restart of this service must not orphan an hour of music with
+        # nothing left running that can stop it.
+        speaker.stop()
     return 0
 
 

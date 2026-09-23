@@ -14,7 +14,13 @@ shape of the ones already here:
     UDP  8765   discovery -- a hello goes out by broadcast, and each speaker
                 answers with who it is and which clips it holds
     HTTP 8766   commands  -- GET /clips says what it can play,
-                             POST /play {"clip": name} plays one
+                             POST /play {"clip": name} plays one,
+                             POST /stop ends whatever is playing
+
+One thing plays at a time on a speaker: starting a clip stops the last one,
+and the speaker says which. So an announcement lands when it was sent, not
+after whatever album was on, and there is a way to end an hour of music
+that was started by mistake.
 
 A clip is a file in a folder on the Pi, named by its filename with the
 extension dropped: drop "hardboiled complete.wav" in the folder and the next
@@ -252,3 +258,19 @@ class SpeakerTransport(object):
         if not isinstance(answer, dict) or not answer.get('ok'):
             raise SpeakerError('%s did not play "%s"' % (ip, name))
         return True
+
+    def stop(self, ip, port=COMMAND_PORT):
+        """End whatever the speaker is playing. Returns its name, or None.
+
+        None is not a failure: a stop when nothing was playing is a stop
+        that has nothing to do, and a sequence that ends with one should not
+        report a fault for arriving to silence.
+        """
+        # An empty body rather than none: urllib sends a request with no
+        # data as a GET, and /stop is a POST. A stop that arrived as a GET
+        # would be answered 404 and read here as a dead speaker.
+        answer = self._call(ip, port, '/stop', {})
+        if not isinstance(answer, dict) or not answer.get('ok'):
+            raise SpeakerError('%s did not stop' % ip)
+        stopped = answer.get('stopped')
+        return to_text(stopped) if stopped else None

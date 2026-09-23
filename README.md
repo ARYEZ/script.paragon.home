@@ -1420,7 +1420,7 @@ Two ports, both on the LAN, nothing leaving the house:
 | | |
 |---|---|
 | UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and clips |
-| HTTP 8766 | `GET /clips` lists them; `POST /play` starts one |
+| HTTP 8766 | `GET /clips` lists them; `POST /play` starts one, stopping the last; `POST /stop` ends it |
 
 The clip list rides along in the discovery reply, so **one search is one
 complete answer** — which is why a refresh is what picks up a new file. The
@@ -1433,6 +1433,23 @@ message and then switches a plug off should not sit out the ten seconds unless
 told to — and if it should, that is what a pause on the step is for, and it
 works the same as everywhere else. Two clips in a row: put a pause on the first
 as long as it plays for.
+
+**One thing plays at a time, and starting a clip stops the last one.** Not
+queued behind it: an announcement lands when it was sent, not after an hour
+of whatever album was on. So a speaker is as happy with albums as with
+five-second clips — `Beacon1: Stargazer` starts the album, and
+`Beacon1: hardboiled complete` cuts in over it when the eggs are done.
+
+**`Stop` is the first command on every speaker**, before its clips, so it is
+a step, a dial slot and a phrase like any clip is — *"Aurora, stop the
+music"* costs no more than any other phrase. Stopping when nothing is playing
+is not a fault. Don't name a clip `Stop`; the verb wins and the file is
+hidden.
+
+A request that cannot be honoured — a clip that is not there, a file nothing
+can play — does not stop what was playing. And stopping the listener stops
+the player with it: `sudo systemctl restart paragon-speaker` ends the music,
+rather than orphaning it with nothing left that can.
 
 **Test connection** on a speaker asks it what it can play, over the HTTP path a
 command takes — the hello proves the Pi is on the network; this proves the

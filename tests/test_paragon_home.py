@@ -19,6 +19,7 @@ import io
 import os
 import re
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -4631,6 +4632,11 @@ class FakeSpeaker(object):
         self.played = []
         self.hellos = 0
         self.refuse_play = False
+        # What is "playing" now, so a play or a stop can say what it ended.
+        self.playing = None
+        self.stops = 0
+        # A 200 with this body instead of {"ok": true, ...} on /stop.
+        self.stop_answer = None
         # How many hellos to ignore before answering: a Pi busy playing
         # something misses a datagram, and the search must not give up.
         self.miss_hellos = 0
@@ -4657,9 +4663,16 @@ class FakeSpeaker(object):
 
             def do_POST(self):
                 length = int(self.headers.get('Content-Length') or 0)
-                body = json.loads(self.rfile.read(length).decode('utf-8'))
+                body = json.loads(self.rfile.read(length).decode('utf-8')
+                                  or '{}')
                 name = body.get('clip')
-                if self.path != '/play':
+                if self.path == '/stop' and speaker.stop_answer is not None:
+                    self._send(200, speaker.stop_answer)
+                elif self.path == '/stop':
+                    speaker.stops += 1
+                    stopped, speaker.playing = speaker.playing, None
+                    self._send(200, {'ok': True, 'stopped': stopped})
+                elif self.path != '/play':
                     self._send(404, {'error': 'no such path'})
                 elif speaker.play_answer is not None:
                     self._send(200, speaker.play_answer)
@@ -4670,8 +4683,10 @@ class FakeSpeaker(object):
                     self._send(404, {'ok': False,
                                      'error': 'no clip called "%s"' % name})
                 else:
+                    stopped, speaker.playing = speaker.playing, name
                     speaker.played.append(name)
-                    self._send(200, {'ok': True, 'error': ''})
+                    self._send(200, {'ok': True, 'error': '',
+                                     'stopped': stopped})
 
             def log_message(self, fmt, *args):
                 pass
@@ -4792,7 +4807,7 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertEqual(devices[0].driver_data.get('port'), self.pi.port,
                          'the command port did not travel with the device')
         self.assertEqual(driver.commands(devices[0]),
-                         ['hardboiled complete', 'goodnight'])
+                         ['Stop', 'hardboiled complete', 'goodnight'])
 
     def test_a_search_writes_the_clip_list_down(self):
         """So the menus can offer clips with no network call, and so that a
@@ -4953,6 +4968,92 @@ class TestTheSpeaker(unittest.TestCase):
             self.assertRaises(ControlError, verb)
         self.assertIsNone(driver.get_state(self.device()))
 
+    # -- stopping ----------------------------------------------------------
+
+    def test_stop_is_the_first_command_on_every_speaker(self):
+        """A step, a dial slot and a phrase, like any clip -- and there even
+        when the folder is empty, because a stop needs no clips."""
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        self.assertEqual(driver.commands(self.device()), [STOP, 'goodnight'])
+        self.assertEqual(driver.commands(Device('NO:CLIPS', driver='speaker')),
+                         [STOP])
+
+    def test_stop_reaches_the_speaker_and_plays_nothing(self):
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+        self.pi.playing = 'goodnight'
+
+        self.assertTrue(driver.send_command(self.device(), STOP))
+
+        self.assertEqual(self.pi.stops, 1)
+        self.assertEqual(self.pi.played, [], 'stop played something')
+        self.assertIsNone(self.pi.playing)
+
+    def test_stopping_silence_is_not_a_fault(self):
+        """A sequence that ends with Stop must not fail for arriving to
+        nothing playing."""
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        self.assertTrue(driver.send_command(self.device(), STOP))
+        self.assertEqual(self.pi.stops, 1)
+
+    def test_stop_on_a_dead_speaker_fails_by_name(self):
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+        gone = Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': _free_port()})
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(gone, STOP)
+
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+
+    def test_a_200_that_does_not_say_ok_is_not_a_stop(self):
+        """The same contract play is held to. Something else answering 200
+        on the port must not be reported as the music having stopped."""
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['goodnight']})
+
+        for body in ([], {'ok': False}, {'stopped': 'goodnight'}):
+            self.pi.stop_answer = body
+            with self.assertRaises(ControlError, msg=repr(body)):
+                driver.send_command(self.device(), STOP)
+
+    def test_a_clip_named_stop_cannot_shadow_the_verb(self):
+        """The verb wins. A file called Stop.wav is hidden, not fought over:
+        two rows both reading Stop, one of which plays something, is worse
+        than one clip that cannot be reached."""
+        from speaker_driver import STOP
+
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['Stop', 'goodnight']})
+        self.pi.clips = ['Stop', 'goodnight']
+
+        self.assertEqual(driver.commands(self.device()), [STOP, 'goodnight'])
+        driver.send_command(self.device(), STOP)
+        self.assertEqual(self.pi.played, [], 'the clip played, not the verb')
+        self.assertEqual(self.pi.stops, 1)
+
+    def test_playing_over_something_replaces_it(self):
+        """Not queued behind it. An announcement lands when it was sent,
+        not after an hour of whatever album was on."""
+        driver = self.driver({'AA:BB:CC:DD:EE:01': ['album', 'eggs done']})
+        self.pi.clips = ['album', 'eggs done']
+
+        driver.send_command(self.device(), 'album')
+        driver.send_command(self.device(), 'eggs done')
+
+        self.assertEqual(self.pi.played, ['album', 'eggs done'])
+        self.assertEqual(self.pi.playing, 'eggs done')
+
     # -- test connection ---------------------------------------------------
 
     def test_test_connection_asks_over_the_path_a_command_takes(self):
@@ -4965,7 +5066,7 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('hardboiled complete', message)
         self.assertEqual(driver.commands(self.device()),
-                         ['hardboiled complete', 'goodnight'])
+                         ['Stop', 'hardboiled complete', 'goodnight'])
         self.assertEqual(self.saved, [True])
 
     def test_test_connection_on_a_dead_speaker_reports_rather_than_raises(self):
@@ -5103,9 +5204,23 @@ class TestThePiListener(unittest.TestCase):
         self.log = os.path.join(self.folder, 'played.log')
         # A "player" that writes what it was handed. What matters is that
         # the right file reached a player, not that anything was heard.
+        # Logs the file it was handed, then stays alive as a real player
+        # would for the length of the track, so that "the last one was
+        # stopped" is a fact about a process and not about a log line.
         self.player = os.path.join(self.folder, 'player.sh')
+        self.pids = os.path.join(self.folder, 'pids.log')
+        # It stays a shell rather than exec-ing the sleep, so it can trap
+        # TERM: a player asked politely logs that it was, and ends its own
+        # child. One that is SIGKILLed logs nothing. aplay on a SIGKILL can
+        # leave ALSA mid-buffer with a pop, so polite-first is worth holding.
+        self.signals = os.path.join(self.folder, 'signals.log')
         with open(self.player, 'w') as handle:
-            handle.write('#!/bin/sh\necho "$1" >> "%s"\n' % self.log)
+            handle.write(
+                '#!/bin/sh\necho "$1" >> "%s"\necho $$ >> "%s"\n'
+                'trap \'echo term >> "%s"; kill $child 2>/dev/null; '
+                'exit 0\' TERM\n'
+                'sleep 60 & child=$!\nwait $child\n'
+                % (self.log, self.pids, self.signals))
         os.chmod(self.player, 0o755)
         self.clips = os.path.join(self.folder, 'clips')
         os.makedirs(self.clips)
@@ -5142,8 +5257,35 @@ class TestThePiListener(unittest.TestCase):
             self.proc.wait(timeout=3)
         except Exception:
             self.proc.kill()
+        # Whatever the listener left playing must not outlive it. Reaped here
+        # too so a failing test cannot leave a sleep behind.
+        for pid in self._player_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
         shutil.rmtree(self.folder, ignore_errors=True)
         clean_profile()
+
+    def _player_pids(self):
+        try:
+            with open(self.pids) as handle:
+                return [int(line) for line in handle if line.strip()]
+        except (IOError, OSError):
+            return []
+
+    def _alive(self, pid):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def _wait_for_pids(self, count, seconds=3):
+        deadline = time.time() + seconds
+        while time.time() < deadline and len(self._player_pids()) < count:
+            time.sleep(0.05)
+        return self._player_pids()
 
     def test_the_real_listener_answers_the_real_search(self):
         found = self.transport.discover(
@@ -5186,6 +5328,83 @@ class TestThePiListener(unittest.TestCase):
             sock.close()
         self.assertEqual(json.loads(data.decode('utf-8'))['paragon'],
                          'speaker')
+
+    def test_playing_a_second_clip_ends_the_first_one_s_player(self):
+        """One thing at a time, and it is the process that ends -- the
+        sound stops, not only the bookkeeping."""
+        self.transport.play('127.0.0.1', self.port, 'hardboiled complete')
+        first = self._wait_for_pids(1)[0]
+        self.assertTrue(self._alive(first), 'the first player never ran')
+
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pids = self._wait_for_pids(2)
+
+        self.assertEqual(len(pids), 2)
+        deadline = time.time() + 2
+        while time.time() < deadline and self._alive(first):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(first), 'the first clip kept playing')
+        self.assertTrue(self._alive(pids[1]), 'the second one did not')
+
+    def test_stop_ends_the_player_and_says_what_it_ended(self):
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pid = self._wait_for_pids(1)[0]
+
+        stopped = self.transport.stop('127.0.0.1', self.port)
+
+        self.assertEqual(stopped, 'goodnight')
+        deadline = time.time() + 2
+        while time.time() < deadline and self._alive(pid):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(pid), 'stop left it playing')
+
+    def test_stop_asks_politely_before_it_kills(self):
+        """TERM first, so a player can end cleanly; KILL only for one that
+        ignores it. A player that was SIGKILLed never runs its trap."""
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pid = self._wait_for_pids(1)[0]
+
+        self.transport.stop('127.0.0.1', self.port)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not os.path.exists(self.signals):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(self.signals),
+                        'the player was killed without being asked')
+        with open(self.signals) as handle:
+            self.assertEqual(handle.read().strip(), 'term')
+        self.assertFalse(self._alive(pid))
+
+    def test_stopping_silence_says_nothing_was_stopped(self):
+        self.assertIsNone(self.transport.stop('127.0.0.1', self.port))
+
+    def test_a_clip_that_cannot_be_played_does_not_cost_the_music(self):
+        """A refused request must not stop what was playing."""
+        import speaker_lan
+
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pid = self._wait_for_pids(1)[0]
+
+        with self.assertRaises(speaker_lan.SpeakerError):
+            self.transport.play('127.0.0.1', self.port, 'no such clip')
+
+        self.assertTrue(self._alive(pid), 'a 404 stopped the music')
+
+    def test_stopping_the_listener_stops_the_player_too(self):
+        """systemctl stop sends SIGTERM. Left to itself Python exits on the
+        spot with the player still running and nothing that can end it."""
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pid = self._wait_for_pids(1)[0]
+        self.assertTrue(self._alive(pid))
+
+        self.proc.terminate()
+        self.proc.wait(timeout=3)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and self._alive(pid):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(pid),
+                         'the service stopped and the music did not')
 
     def test_a_name_is_looked_up_never_joined_onto_a_path(self):
         """A request for a path is a request for a clip that does not exist."""
