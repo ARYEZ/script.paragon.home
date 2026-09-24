@@ -1,0 +1,89 @@
+# Handoff — where Paragon Home stands
+
+Read this first in a new session, then `CLAUDE.md` for how to work here.
+
+## Who and what
+
+Aryez runs the **Paragon TV Project**: Kodi 17.6 (Krypton) add-ons, Python
+2.7 on the boxes, tests on Python 3 with `tests/kodistubs`. This repo is
+**Paragon Home**, the home-control add-on. `script.paragontv` is the sibling
+(the television half); it may need attaching to the session to read it.
+
+Kodi boxes: a master and satellites; the office box's web remote is on port
+8778. Unraid server DIVINITY at 10.0.0.39 serves the media over NFS.
+
+## Standing rules, in Aryez's words
+
+* *"I only need this to be accessible while on the LAN... not remotely."*
+* *"stop. Icon is perfect as is. dont mess with it"* (the Harvester icon).
+* A path is never built from what a caller asked for (the remote's route
+  table; on the Pi the clip name is looked up in a listing, never joined).
+* Tokens, keys, and any URL carrying one never reach a log.
+* *"yes push it to main"* — every release is pulled from `main`. Develop on
+  the session branch, push there, then push to `main`. The permission
+  classifier sometimes blocks the push to main; say so and Aryez says
+  "push to main" again.
+* *"yes use the narrower approach from now on"* — mutation runs narrowed
+  to the tests that could catch each mutant, re-run only survivors, full
+  suite once at the end, `-B` with `__pycache__` cleared. Remove equivalent
+  mutants. Watch for two guards covering each other; test them apart.
+* A phrase cannot unlock a door.
+* Nothing user-facing says "Speaker" any more: it is **Beacon**. The driver
+  id stays `speaker` (it is in every devices.json and step).
+
+## The beacon system (Aurora)
+
+Raspberry Pis with speakers, one script (`tools/paragon_speaker.py`), clips
+are files in `~/aurora` on each Pi, one clip = one file, named by filename.
+Pi user `aryez`, hostname `beacon1` (kitchen); beacon2 and beacon3 to come.
+Aryez copies from Windows with `scp -r aurora aryez@beacon1:` and restarts
+the systemd service `paragon-speaker`.
+
+v2.65.0 (this session's last release): beacons are players. mpv runs for
+the life of the script, driven over its IPC socket; `/status`, `/pause`,
+`/resume`, `/volume` beside `/play`, `/stop`, `/clips`. Without mpv: play
+and stop only, `controls: false`. The web remote has a **Beacons** tab
+(cards kept between polls; polls every 3 s while open; polls are not
+logged). Hub verbs `pause`, `resume`, `set_volume` gated on `CAP_PLAYBACK`.
+The beacon's seconds-in is `elapsed`, never `position` (a blind's).
+
+**Not yet confirmed on real hardware:** the mpv half was tested against
+`tests/fake_mpv.py`, a stand-in speaking mpv's protocol; this container
+cannot install mpv. Aryez was opening the Beacons tab as the session ended.
+First thing: ask whether play, pause, volume worked on beacon1. The Pi's
+startup log says `Playing through mpv` or `mpv is not installed`.
+
+Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
+text to a `say` endpoint on the web remote, matched by the phrase book
+(`voice.py`, exact match after normalisation, aliases per action).
+
+## Other releases this session
+
+* 2.64.0 — a device that gives no reading on a state read is looked for
+  (`Hub._find_the_silent`, driver `locate`); the service sweeps every 10
+  min and on startup; hold-off 5 min per silent device.
+* 2.64.1 — the web remote logs every action with the phone's address:
+  `Web remote: 10.0.0.37 asked for sequence "shutdown"`. Reads are not
+  logged.
+* Earlier: 2.59 (dial to 10 slots), 2.60 (menus re-read files; Broadlink
+  diagnostic), 2.60.1 (dial slot runs a sequence under its own name), 2.61
+  (phrase book), 2.62 (speakers), 2.63 (stop and replace).
+
+## Open threads
+
+* Aryez was reserving DHCP addresses for every device (Govee lights moved
+  after a router event; refresh fixed it). Broadlinks at 10.0.0.164 and
+  10.0.0.11 were failing all evening — probably moved to their new
+  reservations; Diagnose device search → Broadlink says HAS MOVED.
+* Bedroom TV backlight at 10.0.0.204: "No route to host" for hours.
+* Unraid: emhttpd hung (monitor exit 255, nginx upstream timeout); sshd
+  fixed with `/etc/rc.d/rc.sshd start` from the web terminal. Cause not
+  found; suggested syslog mirror to flash and Fix Common Problems.
+* At 00:29 Paragon TV's preset Phase 1 "Initial Shutdown" ran and then the
+  sequence **ignition** ran from a script invocation — looks backwards.
+* Offered, not taken: a blaster looked for after a failed send (like the
+  state-read heal, for devices with no state); Paragon TV NFO renamer
+  dry-run and real counts; SwitchBot K11+ Pro vacuum driver (API lists
+  K11+, not K11+ Pro).
+* Known gap: a satellite can never have a speed dial or phrase book
+  (`speeddial.json`, `phrases.json` not in `SHARED_FILES`).
