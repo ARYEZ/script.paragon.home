@@ -1721,6 +1721,23 @@ at a settings screen while typing into a phone. Then open
 `http://<that address>:8778`, enter the PIN once, and the phone stays signed in
 for a month.
 
+### Who asked
+
+Every action a phone sends is written to the Kodi log before it runs, with
+the phone's address and what it asked for:
+
+```
+Web remote: 10.0.0.37 asked for sequence "shutdown"
+Web remote: 10.0.0.52 asked for brightness 40 on "office lightstrip"
+Web remote: 10.0.0.52 asked for off everything
+```
+
+A sequence that ran at a quarter to three with nothing in the log before it
+was the remote, and until this line the log could not say which phone. The
+line names only the fields the action reads — the target, the name, the
+value, the slot — never the rest of what the page sent. Actions that never
+reach the loop, the TV buttons, are not logged.
+
 ### How it looks
 
 Like the rest of Paragon TV: near-black, the orange-to-red accent, the diagonal

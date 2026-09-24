@@ -388,11 +388,17 @@ class Gate(object):
 # ---------------------------------------------------------------------------
 
 class Job(object):
-    """One action, on its way to the loop and back."""
+    """One action, on its way to the loop and back.
 
-    def __init__(self, action, params):
+    `address` is the phone it came from, carried along so the loop can say
+    who asked when it writes the action to the log. A sequence that ran at
+    a quarter to three is a question, and "the remote" was not an answer.
+    """
+
+    def __init__(self, action, params, address=''):
         self.action = action
         self.params = params
+        self.address = address or ''
         self.done = threading.Event()
         self.result = None
 
@@ -418,9 +424,9 @@ class Commands(object):
         self._jobs = collections.deque()
         self._lock = threading.Lock()
 
-    def submit(self, action, params):
+    def submit(self, action, params, address=''):
         """Queue an action. Returns the Job, or None if it will not be run."""
-        job = Job(action, params)
+        job = Job(action, params, address)
         with self._lock:
             if self.closed or len(self._jobs) >= self.limit:
                 return None
@@ -489,6 +495,34 @@ def _perform_tv(what, params):
     else:
         return {'ok': False, 'message': 'Unknown television action'}
     return {'ok': ok, 'message': message}
+
+
+def describe_job(action, params):
+    """What a phone asked for, in a few words, for the log.
+
+    Built from the handful of fields an action reads and nothing else. The
+    payload is whatever the page sent, and a log line is not the place to
+    find out what that was.
+    """
+    params = params or {}
+    name = to_text(params.get('name') or params.get('value') or '')
+    target = to_text(params.get('target') or '')
+    quoted = '"%s"' % name if name else ''
+    if action in ('sequence', 'scene', 'cancel_sequence'):
+        return '%s %s' % (action.replace('_', ' '), quoted)
+    if action == 'dial':
+        return 'speed dial %s' % to_text(params.get('slot') or '?')
+    if action == 'command':
+        return 'command %s on %s' % (quoted, '"%s"' % target if target
+                                     else 'everything')
+    if action in ('on', 'off', 'toggle', 'brightness', 'color', 'temp',
+                  'position', 'lock', 'unlock'):
+        value = to_text(params.get('value') or '')
+        where = '"%s"' % target if target else 'everything'
+        if value:
+            return '%s %s on %s' % (action, value, where)
+        return '%s %s' % (action, where)
+    return action
 
 
 def perform(app, action, params, sleep_func=None, on_step=None):
@@ -1220,7 +1254,7 @@ class _Handler(BaseHTTPRequestHandler):
                 answer = {'ok': False, 'message': str(exc)}
             return self._send_json(200, answer)
 
-        job = remote.commands.submit(action, payload)
+        job = remote.commands.submit(action, payload, self.client_address[0])
         if job is None:
             return self._send_json(503, {
                 'ok': False, 'message': 'The service is busy. Try again.'})
@@ -1390,6 +1424,13 @@ class RemoteServer(object):
                             'message': 'A sequence is already running'})
                 ran += 1
                 continue
+
+            # Before it runs, so a run that hangs is still on record, and
+            # with who asked: what a phone did is otherwise invisible in
+            # the log, and a sequence at a quarter to three is a question.
+            utils.log('Web remote: %s asked for %s'
+                      % (job.address or 'a phone',
+                         describe_job(job.action, job.params)))
 
             claimed = job.action == 'sequence'
             if claimed:

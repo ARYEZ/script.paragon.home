@@ -16332,6 +16332,85 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(client.login(self.PIN)['status'], 200)
         return client
 
+    # -- who asked ---------------------------------------------------------
+
+    def test_what_a_phone_asked_for_is_logged_with_its_address(self):
+        """A sequence that ran at a quarter to three is a question, and the
+        log used to have no answer: the remote never said what it ran."""
+        import xbmc
+
+        client = self.signed_in()
+        del xbmc.LOG_LINES[:]
+
+        self.assertTrue(client.act('on', target='Desk Plug')['data']['ok'])
+
+        # Every line carries the add-on id in front; the sentence is what
+        # matters.
+        logged = [message.split(': ', 1)[1]
+                  for _level, message in xbmc.LOG_LINES if 'asked for' in message]
+        self.assertEqual(logged,
+                         ['Web remote: 127.0.0.1 asked for on "Desk Plug"'])
+
+    def test_the_line_is_written_before_the_action_runs(self):
+        """So a run that hangs is on record, not only one that came back."""
+        import xbmc
+
+        self.serve(run_loop=False)
+        order = []
+        real = self.lib.perform
+
+        def noting(app, action, params, **kwargs):
+            order.append('ran')
+            return real(app, action, params, **kwargs)
+
+        self.lib.perform = noting
+        original_log = xbmc.log
+
+        def watching(message, level=xbmc.LOGDEBUG):
+            if 'asked for' in message:
+                order.append('logged')
+            original_log(message, level)
+
+        xbmc.log = watching
+        try:
+            self.server.commands.submit('off', {'target': 'Desk Plug'},
+                                        '10.0.0.37')
+            self.server.pump(self.app)
+        finally:
+            self.lib.perform = real
+            xbmc.log = original_log
+
+        self.assertEqual(order, ['logged', 'ran'])
+
+    def test_the_description_names_the_thing_and_nothing_else(self):
+        describe = self.lib.describe_job
+
+        self.assertEqual(describe('sequence', {'name': 'shutdown'}),
+                         'sequence "shutdown"')
+        self.assertEqual(describe('scene', {'value': 'warshade'}),
+                         'scene "warshade"')
+        self.assertEqual(describe('cancel_sequence', {'name': 'Coffee'}),
+                         'cancel sequence "Coffee"')
+        self.assertEqual(describe('dial', {'slot': 3}), 'speed dial 3')
+        self.assertEqual(describe('command', {'name': 'TV Power',
+                                              'target': 'Hall Blaster'}),
+                         'command "TV Power" on "Hall Blaster"')
+        self.assertEqual(describe('brightness', {'value': 40,
+                                                 'target': 'Living Room'}),
+                         'brightness 40 on "Living Room"')
+        self.assertEqual(describe('off', {}), 'off everything')
+        self.assertEqual(describe('unlock', {'target': 'Front Door'}),
+                         'unlock "Front Door"')
+        self.assertEqual(describe('refresh', {}), 'refresh')
+        self.assertEqual(describe('states', None), 'states')
+
+        # Only the fields the action reads. Whatever else the page sent is
+        # not for the log.
+        text = describe('sequence', {'name': 'shutdown', 'pin': '424242',
+                                     'extra': 'SECRET'})
+        self.assertNotIn('424242', text)
+        self.assertNotIn('SECRET', text)
+
     # -- the page ----------------------------------------------------------
 
     def test_the_page_is_served_before_anyone_signs_in(self):
