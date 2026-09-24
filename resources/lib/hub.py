@@ -38,6 +38,12 @@ from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
 # what it is doing -- everything about how it looks is somebody else's job.
 POWER_ONLY_CAPABILITIES = frozenset([CAP_POWER, CAP_STATE])
 
+# How long a device that gave no reading is left alone before it is looked
+# for again. A light switched off at the wall is silent on every sweep, and
+# without this each one would cost a discovery -- three seconds for Govee,
+# six for Tuya -- every time somebody pulled to refresh.
+LOCATE_HOLDOFF = 300
+
 
 def narrow(capabilities, device):
     """A driver's answer, cut down by what the user has said about `device`.
@@ -58,7 +64,7 @@ class Hub(object):
     """The set of drivers, addressed as one device layer."""
 
     def __init__(self, drivers=None, log_func=None, allow_unlock=False,
-                 confirm_unlock=False):
+                 confirm_unlock=False, on_moved=None):
         # Whether this box may open a door. One flag, checked in one place, so
         # that the menus, the web remote and a sequence are all answered the
         # same way and none of them can be the exception. Off unless the box
@@ -93,6 +99,15 @@ class Hub(object):
         # remembered position surviving that would be a guess wearing the
         # clothes of a fact.
         self.last_told = {}
+        # Told which devices were just found at a new address, so whoever
+        # keeps the device list can write it down. The address is changed on
+        # the device object itself, here, because this is where the silence
+        # was noticed and the new address found; saving is not this layer's
+        # job.
+        self._on_moved = on_moved or (lambda devices: None)
+        # When each device was last looked for, by device id. See
+        # LOCATE_HOLDOFF.
+        self._looked_for = {}
 
     def _remember(self, device, **what):
         """Note what a device was just told, after it accepted it."""
@@ -294,12 +309,17 @@ class Hub(object):
             return None
         return driver.get_state(device)
 
-    def get_states(self, devices, timeout=3.0):
+    def get_states(self, devices, timeout=3.0, now=None):
         """Read many devices at once, letting each driver batch its own.
 
         Grouping by driver is what keeps the Govee bulk sweep -- one socket,
         one timeout for all 25 bulbs -- rather than degrading to one round
         trip per device once a second vendor is present.
+
+        A device that gave no reading is then looked for -- see
+        _find_the_silent -- so a light that came back from a router reboot
+        on a different address is mended by the next read rather than by
+        somebody noticing ten dead lights and pressing Refresh devices.
         """
         states = {}
         by_driver = {}
@@ -319,7 +339,81 @@ class Hub(object):
                 self._log('%s state read failed: %s' % (driver_id, exc))
                 for device in group:
                     states.setdefault(device.device_id, None)
+            self._find_the_silent(driver, group, states, timeout, now)
         return states
+
+    # -- devices that moved ------------------------------------------------
+
+    def can_locate(self, device):
+        """Whether a device that went quiet is one this layer can look for.
+
+        Three things have to hold: its driver can say where its devices are
+        on the LAN, it has an address to be wrong about, and it is a device
+        that answers when asked -- a blaster or a speaker reports no state,
+        and silence from one of those is not a symptom.
+        """
+        driver = self.driver_for(device)
+        return driver is not None and hasattr(driver, 'locate') \
+            and bool(getattr(device, 'ip', '')) \
+            and CAP_STATE in self.capabilities(device)
+
+    def _find_the_silent(self, driver, group, states, timeout, now=None):
+        """Look for the devices in `group` that gave no reading.
+
+        A Govee command is a datagram with no reply, so a light that moved
+        to a new address fails silently: the send is reported as done and
+        nothing happens. The status sweep is the one place the silence can
+        be heard. So a device that answered nothing is asked for by its
+        driver's discovery, and if it turns up somewhere else its address is
+        changed and its state read again from there. Returns what moved.
+
+        A device found at the address it already had is left alone: it heard
+        the discovery and not the status request, which is a WiFi bulb
+        being a WiFi bulb. One that was not found at all is switched off, or
+        gone, and a refresh will say so.
+        """
+        moment = now if now is not None else time.time()
+        silent = []
+        for device in group:
+            if states.get(device.device_id) is not None:
+                continue
+            if not self.can_locate(device):
+                continue
+            last = self._looked_for.get(device.device_id)
+            if last is not None and moment - last < LOCATE_HOLDOFF:
+                continue
+            silent.append(device)
+        if not silent:
+            return []
+
+        for device in silent:
+            self._looked_for[device.device_id] = moment
+        self._log('%d device(s) gave no reading; looking for them'
+                  % len(silent))
+        try:
+            where = driver.locate(silent, timeout=timeout) or {}
+        except Exception as exc:
+            self._log('%s could not look for its devices: %s'
+                      % (driver.DRIVER_ID, exc))
+            return []
+
+        moved = []
+        for device in silent:
+            ip = where.get(device.device_id)
+            if not ip or ip == device.ip:
+                continue
+            self._log('%s moved from %s to %s' % (device.name, device.ip, ip))
+            device.ip = ip
+            moved.append(device)
+        if not moved:
+            return []
+
+        try:
+            states.update(driver.get_states(moved, timeout=timeout))
+        except Exception as exc:
+            self._log('%s state read failed: %s' % (driver.DRIVER_ID, exc))
+        self._on_moved(moved)
+        return moved
 
     # -- Govee-specific passthrough ----------------------------------------
 

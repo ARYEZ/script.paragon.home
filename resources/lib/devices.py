@@ -343,6 +343,25 @@ class GoveeController(object):
         devices = sorted(merged.values(), key=lambda d: d.name.lower())
         return devices, warnings
 
+    def locate(self, devices, timeout=3.0):
+        """Where the listed devices are on the LAN right now: {id: ip}.
+
+        The LAN half of discovery and nothing else. The cloud does not know
+        an address, so asking it would spend a request from the daily
+        allowance to learn nothing -- and this is asked every time a light
+        gives no reading, which a light switched off at the wall does on
+        every sweep.
+        """
+        if not self.lan or self.mode == TRANSPORT_CLOUD:
+            return {}
+        wanted = set(device.device_id for device in devices)
+        where = {}
+        for raw in self.lan.discover(timeout=timeout):
+            device_id = (raw.get('device') or '').upper()
+            if device_id in wanted and raw.get('ip'):
+                where[device_id] = raw['ip']
+        return where
+
     # -- transport selection ----------------------------------------------
 
     def pick_transport(self, device):
@@ -601,4 +620,5 @@ def build_hub(settings):
     # house unlock the front door" but "may it be unlocked from this room".
     return Hub(drivers=drivers, log_func=settings.get('log_func'),
                allow_unlock=bool(settings.get('allow_unlock', False)),
-               confirm_unlock=bool(settings.get('confirm_unlock', False)))
+               confirm_unlock=bool(settings.get('confirm_unlock', False)),
+               on_moved=settings.get('on_moved'))

@@ -66,6 +66,7 @@ class ParagonHome(object):
         settings['switchbot_secret'] = utils.get_setting('switchbot_secret')
         settings['allow_unlock'] = utils.get_bool('allow_unlock', False)
         settings['confirm_unlock'] = utils.get_bool('confirm_unlock', False)
+        settings['on_moved'] = self.devices_moved
         self.controller = build_hub(settings)
         self._devices = None
         self._scenes = None
@@ -448,6 +449,36 @@ class ParagonHome(object):
                   % (len(found), len(missing), len(self._devices)))
         self.last_refresh_missing = len(missing)
         return self._devices, warnings
+
+    def devices_moved(self, moved):
+        """The hub found these at a new address; write the list down.
+
+        The addresses were already changed on the device objects, which are
+        the ones in this list, so this is the save and the log line. A
+        satellite writes too: devices.json is a cache of where things are,
+        and a satellite that could not update it would be the one box still
+        dialling the old address -- see save_devices.
+        """
+        for device in moved:
+            utils.log('%s is now at %s' % (device.name, device.ip))
+        return self.save_devices()
+
+    def check_addresses(self, timeout=3.0):
+        """Ask the LAN devices whether they are where we think they are.
+
+        Returns the devices that turned out to have moved. The asking is a
+        state sweep of the devices the hub could look for if one went quiet
+        -- and only those: a cloud light or a blind is a cloud request each,
+        and there is no address to be wrong about.
+        """
+        watched = [device for device in self.enabled_devices
+                   if self.controller.can_locate(device)]
+        if not watched:
+            return []
+        before = dict((device.device_id, device.ip) for device in watched)
+        self.controller.get_states(watched, timeout=timeout)
+        return [device for device in watched
+                if device.ip != before[device.device_id]]
 
     # -- colour palette ----------------------------------------------------
 

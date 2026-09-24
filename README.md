@@ -97,6 +97,39 @@ and restart Kodi.
 Lights found on both transports are merged into one entry, and the friendly
 name you set in the Govee app is used.
 
+### If the lights stop answering after a router reboot
+
+A LAN command is a datagram sent to the address Paragon Home wrote down at the
+last search. It is fire-and-forget: the light does not reply, so a light that
+came back from a router reboot on a different address fails silently — the
+command is reported as sent and nothing happens. Ten lights doing that at
+once is a router that handed out new addresses.
+
+**Refresh devices** mends it. Paragon Home also mends it on its own: the
+service asks every LAN device for its state every ten minutes, and on
+startup, and any device that gives no reading is looked for. One found at a
+new address has its entry corrected, its state read from there, and the
+list saved — on a satellite too, since a satellite keeps its own copy of
+where things are. Pulling to refresh on the phone does the same, because
+every state read does.
+
+A device found where it already was is left alone (it heard the search and
+missed the status request, which WiFi bulbs do). One not found at all keeps
+its address, so a light switched off at the wall is not forgotten. And a
+device that gave no reading is looked for at most once every five minutes,
+because each look is a discovery — seconds — and a light off at the wall is
+silent on every sweep.
+
+Only Govee, Kasa and Tuya are looked for: they are found by searching the
+LAN. A blind goes through SwitchBot's servers and has no address to be wrong
+about, and a blaster or a speaker reports no state, so silence from one of
+those is not a symptom. A blaster that moved shows up as a failed command
+instead — see *When a blaster stops working* below.
+
+The better fix is a **DHCP reservation** for every device in the router, at
+the address it has now, so nothing moves in the first place. This is what
+catches it when a reservation was missed.
+
 ---
 
 ## Using it

@@ -42,6 +42,13 @@ PAUSE_SLICE_SECONDS = 0.5
 # looks at the clock.
 SATELLITE_CHECK_SECONDS = 30
 
+# How often the LAN devices are asked whether they are still where the list
+# says. A light that came back from a router reboot on a new address fails
+# silently -- a Govee command is a datagram with no reply -- and this is
+# what notices before somebody does. The first check is on startup, because
+# a box rebooting alongside the router is the case that matters most.
+ADDRESS_CHECK_SECONDS = 600
+
 EVENT_PLAY = 'play'
 EVENT_PAUSE = 'pause'
 EVENT_STOP = 'stop'
@@ -115,6 +122,7 @@ class GoveeService(xbmc.Monitor):
         self._blocked_for = 0.0
         self._last_satellite_check = 0.0
         self._last_satellite_sync = 0.0
+        self._last_address_check = 0.0
         # The web remote, when it is switched on. Started from the loop rather
         # than from __init__ so a port already in use cannot stop the service
         # coming up at all.
@@ -411,6 +419,20 @@ class GoveeService(xbmc.Monitor):
             utils.debug('Satellite: nothing copied (%s)' % problems[0])
         return bool(copied)
 
+    def _check_addresses(self, now=None):
+        """Look for LAN devices that moved, when it is time to.
+
+        On this thread, like everything that touches the Govee listen port:
+        two sweeps at once would share one port and take each other's
+        replies. The cost is a few seconds every ten minutes, and only when
+        a device is silent does it grow to a discovery.
+        """
+        moment = now or time.time()
+        if moment - self._last_address_check < ADDRESS_CHECK_SECONDS:
+            return []
+        self._last_address_check = moment
+        return self.app.check_addresses()
+
     def _check_sequences(self, now=None):
         """Run anything the clock says is due.
 
@@ -515,6 +537,11 @@ class GoveeService(xbmc.Monitor):
                 self._check_satellite()
             except Exception as exc:
                 utils.log('Satellite sync failed: %s' % exc, xbmc.LOGERROR)
+
+            try:
+                self._check_addresses()
+            except Exception as exc:
+                utils.log('Address check failed: %s' % exc, xbmc.LOGERROR)
 
             if self._remote_stale:
                 try:

@@ -242,6 +242,17 @@ class KasaDriver(object):
             return None
         return self._state_from_info(device, info)
 
+    def locate(self, devices, timeout=3.0):
+        """Where the listed devices are right now: {device_id: ip}.
+
+        The same search a refresh runs, kept to the addresses. Nothing here
+        leaves the LAN, so it costs only the wait.
+        """
+        found, _warnings = self.discover(timeout=timeout)
+        wanted = set(device.device_id for device in devices)
+        return dict((device.device_id, device.ip) for device in found
+                    if device.ip and device.device_id in wanted)
+
     def get_states(self, devices, timeout=3.0):
         """Read every listed device, one round trip per physical plug.
 

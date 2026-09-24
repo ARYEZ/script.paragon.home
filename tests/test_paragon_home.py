@@ -11306,6 +11306,388 @@ def touch_later(app, filename):
     os.utime(path, (stamp.st_mtime + 5, stamp.st_mtime + 5))
 
 
+class WanderingDriver(object):
+    """A driver whose devices can be somewhere other than where they were.
+
+    `at` is where each device really is. A status request reaches a device
+    only at its real address; a search says where every device is.
+    """
+
+    DRIVER_ID = 'wander'
+    DRIVER_LABEL = 'Wander'
+
+    def __init__(self, at=None, caps=(CAP_POWER, CAP_STATE)):
+        self.at = dict(at or {})
+        self.caps = set(caps)
+        self.searches = []
+        self.reads = []
+        self.search_fails = False
+
+    def capabilities(self, device):
+        return set(self.caps)
+
+    @staticmethod
+    def commands(device):
+        return []
+
+    def turn(self, device, on):
+        pass
+
+    def get_state(self, device):
+        return self.get_states([device]).get(device.device_id)
+
+    def get_states(self, devices, timeout=3.0):
+        states = {}
+        for device in devices:
+            self.reads.append((device.device_id, device.ip))
+            if self.at.get(device.device_id) == device.ip:
+                states[device.device_id] = {'power': 'on',
+                                            'read_at': device.ip}
+            else:
+                states[device.device_id] = None
+        return states
+
+    def locate(self, devices, timeout=3.0):
+        self.searches.append([d.device_id for d in devices])
+        if self.search_fails:
+            raise RuntimeError('port busy')
+        return dict((d.device_id, self.at[d.device_id]) for d in devices
+                    if d.device_id in self.at)
+
+
+class TestLightsThatMoved(unittest.TestCase):
+    """A light that came back from a router reboot on a new address.
+
+    A Govee command is a datagram with no reply, so the send is reported as
+    done and nothing happens. Ten lights did exactly that one morning. The
+    status sweep is the one place the silence can be heard, so a device that
+    gave no reading is looked for, and if it turns up somewhere else its
+    address is mended and written down.
+    """
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'hub', 'service'):
+            if name in sys.modules:
+                del sys.modules[name]
+
+    def tearDown(self):
+        clean_profile()
+
+    def build(self, at, **kwargs):
+        import hub as hub_mod
+
+        driver = WanderingDriver(at=at, **kwargs)
+        self.moved = []
+        hub = hub_mod.Hub(drivers=[driver],
+                          on_moved=lambda devices: self.moved.append(
+                              [d.device_id for d in devices]))
+        return hub, driver
+
+    @staticmethod
+    def lamp(ip='10.0.0.5'):
+        return Device('L1', name='Lamp', driver='wander', lan=True, ip=ip)
+
+    # -- the hub -----------------------------------------------------------
+
+    def test_a_light_that_moved_is_found_and_read_from_there(self):
+        hub, driver = self.build({'L1': '10.0.0.9'})
+        lamp = self.lamp('10.0.0.5')
+
+        states = hub.get_states([lamp])
+
+        self.assertEqual(lamp.ip, '10.0.0.9', 'the address was not mended')
+        self.assertEqual(states['L1'], {'power': 'on', 'read_at': '10.0.0.9'},
+                         'not read again from where it was found')
+        self.assertEqual(driver.searches, [['L1']])
+        self.assertEqual(self.moved, [['L1']],
+                         'nobody was told to write it down')
+
+    def test_a_light_that_answered_is_not_looked_for(self):
+        hub, driver = self.build({'L1': '10.0.0.5'})
+        lamp = self.lamp('10.0.0.5')
+
+        states = hub.get_states([lamp])
+
+        self.assertEqual(states['L1']['read_at'], '10.0.0.5')
+        self.assertEqual(driver.searches, [])
+        self.assertEqual(self.moved, [])
+
+    def test_only_the_silent_ones_are_looked_for(self):
+        hub, driver = self.build({'L1': '10.0.0.5', 'L2': '10.0.0.9'})
+        lamp = self.lamp('10.0.0.5')
+        other = Device('L2', name='Other', driver='wander', lan=True,
+                       ip='10.0.0.6')
+
+        hub.get_states([lamp, other])
+
+        self.assertEqual(driver.searches, [['L2']])
+        self.assertEqual(self.moved, [['L2']])
+        self.assertEqual((lamp.ip, other.ip), ('10.0.0.5', '10.0.0.9'))
+
+    def test_a_light_found_where_it_was_is_left_alone(self):
+        """It heard the search and not the status request: a WiFi bulb being
+        a WiFi bulb. Not a move, and nothing to write down."""
+        hub, driver = self.build({'L1': '10.0.0.5'})
+        lamp = self.lamp('10.0.0.5')
+        # Silent on the status read, present in the search.
+        driver.get_states = lambda devices, timeout=3.0: dict(
+            (d.device_id, None) for d in devices)
+
+        states = hub.get_states([lamp])
+
+        self.assertEqual(driver.searches, [['L1']])
+        self.assertEqual(lamp.ip, '10.0.0.5')
+        self.assertIsNone(states['L1'])
+        self.assertEqual(self.moved, [], 'told about a device that stayed put')
+
+    def test_a_light_that_is_not_found_keeps_its_address(self):
+        """Switched off at the wall, or gone. A refresh will say which."""
+        hub, driver = self.build({})
+        lamp = self.lamp('10.0.0.5')
+
+        states = hub.get_states([lamp])
+
+        self.assertEqual(driver.searches, [['L1']])
+        self.assertEqual(lamp.ip, '10.0.0.5')
+        self.assertIsNone(states['L1'])
+        self.assertEqual(self.moved, [])
+
+    def test_silence_from_something_that_never_answers_is_not_a_symptom(self):
+        """A blaster reports no state. Looking for one on every sweep would
+        be a broadcast every ten minutes for nothing."""
+        hub, driver = self.build({'L1': '10.0.0.9'}, caps=(CAP_COMMANDS,))
+        lamp = self.lamp('10.0.0.5')
+
+        hub.get_states([lamp])
+
+        self.assertEqual(driver.searches, [])
+        self.assertEqual(lamp.ip, '10.0.0.5')
+        self.assertFalse(hub.can_locate(lamp))
+
+    def test_a_device_with_no_address_has_nothing_to_be_wrong_about(self):
+        hub, driver = self.build({'L1': '10.0.0.9'})
+        lamp = self.lamp(ip='')
+
+        hub.get_states([lamp])
+
+        self.assertEqual(driver.searches, [])
+        self.assertFalse(hub.can_locate(lamp))
+
+    def test_a_driver_that_cannot_look_is_not_asked(self):
+        import hub as hub_mod
+
+        driver = RecordingDriver()
+        hub = hub_mod.Hub(drivers=[driver])
+        device = Device('B1', name='Blind', driver='recorder', ip='10.0.0.5')
+
+        states = hub.get_states([device])
+
+        self.assertIsNone(states['B1'])
+        self.assertFalse(hub.can_locate(device))
+
+    def test_a_silent_light_is_looked_for_once_in_a_while(self):
+        """A light off at the wall is silent on every sweep. Each look is a
+        discovery -- seconds -- so one every five minutes, not every pull."""
+        import hub as hub_mod
+
+        hub, driver = self.build({})
+        lamp = self.lamp('10.0.0.5')
+
+        hub.get_states([lamp], now=1000.0)
+        hub.get_states([lamp], now=1100.0)
+        self.assertEqual(driver.searches, [['L1']],
+                         'looked for again inside the hold-off')
+
+        hub.get_states([lamp], now=1000.0 + hub_mod.LOCATE_HOLDOFF)
+        self.assertEqual(driver.searches, [['L1'], ['L1']])
+
+    def test_the_hold_off_does_not_hide_a_light_that_since_moved(self):
+        """Looked for and not found at 1000; moved at 1200; at 1300 it is
+        still inside the hold-off. At 1300 + hold-off it is found."""
+        import hub as hub_mod
+
+        hub, driver = self.build({})
+        lamp = self.lamp('10.0.0.5')
+
+        hub.get_states([lamp], now=1000.0)
+        driver.at['L1'] = '10.0.0.9'
+        hub.get_states([lamp], now=1000.0 + hub_mod.LOCATE_HOLDOFF)
+
+        self.assertEqual(lamp.ip, '10.0.0.9')
+        self.assertEqual(self.moved, [['L1']])
+
+    def test_a_search_that_fails_leaves_the_reading_empty(self):
+        hub, driver = self.build({'L1': '10.0.0.9'})
+        driver.search_fails = True
+        lamp = self.lamp('10.0.0.5')
+
+        states = hub.get_states([lamp])
+
+        self.assertIsNone(states['L1'])
+        self.assertEqual(lamp.ip, '10.0.0.5')
+        self.assertEqual(self.moved, [])
+
+    # -- the drivers -------------------------------------------------------
+
+    def test_govee_looks_on_the_lan_and_never_asks_the_cloud(self):
+        """A light off at the wall would be a cloud request every sweep."""
+        from devices import GoveeController, TRANSPORT_CLOUD
+
+        class Lan(object):
+            def __init__(self):
+                self.scans = 0
+
+            def discover(self, timeout=3.0):
+                self.scans += 1
+                return [{'device': 'aa:bb', 'ip': '10.0.0.9', 'sku': 'H6159'},
+                        {'device': 'cc:dd', 'ip': '10.0.0.3', 'sku': 'H6159'}]
+
+        class Cloud(object):
+            configured = True
+
+            def list_devices(self):
+                raise AssertionError('the cloud was asked')
+
+        lan = Lan()
+        driver = GoveeController(lan=lan, cloud=Cloud())
+        lamp = Device('AA:BB', name='Lamp', model='H6159', lan=True,
+                      ip='10.0.0.5')
+
+        where = driver.locate([lamp])
+
+        self.assertEqual(where, {'AA:BB': '10.0.0.9'},
+                         'not matched by id, or the unasked-for kept')
+        self.assertEqual(lan.scans, 1)
+
+        driver = GoveeController(lan=lan, cloud=Cloud(), mode=TRANSPORT_CLOUD)
+        self.assertEqual(driver.locate([lamp]), {})
+        self.assertEqual(lan.scans, 1, 'cloud mode searched the LAN')
+
+    def test_govee_end_to_end_a_real_light_that_moved(self):
+        """The real transport, a fake light on loopback that is now at
+        127.0.0.2 while the list says 127.0.0.1."""
+        import hub as hub_mod
+        from devices import GoveeController
+
+        saved = (govee_lan.MULTICAST_GROUP, govee_lan.SCAN_PORT,
+                 govee_lan.LISTEN_PORT, govee_lan.COMMAND_PORT)
+        govee_lan.MULTICAST_GROUP = '127.0.0.2'
+        govee_lan.SCAN_PORT = TEST_SCAN_PORT
+        govee_lan.LISTEN_PORT = TEST_LISTEN_PORT
+        govee_lan.COMMAND_PORT = TEST_COMMAND_PORT
+        scan = FakeGoveeDevice('AA:BB:CC:DD', 'H6159', TEST_SCAN_PORT,
+                               host='127.0.0.2')
+        status = FakeGoveeDevice('AA:BB:CC:DD', 'H6159', TEST_COMMAND_PORT,
+                                 host='127.0.0.2')
+        try:
+            transport = govee_lan.LANTransport(bind_address='127.0.0.2',
+                                               retries=1)
+            driver = GoveeController(lan=transport)
+            hub = hub_mod.Hub(drivers=[driver],
+                              on_moved=lambda ds: self.moved.append(
+                                  [d.ip for d in ds]))
+            self.moved = []
+            lamp = Device('AA:BB:CC:DD', name='Lamp', model='H6159',
+                          driver='govee', lan=True, ip='127.0.0.1')
+
+            states = hub.get_states([lamp], timeout=1.0)
+
+            self.assertEqual(lamp.ip, '127.0.0.2')
+            self.assertEqual(self.moved, [['127.0.0.2']])
+            self.assertIsNotNone(states['AA:BB:CC:DD'], 'not read from there')
+            self.assertEqual(states['AA:BB:CC:DD']['brightness'], 42)
+        finally:
+            scan.close()
+            status.close()
+            (govee_lan.MULTICAST_GROUP, govee_lan.SCAN_PORT,
+             govee_lan.LISTEN_PORT, govee_lan.COMMAND_PORT) = saved
+
+    def test_kasa_and_tuya_answer_from_their_own_search(self):
+        from kasa_driver import KasaDriver
+        from tuya_driver import TuyaDriver
+
+        for driver in (KasaDriver(), TuyaDriver(keys={})):
+            driver.discover = lambda timeout=3.0: (
+                [Device('P1', name='Amp', ip='10.0.0.9'),
+                 Device('P2', name='Fan', ip=''),
+                 Device('P3', name='Lamp', ip='10.0.0.4')], [])
+            wanted = [Device('P1', name='Amp', ip='10.0.0.5'),
+                      Device('P2', name='Fan', ip='10.0.0.6')]
+
+            self.assertEqual(driver.locate(wanted), {'P1': '10.0.0.9'},
+                             driver.DRIVER_ID)
+
+    # -- the app and the service -------------------------------------------
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.driver = WanderingDriver(at={'L1': '10.0.0.9'})
+        # Into the hub the app built, so the wiring from the hub back to the
+        # app -- the save -- is the real one.
+        app.controller.drivers['wander'] = self.driver
+        blind = Device('B1', name='Blind', driver='switchbot', ip='')
+        app._devices = [self.lamp('10.0.0.5'), blind]
+        app.save_devices()
+        return app
+
+    def test_the_new_address_is_written_down(self):
+        app = self.app()
+
+        moved = app.check_addresses()
+
+        self.assertEqual([d.device_id for d in moved], ['L1'])
+        on_disk = dict((d['device_id'], d['ip'])
+                       for d in utils_read_json(app))
+        self.assertEqual(on_disk['L1'], '10.0.0.9',
+                         'mended in memory and not on disk')
+
+    def test_the_sweep_asks_only_what_could_be_looked_for(self):
+        """A blind is a cloud request each; there is no address to check."""
+        app = self.app()
+        self.driver.at['L1'] = '10.0.0.5'
+        asked = []
+        recorder = app.controller.drivers['switchbot'] = RecordingDriver()
+        recorder.get_states = lambda devices, timeout=3.0: (
+            asked.extend(d.device_id for d in devices) or {})
+
+        moved = app.check_addresses()
+
+        self.assertEqual(moved, [])
+        self.assertEqual(asked, [], 'the blind was swept')
+        self.assertEqual(self.driver.reads, [('L1', '10.0.0.5')])
+
+    def test_the_service_checks_on_startup_and_then_every_ten_minutes(self):
+        import service
+
+        svc = service.GoveeService()
+        calls = []
+
+        class StubApp(object):
+            @staticmethod
+            def check_addresses(timeout=3.0):
+                calls.append(1)
+                return []
+
+        svc._app = StubApp()
+        svc._check_addresses(now=1000.0)
+        svc._check_addresses(now=1000.0 + service.ADDRESS_CHECK_SECONDS - 1)
+        self.assertEqual(len(calls), 1, 'checked again before it was due')
+        svc._check_addresses(now=1000.0 + service.ADDRESS_CHECK_SECONDS)
+        self.assertEqual(len(calls), 2)
+
+
+def utils_read_json(app):
+    """The device cache as this app's session would write it, read back."""
+    import addon_utils
+    from devices import DEVICE_CACHE
+    return addon_utils.read_json(DEVICE_CACHE, default=[])
+
+
 class TestTheTelevisionHalf(unittest.TestCase):
     """Paragon TV, driven from the remote that lives here.
 
