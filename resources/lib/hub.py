@@ -31,8 +31,9 @@ it has and reports the rest as absent.
 
 import time
 
-from devices import (CAP_COMMANDS, CAP_LOCK, CAP_POSITION, CAP_POWER,
-                     CAP_STATE, CAP_UNLOCK, ControlError, DEFAULT_DRIVER)
+from devices import (CAP_COMMANDS, CAP_LOCK, CAP_PLAYBACK, CAP_POSITION,
+                     CAP_POWER, CAP_STATE, CAP_UNLOCK, ControlError,
+                     DEFAULT_DRIVER)
 
 # What a power-only device is allowed to be asked for. Switching, and saying
 # what it is doing -- everything about how it looks is somebody else's job.
@@ -250,6 +251,27 @@ class Hub(object):
         answer = driver.set_position(device, percent)
         self._remember(device, position=percent)
         return answer
+
+    # -- playback: a beacon ---------------------------------------------------
+
+    def _player(self, device):
+        driver = self._require(device)
+        if CAP_PLAYBACK not in driver.capabilities(device):
+            raise ControlError('%s does not play anything' % device.name)
+        return driver
+
+    def pause(self, device):
+        return self._player(device).pause(device)
+
+    def resume(self, device):
+        return self._player(device).resume(device)
+
+    def set_volume(self, device, volume):
+        """0 to 100. Remembered, so the phone can show it before the beacon
+        is next asked."""
+        settled = self._player(device).set_volume(device, volume)
+        self._remember(device, volume=settled)
+        return settled
 
     def lock(self, device):
         """Throw a deadbolt.

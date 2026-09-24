@@ -281,6 +281,9 @@ class RecordingController(object):
             # What the blaster driver really answers: commands and nothing
             # else, whether or not any have been learned yet.
             return set([CAP_COMMANDS])
+        if (getattr(device, 'driver', None) or '') == 'speaker':
+            # What the beacon driver answers: clips, state, and a player.
+            return set([CAP_COMMANDS, CAP_STATE, 'playback'])
         # Through the Hub's own narrowing, not around it. A double that says
         # a device can be coloured where the Hub says it cannot would hide
         # exactly the kind of bug it is here to catch.
@@ -335,6 +338,18 @@ class RecordingController(object):
         # Same reason. A blind step against a stub without this failed with
         # "no attribute", which reads in a test as the step being wrong.
         self._record('position', device, percent)
+
+    def pause(self, device):
+        self._record('pause', device)
+
+    def resume(self, device):
+        self._record('resume', device)
+
+    def set_volume(self, device, volume):
+        # The Hub answers with the volume the beacon settled on.
+        settled = max(0, min(100, int(volume)))
+        self._record('volume', device, settled)
+        return settled
 
     def driver(self, driver_id):
         """The Hub answers with the driver object, or None for an unknown id."""
@@ -4643,6 +4658,15 @@ class FakeSpeaker(object):
         # A 200 with this body instead of {"ok": true}, for holding the
         # transport to its contract rather than to this fake's good manners.
         self.play_answer = None
+        self.pause_answer = None
+        # The player half: whether pause and volume work on this one (mpv
+        # or not), and what it would report.
+        self.controls = True
+        self.volume = 100
+        self.paused = False
+        self.elapsed = 12.0
+        self.duration = 180.0
+        self.volumes = []
 
         speaker = self
 
@@ -4658,6 +4682,15 @@ class FakeSpeaker(object):
             def do_GET(self):
                 if self.path == '/clips':
                     self._send(200, {'clips': list(speaker.clips)})
+                elif self.path == '/status':
+                    playing = speaker.playing
+                    self._send(200, {
+                        'playing': playing,
+                        'paused': speaker.paused if playing else False,
+                        'elapsed': speaker.elapsed if playing else None,
+                        'duration': speaker.duration if playing else None,
+                        'volume': speaker.volume,
+                        'controls': speaker.controls})
                 else:
                     self._send(404, {'error': 'no such path'})
 
@@ -4666,6 +4699,39 @@ class FakeSpeaker(object):
                 body = json.loads(self.rfile.read(length).decode('utf-8')
                                   or '{}')
                 name = body.get('clip')
+                if self.path in ('/pause', '/resume'):
+                    if speaker.pause_answer is not None:
+                        self._send(200, speaker.pause_answer)
+                    elif not speaker.controls:
+                        self._send(409, {'ok': False,
+                                         'error': 'this beacon cannot pause: '
+                                                  'install mpv'})
+                    elif speaker.playing is None:
+                        self._send(409, {'ok': False,
+                                         'error': 'nothing is playing'})
+                    else:
+                        speaker.paused = self.path == '/pause'
+                        self._send(200, {'ok': True,
+                                         'paused': speaker.paused})
+                    return
+                if self.path == '/volume':
+                    if not speaker.controls:
+                        self._send(409, {'ok': False,
+                                         'error': 'this beacon has no volume '
+                                                  'control: install mpv'})
+                        return
+                    # As it came, unclamped: the driver clamps before the
+                    # wire, and a fake that clamped too would cover for a
+                    # driver that stopped.
+                    try:
+                        volume = int(body.get('volume'))
+                    except (TypeError, ValueError):
+                        self._send(400, {'ok': False, 'error': 'volume?'})
+                        return
+                    speaker.volume = volume
+                    speaker.volumes.append(volume)
+                    self._send(200, {'ok': True, 'volume': volume})
+                    return
                 if self.path == '/stop' and speaker.stop_answer is not None:
                     self._send(200, speaker.stop_answer)
                 elif self.path == '/stop':
@@ -4951,14 +5017,16 @@ class TestTheSpeaker(unittest.TestCase):
 
         self.assertLess(time.time() - started, 1.0)
 
-    def test_a_speaker_claims_commands_and_nothing_else(self):
-        """The capability set is the real guard: the hub only ever calls a
-        verb a device claims. The verbs raising is the belt to that braces,
-        and a set that also said power would have a scene switching it."""
-        driver = self.driver()
+    def test_a_speaker_claims_commands_playback_and_state(self):
+        """Commands, so the step picker takes it; playback, so the Beacons
+        tab does; state, so it says what it is playing -- and so a beacon
+        that gave no reading is looked for. No power: nothing is a switch."""
+        from devices import CAP_PLAYBACK
 
-        self.assertEqual(driver.capabilities(self.device()),
-                         set([CAP_COMMANDS]))
+        driver = self.driver()
+        caps = driver.capabilities(self.device())
+
+        self.assertEqual(caps, set([CAP_COMMANDS, CAP_STATE, CAP_PLAYBACK]))
 
     def test_a_speaker_cannot_be_switched(self):
         driver = self.driver()
@@ -4966,7 +5034,180 @@ class TestTheSpeaker(unittest.TestCase):
         for verb in (lambda: driver.turn(self.device(), True),
                      lambda: driver.set_brightness(self.device(), 50)):
             self.assertRaises(ControlError, verb)
-        self.assertIsNone(driver.get_state(self.device()))
+
+    # -- the player half ---------------------------------------------------
+
+    def hub(self):
+        import hub as hub_mod
+
+        driver = self.driver()
+        blaster = FakeBlaster(devices=[Device('RM:01', name='Hall Blaster',
+                                              driver='blaster')])
+        return hub_mod.Hub(drivers=[driver, blaster]), driver
+
+    def test_a_beacon_says_what_it_is_playing_and_how_far_in(self):
+        driver = self.driver()
+        self.pi.playing = 'goodnight'
+        self.pi.paused = True
+        self.pi.elapsed = 62.4
+        self.pi.volume = 40
+
+        state = driver.get_state(self.device())
+
+        self.assertEqual(state, {'playing': 'goodnight', 'paused': True,
+                                 'elapsed': 62.4, 'duration': 180.0,
+                                 'volume': 40, 'controls': True})
+
+    def test_a_silent_beacon_reports_silence_not_nothing(self):
+        """Silence is a reading. None is a beacon that did not answer, and
+        that is the one the hub goes looking for."""
+        driver = self.driver()
+
+        state = driver.get_state(self.device())
+
+        self.assertEqual(state['playing'], None)
+        self.assertEqual(state['paused'], False)
+        self.assertIsNone(state['elapsed'])
+        self.assertEqual(state['volume'], 100)
+
+    def test_a_beacon_that_is_off_gives_no_reading(self):
+        driver = self.driver()
+        gone = Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': _free_port()})
+
+        self.assertIsNone(driver.get_state(gone))
+
+    def test_a_status_is_read_strictly(self):
+        """Numbers as numbers: a position that is a string is a progress
+        bar that does nothing."""
+        self.assertEqual(
+            self.lan.clean_status({'playing': ' goodnight ', 'paused': 1,
+                                   'elapsed': '3.5', 'duration': 'x',
+                                   'volume': '40.4', 'controls': 'yes'}),
+            {'playing': 'goodnight', 'paused': True, 'elapsed': 3.5,
+             'duration': None, 'volume': 40, 'controls': True})
+        self.assertEqual(
+            self.lan.clean_status({'playing': '', 'paused': True,
+                                   'elapsed': 9, 'volume': None}),
+            {'playing': None, 'paused': False, 'elapsed': None,
+             'duration': None, 'volume': None, 'controls': False})
+        self.assertIsNone(self.lan.clean_status(['not', 'a', 'dict']))
+
+    def test_pause_and_resume_reach_the_beacon_through_the_hub(self):
+        hub, _driver = self.hub()
+        self.pi.playing = 'goodnight'
+
+        self.assertTrue(hub.pause(self.device()))
+        self.assertTrue(self.pi.paused)
+        self.assertTrue(hub.resume(self.device()))
+        self.assertFalse(self.pi.paused)
+
+    def test_pausing_silence_says_so_by_name(self):
+        hub, _driver = self.hub()
+
+        with self.assertRaises(ControlError) as caught:
+            hub.pause(self.device())
+
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+        self.assertIn('nothing is playing', str(caught.exception))
+
+    def test_a_200_that_does_not_say_ok_is_not_a_pause(self):
+        hub, _driver = self.hub()
+        self.pi.playing = 'goodnight'
+        self.pi.pause_answer = {'error': 'no'}
+
+        with self.assertRaises(ControlError) as caught:
+            hub.pause(self.device())
+        self.assertIn('did not pause', str(caught.exception))
+
+    def test_a_beacon_without_mpv_says_what_to_install(self):
+        hub, _driver = self.hub()
+        self.pi.controls = False
+        self.pi.playing = 'goodnight'
+
+        with self.assertRaises(ControlError) as caught:
+            hub.pause(self.device())
+        self.assertIn('install mpv', str(caught.exception))
+        with self.assertRaises(ControlError) as caught:
+            hub.set_volume(self.device(), 40)
+        self.assertIn('install mpv', str(caught.exception))
+        self.assertFalse(_driver.get_state(self.device())['controls'])
+
+    def test_the_volume_is_set_clamped_and_remembered(self):
+        hub, _driver = self.hub()
+
+        self.assertEqual(hub.set_volume(self.device(), 40), 40)
+        self.assertEqual(hub.set_volume(self.device(), 140), 100)
+        self.assertEqual(hub.set_volume(self.device(), -3), 0)
+        self.assertEqual(hub.set_volume(self.device(), '55.6'), 56)
+
+        self.assertEqual(self.pi.volumes, [40, 100, 0, 56])
+        self.assertEqual(hub.last_told[self.pi.device_id]['volume'], 56)
+        with self.assertRaises(ControlError):
+            hub.set_volume(self.device(), 'loud')
+
+    def test_a_blaster_is_refused_the_player_verbs_by_the_hub(self):
+        """Refused in the Hub, by capability, so a blaster's driver never
+        has to know the verbs exist."""
+        hub, _driver = self.hub()
+        blaster = Device('RM:01', name='Hall Blaster', driver='blaster')
+
+        for verb in (lambda: hub.pause(blaster), lambda: hub.resume(blaster),
+                     lambda: hub.set_volume(blaster, 50)):
+            with self.assertRaises(ControlError) as caught:
+                verb()
+            self.assertIn('does not play anything', str(caught.exception))
+
+    def test_a_dead_beacon_fails_the_player_verbs_by_name(self):
+        hub, _driver = self.hub()
+        gone = Device(self.pi.device_id, name='Kitchen Speaker',
+                      driver='speaker', ip='127.0.0.1', lan=True,
+                      driver_data={'port': _free_port()})
+
+        for verb in (lambda: hub.pause(gone), lambda: hub.resume(gone),
+                     lambda: hub.set_volume(gone, 50)):
+            with self.assertRaises(ControlError) as caught:
+                verb()
+            self.assertIn('Kitchen Speaker', str(caught.exception))
+
+    def test_a_beacon_that_gave_no_reading_is_looked_for(self):
+        """Recorded at an address nothing answers on; found by the search
+        at the one it has; read from there."""
+        hub, _driver = self.hub()
+        self.pi.playing = 'goodnight'
+        moved = Device(self.pi.device_id, name='Kitchen Speaker',
+                       driver='speaker', ip='127.0.0.1', lan=True,
+                       driver_data={'port': _free_port()})
+        # The search says the beacon is on 127.0.0.1, which is where the
+        # stale entry already points; the port is what is wrong. So give
+        # the entry a different address, and let the search correct both
+        # the address and, through the entry's port, nothing else: what is
+        # checked is that a beacon nobody could read is re-read after the
+        # search, on the address the search gave.
+        moved.ip = '127.0.0.2'
+        moved.driver_data['port'] = self.pi.port
+
+        states = hub.get_states([moved])
+
+        self.assertEqual(moved.ip, '127.0.0.1')
+        self.assertEqual(states[self.pi.device_id]['playing'], 'goodnight')
+
+    def test_status_reads_as_words(self):
+        from devices import describe_state
+
+        self.assertEqual(
+            describe_state({'playing': 'goodnight', 'paused': False,
+                            'elapsed': 62.4, 'duration': 3725,
+                            'volume': 40, 'controls': True}),
+            ['Playing: goodnight (1:02 of 1:02:05)', 'Volume: 40%'])
+        self.assertEqual(
+            describe_state({'playing': 'goodnight', 'paused': True,
+                            'elapsed': 5, 'duration': None,
+                            'volume': None}),
+            ['Paused: goodnight (0:05 in)'])
+        self.assertEqual(describe_state({'playing': None, 'volume': 100}),
+                         ['Silent', 'Volume: 100%'])
 
     # -- stopping ----------------------------------------------------------
 
@@ -5089,7 +5330,7 @@ class TestTheSpeaker(unittest.TestCase):
                          'save_speaker_clips': lambda: None})
 
         self.assertIsNotNone(hub.driver('speaker'))
-        self.assertEqual(hub.driver('speaker').DRIVER_LABEL, 'Speaker')
+        self.assertEqual(hub.driver('speaker').DRIVER_LABEL, 'Beacon')
 
     def test_the_hub_hands_the_driver_the_app_s_clip_dict(self):
         """The very dict, so a search saves without a round trip."""
@@ -5235,7 +5476,10 @@ class TestThePiListener(unittest.TestCase):
              '--name', 'Kitchen Speaker', '--folder', self.clips,
              '--port', str(self.port), '--discovery-port',
              str(self.discovery_port), '--id', 'AA:BB:CC:DD:EE:01',
-             '--player', self.player],
+             '--player', self.player,
+             # No mpv: this class is the Pi that has not had it installed,
+             # and must still play and stop exactly as it always did.
+             '--mpv', os.path.join(self.folder, 'no-such-mpv')],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(self._stop)
         deadline = time.time() + 5
@@ -5415,6 +5659,224 @@ class TestThePiListener(unittest.TestCase):
                 self.transport.play('127.0.0.1', self.port, name)
             self.assertIn('404', str(caught.exception), name)
         self.assertFalse(os.path.exists(self.log), 'something was played')
+
+    def test_without_mpv_it_says_so_and_offers_no_controls(self):
+        import speaker_lan
+
+        state = self.transport.status('127.0.0.1', self.port)
+        self.assertFalse(state['controls'])
+        self.assertIsNone(state['playing'])
+
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        self._wait_for_pids(1)
+        state = self.transport.status('127.0.0.1', self.port)
+        self.assertEqual(state['playing'], 'goodnight')
+        self.assertFalse(state['controls'])
+        self.assertIsNone(state['elapsed'])
+
+        for call in (lambda: self.transport.pause('127.0.0.1', self.port),
+                     lambda: self.transport.set_volume('127.0.0.1',
+                                                       self.port, 40)):
+            with self.assertRaises(speaker_lan.SpeakerError) as caught:
+                call()
+            self.assertIn('install mpv', str(caught.exception))
+
+
+class TestTheBeaconPlayer(unittest.TestCase):
+    """tools/paragon_speaker.py driving mpv -- a stand-in that speaks mpv's
+    control protocol, so what is checked is the conversation the script
+    has with a player, held to the same transport the add-on uses."""
+
+    def setUp(self):
+        clean_profile()
+        for name in ('addon_utils', 'speaker_driver', 'speaker_lan'):
+            if name in sys.modules:
+                del sys.modules[name]
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.clips = os.path.join(self.folder, 'clips')
+        os.makedirs(self.clips)
+        for name in ('hardboiled complete.wav', 'goodnight.mp3'):
+            with open(os.path.join(self.clips, name), 'wb') as handle:
+                handle.write(b'x')
+        self.log = os.path.join(self.folder, 'mpv.log')
+        self.pidfile = os.path.join(self.folder, 'mpv.pid')
+        self.discovery_port = _free_port()
+        self.port = _free_port()
+        self.proc = None
+        self.start()
+        import speaker_lan
+
+        self.transport = speaker_lan.SpeakerTransport(
+            bind_address='127.0.0.1', timeout=2.0)
+        self.lan = speaker_lan
+
+    def start(self):
+        env = dict(os.environ, FAKE_MPV_LOG=self.log,
+                   FAKE_MPV_PID=self.pidfile)
+        self.proc = subprocess.Popen(
+            [sys.executable, os.path.join(ROOT, 'tools', 'paragon_speaker.py'),
+             '--name', 'Kitchen', '--folder', self.clips,
+             '--port', str(self.port), '--discovery-port',
+             str(self.discovery_port), '--id', 'AA:BB:CC:DD:EE:01',
+             '--mpv', '%s %s' % (sys.executable,
+                                 os.path.join(ROOT, 'tests', 'fake_mpv.py'))],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        self.addCleanup(self._stop)
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                socket.create_connection(('127.0.0.1', self.port),
+                                         timeout=0.2).close()
+                return
+            except socket.error:
+                time.sleep(0.05)
+        out = self.proc.communicate(timeout=2)[0].decode('utf-8', 'replace') \
+            if self.proc.poll() is not None else '(still running)'
+        self.fail('the listener never came up: %s' % out)
+
+    def _stop(self):
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        for pid in self._mpv_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        clean_profile()
+
+    def _mpv_pids(self):
+        try:
+            with open(self.pidfile) as handle:
+                return [int(line) for line in handle if line.strip()]
+        except (IOError, OSError):
+            return []
+
+    def _played(self):
+        try:
+            with open(self.log) as handle:
+                return [line.strip() for line in handle if line.strip()]
+        except (IOError, OSError):
+            return []
+
+    def _alive(self, pid):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def status(self):
+        return self.transport.status('127.0.0.1', self.port)
+
+    def test_it_plays_through_mpv_and_offers_controls(self):
+        state = self.status()
+        self.assertTrue(state['controls'])
+        self.assertIsNone(state['playing'])
+        self.assertEqual(state['volume'], 100)
+
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+
+        self.assertEqual(self._played(),
+                         [os.path.join(self.clips, 'goodnight.mp3')])
+        state = self.status()
+        self.assertEqual(state['playing'], 'goodnight')
+        self.assertFalse(state['paused'])
+        self.assertEqual(state['duration'], 180.0)
+        self.assertIsNotNone(state['elapsed'])
+
+    def test_a_second_clip_replaces_the_first_in_the_same_player(self):
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        self.transport.play('127.0.0.1', self.port, 'hardboiled complete')
+
+        self.assertEqual(self._played(), [
+            os.path.join(self.clips, 'goodnight.mp3'),
+            os.path.join(self.clips, 'hardboiled complete.wav')])
+        self.assertEqual(self.status()['playing'], 'hardboiled complete')
+        self.assertEqual(len(self._mpv_pids()), 1, 'a second mpv was started')
+
+    def test_pause_holds_the_position_and_resume_lets_it_go(self):
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+
+        self.assertTrue(self.transport.pause('127.0.0.1', self.port))
+        state = self.status()
+        self.assertTrue(state['paused'])
+        held = state['elapsed']
+        time.sleep(0.3)
+        self.assertEqual(self.status()['elapsed'], held,
+                         'paused and still moving')
+
+        self.assertTrue(self.transport.resume('127.0.0.1', self.port))
+        time.sleep(0.3)
+        state = self.status()
+        self.assertFalse(state['paused'])
+        self.assertGreater(state['elapsed'], held)
+
+    def test_pausing_silence_is_refused_with_the_reason(self):
+        with self.assertRaises(self.lan.SpeakerError) as caught:
+            self.transport.pause('127.0.0.1', self.port)
+        self.assertIn('409', str(caught.exception))
+        self.assertIn('nothing is playing', str(caught.exception))
+
+    def test_stop_ends_it_and_says_what_it_ended(self):
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        self.transport.pause('127.0.0.1', self.port)
+
+        self.assertEqual(self.transport.stop('127.0.0.1', self.port),
+                         'goodnight')
+        state = self.status()
+        self.assertIsNone(state['playing'])
+        # Silence is not paused, whatever the player's flag was left at.
+        self.assertFalse(state['paused'])
+        self.assertIsNone(state['elapsed'])
+        self.assertEqual(self._played()[-1], '<stop>')
+        self.assertIsNone(self.transport.stop('127.0.0.1', self.port))
+        # On the wire itself, not through the transport's cleaning: the
+        # Pi's /status is its own contract, and anything else reading it
+        # should not have to know a player's pause flag outlives the file.
+        raw = self.transport._call('127.0.0.1', self.port, '/status')
+        self.assertEqual((raw['playing'], raw['paused'], raw['elapsed']),
+                         (None, False, None))
+
+    def test_the_volume_is_set_and_survives_a_restart(self):
+        """Kept in a dotfile in the clip folder, which is not a clip."""
+        self.assertEqual(self.transport.set_volume('127.0.0.1', self.port,
+                                                   40), 40)
+        self.assertEqual(self.status()['volume'], 40)
+        self.assertEqual(self.transport.clips('127.0.0.1', self.port),
+                         ['goodnight', 'hardboiled complete'])
+
+        self.proc.terminate()
+        self.proc.wait(timeout=3)
+        self.start()
+
+        self.assertEqual(self.status()['volume'], 40)
+
+    def test_a_volume_that_is_not_one_is_refused(self):
+        with self.assertRaises(self.lan.SpeakerError) as caught:
+            self.transport._call('127.0.0.1', self.port, '/volume',
+                                 {'volume': 'loud'})
+        self.assertIn('400', str(caught.exception))
+        self.assertEqual(self.transport.set_volume('127.0.0.1', self.port,
+                                                   250), 100)
+
+    def test_stopping_the_listener_ends_mpv_with_it(self):
+        pids = self._mpv_pids()
+        self.assertEqual(len(pids), 1)
+        self.assertTrue(self._alive(pids[0]))
+
+        self.proc.terminate()
+        self.proc.wait(timeout=3)
+
+        deadline = time.time() + 3
+        while time.time() < deadline and self._alive(pids[0]):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(pids[0]), 'mpv outlived the listener')
 
 
 class TestLongPauses(unittest.TestCase):
@@ -11866,7 +12328,7 @@ class TestTheTelevisionHalf(unittest.TestCase):
         """
         page = WebRemote_PAGE = self.page()
 
-        panel = page.index('#homePanel, #tvPanel, #dialPanel {')
+        panel = page.index('#homePanel, #tvPanel, #dialPanel, #beaconsPanel {')
         rule = page[panel:page.index('}', panel)]
 
         self.assertIn('flex: 1', rule)
@@ -11889,7 +12351,8 @@ class TestTheTelevisionHalf(unittest.TestCase):
         self.assertIn('<div id="dialPanel" hidden>\n    <div class="pane">',
                       page,
                       'the keys need a pane to scroll inside')
-        self.assertIn('#dialPanel > .pane { flex: 1; min-height: 0; }', page,
+        self.assertIn('#dialPanel > .pane, #beaconsPanel > .pane '
+                      '{ flex: 1; min-height: 0; }', page,
                       'a pane that is not bounded never scrolls')
 
     def test_hiding_a_panel_still_beats_showing_it(self):
@@ -16402,7 +16865,14 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(describe('unlock', {'target': 'Front Door'}),
                          'unlock "Front Door"')
         self.assertEqual(describe('refresh', {}), 'refresh')
-        self.assertEqual(describe('states', None), 'states')
+        self.assertEqual(describe('pause', {'target': 'Kitchen'}),
+                         'pause "Kitchen"')
+        self.assertEqual(describe('volume', {'target': 'Kitchen',
+                                             'value': 40}),
+                         'volume 40 on "Kitchen"')
+        # The two reads are polled, and are not for the log.
+        self.assertIsNone(describe('states', None))
+        self.assertIsNone(describe('beacons', {}))
 
         # Only the fields the action reads. Whatever else the page sent is
         # not for the log.
@@ -16426,7 +16896,7 @@ class TestWebRemote(unittest.TestCase):
     # perfectly on a fresh browser was a black rectangle on the one it was
     # actually for, because showTab only touched the snapshot when the stored
     # tab was 'dial' or 'tv'.
-    REMEMBERED_TABS = (None, 'home', 'dial', 'tv')
+    REMEMBERED_TABS = (None, 'home', 'dial', 'beacons', 'tv')
 
     def test_the_page_script_actually_runs_in_a_browser(self):
         """The question reading the served HTML cannot answer.
@@ -17114,6 +17584,222 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertFalse(answer['data']['ok'])
         self.assertIn('cannot be unlocked', answer['data']['message'])
+
+    # -- beacons -----------------------------------------------------------
+
+    def beacon(self):
+        """A beacon beside the lights, with a clip list and a state."""
+        self.app._devices.append(Device('BE:01', name='Kitchen',
+                                        driver='speaker', lan=True,
+                                        ip='10.0.0.60'))
+        self.recorder.command_map['BE:01'] = ['Stop', 'goodnight',
+                                              'hardboiled complete']
+        self.recorder.states['BE:01'] = {
+            'playing': 'goodnight', 'paused': False, 'elapsed': 62.0,
+            'duration': 180.0, 'volume': 40, 'controls': True}
+        return 'BE:01'
+
+    def test_a_beacon_is_on_the_snapshot_with_what_it_is_playing(self):
+        self.beacon()
+        client = self.signed_in()
+        client.act('beacons')
+
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BE:01'][0]
+
+        self.assertIn('playback', entry['caps'])
+        self.assertEqual(entry['playing'], 'goodnight')
+        self.assertEqual(entry['elapsed'], 62.0)
+        self.assertEqual(entry['duration'], 180.0)
+        self.assertEqual(entry['volume'], 40)
+        self.assertTrue(entry['controls'])
+        self.assertEqual(entry['from'], 'read')
+        self.assertEqual(entry['commands'],
+                         ['Stop', 'goodnight', 'hardboiled complete'])
+        labels = [d['label'] for d in client.state()['data']['drivers']
+                  if d['id'] == 'speaker']
+        self.assertEqual(labels, ['Beacon'])
+
+    def test_the_beacon_poll_reads_the_beacons_and_keeps_the_lights(self):
+        """The tab polls every few seconds. Asking every bulb in the house
+        for a progress bar would be the wrong price; blanking every bulb on
+        the Home tab because only the beacons were asked would be worse."""
+        self.beacon()
+        self.recorder.states['AA:BB'] = {'power': 'on', 'brightness': 70}
+        client = self.signed_in()
+        client.act('states')
+        asked = []
+        real = self.recorder.get_states
+        self.recorder.get_states = lambda devices, timeout=3.0: (
+            asked.extend(d.device_id for d in devices) or real(devices))
+
+        answer = client.act('beacons')
+
+        self.assertTrue(answer['data']['ok'])
+        self.assertEqual(asked, ['BE:01'], 'the poll asked the lights too')
+        devices = dict((d['id'], d) for d in
+                       client.state()['data']['devices'])
+        self.assertEqual(devices['AA:BB']['power'], 'on',
+                         'the beacon poll blanked the lights')
+        self.assertEqual(devices['BE:01']['playing'], 'goodnight')
+
+    def test_pause_resume_and_volume_reach_the_beacon(self):
+        self.beacon()
+        client = self.signed_in()
+
+        self.assertEqual(client.act('pause', target='BE:01')['data'],
+                         {'ok': True, 'message': 'Kitchen paused'})
+        self.assertEqual(client.act('resume', target='Kitchen')['data'],
+                         {'ok': True, 'message': 'Kitchen playing'})
+        self.assertEqual(client.act('volume', target='BE:01',
+                                    value='40')['data'],
+                         {'ok': True, 'message': 'Kitchen at 40%'})
+        self.assertEqual(self.recorder.calls, [
+            ('pause', 'BE:01'), ('resume', 'BE:01'), ('volume', 'BE:01', 40)])
+
+        self.assertFalse(client.act('volume', target='BE:01',
+                                    value='loud')['data']['ok'])
+        self.assertEqual(client.act('pause')['data']['message'],
+                         'That needs the beacon it is for')
+        self.assertEqual(client.act('pause', target='EE:FF')['data'],
+                         {'ok': False,
+                          'message': 'Hall Blaster does not play anything'})
+        self.assertEqual(len(self.recorder.calls), 3)
+
+    def test_a_beacon_poll_is_not_written_to_the_log(self):
+        """Every three seconds while the tab is open. The line that says
+        who ran a sequence must not be buried under it."""
+        import xbmc
+
+        self.beacon()
+        client = self.signed_in()
+        del xbmc.LOG_LINES[:]
+
+        client.act('beacons')
+        client.act('states')
+        client.act('pause', target='BE:01')
+
+        asked = [message.split(': ', 1)[1] for _level, message
+                 in xbmc.LOG_LINES if 'asked for' in message]
+        self.assertEqual(asked, ['Web remote: 127.0.0.1 asked for pause "Kitchen"'])
+
+    def test_the_page_draws_a_snapshot_with_a_beacon_in_it(self):
+        """The load test runs the script; this runs the render, with the
+        snapshot the box really sends, and each tab remembered -- once with
+        a beacon in the house and once without. A card built on a field the
+        snapshot does not have is a TypeError, and a TypeError in render is
+        a blank page. So is a remembered tab whose panel is gone."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        self.beacon()
+        client = self.signed_in()
+        client.act('beacons')
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+        without = dict(snapshot, devices=[d for d in snapshot['devices']
+                                          if d['id'] != 'BE:01'])
+
+        for has_beacon in (True, False):
+            for tab in self.REMEMBERED_TABS:
+                said = self._draw(node, browser, script,
+                                  snapshot if has_beacon else without, tab)
+                facts = json.loads(said.strip().splitlines()[-1])
+                where = 'with %r remembered%s' % (
+                    tab or 'nothing', '' if has_beacon else ', no beacon')
+                self.assertTrue(facts['visible'],
+                                'every panel hidden %s' % where)
+                if not has_beacon:
+                    self.assertEqual(facts['cards'], [], where)
+                    continue
+                self.assertEqual(facts['cards'], ['BE:01'], where)
+                card = facts['card']
+                self.assertEqual(card['now'], 'Playing - goodnight', where)
+                self.assertEqual(card['pause'], 'Pause', where)
+                self.assertFalse(card['pause_hidden'], where)
+                self.assertFalse(card['dim_hidden'], where)
+                self.assertEqual(card['volume'], '40', where)
+                self.assertEqual(card['at'], '1:02', where)
+                self.assertEqual(card['length'], '3:00', where)
+                # 62 of 180 seconds.
+                self.assertTrue(card['width'].startswith('34.4'), where)
+                self.assertEqual(card['clips'],
+                                 ['goodnight', 'hardboiled complete'], where)
+                self.assertEqual(card['lit'], ['goodnight'], where)
+
+    def _draw(self, node, browser, script, snapshot, tab):
+        """Run the page against a snapshot in the stub browser; return what
+        it printed. The last line is the facts about what it drew."""
+        import subprocess
+        import tempfile
+
+        seed = (
+            "global.localStorage.setItem('paragon.tab', %r);\n" % tab
+            if tab else '') + (
+            "var SNAPSHOT = %s;\n"
+            "global.fetch = function (path) {\n"
+            "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+            "  return Promise.resolve({status: 200, ok: true,\n"
+            "    json: function () { return Promise.resolve(body); }});\n"
+            "};\n"
+            "process.on('unhandledRejection', function (e) {\n"
+            "  console.log('RENDER FAILED: ' + (e && e.stack || e));\n"
+            "  process.exit(3);\n"
+            "});\n" % json.dumps(snapshot))
+        # After the script's own load() has fetched the snapshot and
+        # rendered: its promise settles before setImmediate fires, and
+        # setImmediate is the one timer the stub browser leaves real.
+        tail = (
+            "\nsetImmediate(function () {\n"
+            "  if (!state) { console.log('never rendered'); process.exit(5); }\n"
+            "  var ids = ['homePanel', 'dialPanel', 'beaconsPanel', 'tvPanel'];\n"
+            "  var visible = ids.some(function (id) {\n"
+            "    return !document.getElementById(id).hidden; });\n"
+            "  var facts = {visible: visible, cards: Object.keys(beaconCards)};\n"
+            "  var parts = beaconCards['BE:01'];\n"
+            "  if (parts) {\n"
+            "    facts.card = {now: parts.now.textContent,\n"
+            "      pause: parts.pause.textContent, pause_hidden: parts.pause.hidden,\n"
+            "      dim_hidden: parts.dim.hidden, volume: String(parts.slider.value),\n"
+            "      at: parts.at.textContent, length: parts.length.textContent,\n"
+            "      width: parts.fill.style.width,\n"
+            "      clips: Object.keys(parts.buttons),\n"
+            "      lit: Object.keys(parts.buttons).filter(function (n) {\n"
+            "        return parts.buttons[n].className === 'playing'; })};\n"
+            "  }\n"
+            "  console.log(JSON.stringify(facts));\n"
+            "});\n")
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, 'run.js')
+            out = io.open(path, 'w', encoding='utf-8')
+            try:
+                out.write(browser + '\n' + seed + '\n' + script + tail)
+            finally:
+                out.close()
+            proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            said = proc.communicate()[0].decode('utf-8', 'replace')
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.assertEqual(proc.returncode, 0,
+                         'the page does not draw with %r remembered:\n%s'
+                         % (tab or 'nothing', said[:900]))
+        return said
 
     def test_the_snapshot_carries_the_dial_with_its_numbers(self):
         import speeddial as dial_lib

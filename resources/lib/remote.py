@@ -52,7 +52,8 @@ import tv
 from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
                     same_secret, to_bytes, to_text)
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP, CAP_COMMANDS,
-                     CAP_LOCK, CAP_POSITION, CAP_POWER, CAP_STATE, CAP_UNLOCK)
+                     CAP_LOCK, CAP_PLAYBACK, CAP_POSITION, CAP_POWER, CAP_STATE,
+                     CAP_UNLOCK, DRIVER_LABELS)
 
 # Where the API token is kept. Not in settings.xml: it is not something anyone
 # types, and Kodi rewrites settings.xml on exit -- which is exactly the race
@@ -113,7 +114,7 @@ COOKIE_NAME = 'paragon_remote'
 # and every caller in the add-on arrives at the same one.
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
              'command', 'position', 'states', 'cancel_sequence', 'lock',
-             'unlock')
+             'unlock', 'pause', 'resume', 'volume', 'beacons')
 # A dial press can be anything a step can be, including a sequence with an hour
 # of pauses in it, so it waits like one rather than being answered inline.
 # A satellite copying from its master reads five files over SSH, each with its
@@ -167,7 +168,12 @@ STATIC_CACHE = 'public, max-age=31536000, immutable'
 # or colour, but it does have the codes it has been taught, and those are as
 # much a thing to press as an on switch is.
 ACTIONABLE = frozenset([CAP_POWER, CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
-                        CAP_COMMANDS, CAP_POSITION, CAP_LOCK])
+                        CAP_COMMANDS, CAP_POSITION, CAP_LOCK, CAP_PLAYBACK])
+
+# The two actions that only read. Polled -- the Beacons tab asks every few
+# seconds while it is open -- so they are not written to the log, where a
+# line every three seconds would bury the one that says who ran a sequence.
+READS = ('states', 'beacons')
 
 
 # ---------------------------------------------------------------------------
@@ -497,16 +503,23 @@ def _perform_tv(what, params):
     return {'ok': ok, 'message': message}
 
 
-def describe_job(action, params):
+def describe_job(action, params, app=None):
     """What a phone asked for, in a few words, for the log.
 
     Built from the handful of fields an action reads and nothing else. The
     payload is whatever the page sent, and a log line is not the place to
-    find out what that was.
+    find out what that was. A target the page sent as a device id is said
+    by the device's name, when the session is there to ask.
     """
+    if action in READS:
+        return None
     params = params or {}
     name = to_text(params.get('name') or params.get('value') or '')
     target = to_text(params.get('target') or '')
+    if target and app is not None:
+        device = app.device_by_id(target)
+        if device is not None:
+            target = device.name
     quoted = '"%s"' % name if name else ''
     if action in ('sequence', 'scene', 'cancel_sequence'):
         return '%s %s' % (action.replace('_', ' '), quoted)
@@ -516,13 +529,24 @@ def describe_job(action, params):
         return 'command %s on %s' % (quoted, '"%s"' % target if target
                                      else 'everything')
     if action in ('on', 'off', 'toggle', 'brightness', 'color', 'temp',
-                  'position', 'lock', 'unlock'):
+                  'position', 'lock', 'unlock', 'pause', 'resume', 'volume'):
         value = to_text(params.get('value') or '')
         where = '"%s"' % target if target else 'everything'
         if value:
             return '%s %s on %s' % (action, value, where)
         return '%s %s' % (action, where)
     return action
+
+
+def _one_device(app, target):
+    """The single device a target names, by id or by name, or None."""
+    device = app.device_by_id(target)
+    if device is not None:
+        return device
+    found = app.resolve_targets(target)
+    if found and len(found) == 1:
+        return found[0]
+    return None
 
 
 def perform(app, action, params, sleep_func=None, on_step=None):
@@ -671,6 +695,36 @@ def perform(app, action, params, sleep_func=None, on_step=None):
         app.controller.unlock(device)
         return {'ok': True, 'message': '%s UNLOCKED' % device.name}
 
+    if action in ('pause', 'resume', 'volume'):
+        device = _one_device(app, params.get('target'))
+        if device is None:
+            return {'ok': False, 'message': 'That needs the beacon it is for'}
+        if CAP_PLAYBACK not in app.controller.capabilities(device):
+            return {'ok': False,
+                    'message': '%s does not play anything' % device.name}
+        if action == 'pause':
+            app.controller.pause(device)
+            return {'ok': True, 'message': '%s paused' % device.name}
+        if action == 'resume':
+            app.controller.resume(device)
+            return {'ok': True, 'message': '%s playing' % device.name}
+        try:
+            volume = int(round(float(params.get('value'))))
+        except (TypeError, ValueError):
+            return {'ok': False, 'message': 'That needs a volume, 0 to 100'}
+        settled = app.controller.set_volume(device, volume)
+        return {'ok': True, 'message': '%s at %d%%' % (device.name, settled)}
+
+    if action == 'beacons':
+        # The player half of the state read, on its own: the Beacons tab
+        # polls it while open, and asking every light in the house for a
+        # progress bar would be the wrong price for one.
+        beacons = [device for device in app.enabled_devices
+                   if CAP_PLAYBACK in app.controller.capabilities(device)]
+        states = app.controller.get_states(beacons) if beacons else {}
+        return {'ok': True, 'message': 'Read %d beacon(s)' % len(states),
+                'states_update': states}
+
     if action == 'dial':
         try:
             number = int(params.get('slot'))
@@ -751,6 +805,15 @@ def _device_entry(app, device, state):
         'position': None,
         'lock': None,
         'door': None,
+        # The player half, for a beacon: what it is playing and how far in,
+        # its volume, and whether pause and volume will work on it (mpv or
+        # not). 'elapsed' rather than 'position', which is a blind's.
+        'playing': None,
+        'paused': False,
+        'elapsed': None,
+        'duration': None,
+        'volume': None,
+        'controls': False,
         # Where these numbers came from: 'read' is what the device said when it
         # was last asked, 'told' is what we last set it to and never heard back
         # about, absent is nothing known at all. The page says which, because a
@@ -764,6 +827,11 @@ def _device_entry(app, device, state):
         entry['lock'] = state.get('lock')
         entry['door'] = state.get('door')
         entry['from'] = 'read'
+        if 'playing' in state:
+            for key in ('playing', 'paused', 'elapsed', 'duration', 'volume',
+                        'controls'):
+                entry[key] = state.get(key, entry[key])
+            return entry
         if any(entry[key] is not None
                for key in ('power', 'brightness', 'position', 'lock')):
             return entry
@@ -775,7 +843,7 @@ def _device_entry(app, device, state):
     remembered = told.get(device.device_id)
     if not remembered:
         return entry
-    for key in ('power', 'brightness', 'position', 'lock'):
+    for key in ('power', 'brightness', 'position', 'lock', 'volume'):
         if entry.get(key) is None and remembered.get(key) is not None:
             entry[key] = remembered[key]
             entry['from'] = 'told'
@@ -786,7 +854,8 @@ def _device_entry(app, device, state):
 
 def _driver_label(app, driver_id):
     driver = app.controller.driver(driver_id)
-    return getattr(driver, 'DRIVER_LABEL', driver_id.title())
+    return getattr(driver, 'DRIVER_LABEL', None) \
+        or DRIVER_LABELS.get(driver_id) or driver_id.title()
 
 
 def _waiting_for(app, name, now):
@@ -1428,9 +1497,10 @@ class RemoteServer(object):
             # Before it runs, so a run that hangs is still on record, and
             # with who asked: what a phone did is otherwise invisible in
             # the log, and a sequence at a quarter to three is a question.
-            utils.log('Web remote: %s asked for %s'
-                      % (job.address or 'a phone',
-                         describe_job(job.action, job.params)))
+            asked = describe_job(job.action, job.params, app)
+            if asked:
+                utils.log('Web remote: %s asked for %s'
+                          % (job.address or 'a phone', asked))
 
             claimed = job.action == 'sequence'
             if claimed:
@@ -1453,6 +1523,14 @@ class RemoteServer(object):
             if states is not None:
                 with self._lock:
                     self._states = states
+            # A read of some devices, laid over what is known of the rest:
+            # the beacons' poll must not blank every light on the Home tab.
+            update = result.pop('states_update', None)
+            if update:
+                with self._lock:
+                    merged = dict(self._states)
+                    merged.update(update)
+                    self._states = merged
             job.finish(result)
             ran += 1
 
@@ -1852,6 +1930,29 @@ button.wide { width: 100%; }
    fixed column so the names line up with each other down the page. It is there
    because the position is the thing worth learning -- a slot's number never
    moves. */
+/* -- beacons ------------------------------------------------------------- */
+
+.beacon .now { margin-top: 4px; }
+.beacon .now.on { color: var(--teal); }
+.beacon .meter {
+  height: 4px; border-radius: 2px; background: var(--line);
+  margin: 14px 0 6px;
+  overflow: hidden;
+}
+.beacon .meter > span {
+  display: block; height: 4px; width: 0; background: var(--hot);
+  border-radius: 2px;
+}
+.beacon .times {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: var(--muted);
+  margin-bottom: 12px;
+}
+.beacon .clips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
+.beacon .clips button { flex: 0 1 auto; }
+.beacon .clips button.playing { border-color: var(--teal); color: var(--teal); }
+.beacon .noctl { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+
 .dialgrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2136,7 +2237,7 @@ footer button { flex: 1 1 auto; }
      `display: flex` here is safe against `hidden`: the `[hidden]` rule near
      the top of this sheet is !important precisely so a display rule cannot
      un-hide something. */
-  #homePanel, #tvPanel, #dialPanel {
+  #homePanel, #tvPanel, #dialPanel, #beaconsPanel {
     flex: 1;
     min-height: 0;
     display: flex;
@@ -2149,7 +2250,7 @@ footer button { flex: 1 1 auto; }
      takes the height directly. Without this the keys past the fold are
      unreachable on a short window: ten rows is taller than the two before
      it were, and body is overflow: hidden here. */
-  #dialPanel > .pane { flex: 1; min-height: 0; }
+  #dialPanel > .pane, #beaconsPanel > .pane { flex: 1; min-height: 0; }
   .pane {
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -2614,6 +2715,7 @@ button.chan {
       <div class="tabs" id="tabs" hidden>
         <button data-tab="home" class="on">Home</button>
         <button data-tab="dial" id="dialTab" hidden>Dial</button>
+        <button data-tab="beacons" id="beaconsTab" hidden>Beacons</button>
         <button data-tab="tv" id="tvTab" hidden>TV</button>
       </div>
       <p class="status" id="status"></p>
@@ -2692,6 +2794,18 @@ button.chan {
     <section>
       <h2 class="eyebrow">Speed dial</h2>
       <div class="dialgrid" id="dial"></div>
+    </section>
+    </div>
+   </div>
+
+   <!-- The beacons, on their own tab: one card per Raspberry Pi with a
+        speaker on it, with what it is playing, pause, stop, volume and its
+        clips. Only there once a search has found one. -->
+   <div id="beaconsPanel" hidden>
+    <div class="pane">
+    <section>
+      <h2 class="eyebrow">Beacons</h2>
+      <div class="stack" id="beacons"></div>
     </section>
     </div>
    </div>
@@ -3876,6 +3990,7 @@ function showTab(which) {
      calls this again with the answer. */
   if (state) {
     if (which === 'dial' && !(state.dial || []).length) { which = 'home'; }
+    if (which === 'beacons' && !beaconList().length) { which = 'home'; }
     if (which === 'tv' && !tvState().installed) { which = 'home'; }
   }
   var tabs = document.querySelectorAll('#tabs button');
@@ -3884,8 +3999,176 @@ function showTab(which) {
   });
   document.getElementById('homePanel').hidden = which !== 'home';
   document.getElementById('dialPanel').hidden = which !== 'dial';
+  document.getElementById('beaconsPanel').hidden = which !== 'beacons';
   document.getElementById('tvPanel').hidden = which !== 'tv';
   try { localStorage.setItem('paragon.tab', which); } catch (ignored) {}
+}
+
+function beaconList() {
+  if (!state) { return []; }
+  return (state.devices || []).filter(function (device) {
+    return (device.caps || []).indexOf('playback') >= 0;
+  });
+}
+
+/* One card per beacon, kept between polls and updated in place: rebuilding
+   the cards every three seconds would take a volume slider out from under
+   the thumb dragging it. */
+var beaconCards = {};
+
+function beaconCard(device) {
+  var parts = {};
+  var card = el('div', 'card beacon');
+  card.appendChild(el('div', 'name', device.name));
+  parts.now = el('div', 'label now', '');
+  card.appendChild(parts.now);
+
+  parts.meter = el('div', 'meter');
+  parts.fill = el('span');
+  parts.meter.appendChild(parts.fill);
+  card.appendChild(parts.meter);
+  parts.times = el('div', 'times');
+  parts.at = el('span', null, '');
+  parts.length = el('span', null, '');
+  parts.times.appendChild(parts.at);
+  parts.times.appendChild(parts.length);
+  card.appendChild(parts.times);
+
+  var row = el('div', 'row');
+  parts.pause = el('button', null, 'Pause');
+  parts.pause.addEventListener('click', function () {
+    act(parts.paused ? 'resume' : 'pause', {target: device.id});
+  });
+  row.appendChild(parts.pause);
+  var stop = el('button', null, 'Stop');
+  stop.addEventListener('click', function () {
+    act('command', {target: device.id, name: 'Stop'});
+  });
+  row.appendChild(stop);
+  card.appendChild(row);
+
+  parts.dim = el('div', 'dim');
+  parts.readout = el('span', 'stat');
+  parts.readout.appendChild(document.createTextNode('--'));
+  parts.readout.appendChild(el('span', 'unit', ''));
+  parts.slider = el('input');
+  parts.slider.type = 'range';
+  parts.slider.min = 0;
+  parts.slider.max = 100;
+  parts.slider.value = 100;
+  parts.slider.setAttribute('aria-label', device.name + ' volume');
+  parts.dragging = false;
+  parts.slider.addEventListener('pointerdown', function () { parts.dragging = true; });
+  parts.slider.addEventListener('touchstart', function () { parts.dragging = true; });
+  parts.slider.addEventListener('input', function () {
+    parts.readout.firstChild.nodeValue = parts.slider.value;
+  });
+  // On change, not input: every input event would be a request at the Pi.
+  parts.slider.addEventListener('change', function () {
+    parts.dragging = false;
+    act('volume', {target: device.id, value: parts.slider.value});
+  });
+  parts.dim.appendChild(parts.readout);
+  parts.dim.appendChild(parts.slider);
+  card.appendChild(parts.dim);
+
+  parts.noctl = el('p', 'noctl', 'Play and stop only on this one - install mpv on the Pi for pause and volume');
+  card.appendChild(parts.noctl);
+
+  parts.clips = el('div', 'clips');
+  parts.clipsKey = null;
+  card.appendChild(parts.clips);
+
+  parts.card = card;
+  return parts;
+}
+
+function paintBeacon(parts, device) {
+  var playing = device.playing || null;
+  var paused = !!device.paused;
+  parts.paused = paused;
+  parts.now.textContent = playing
+    ? (paused ? 'Paused - ' : 'Playing - ') + playing
+    : 'Silent';
+  parts.now.className = 'label now' + (playing && !paused ? ' on' : '');
+
+  var known = playing && device.duration;
+  var elapsed = device.elapsed || 0;
+  parts.fill.style.width = known
+    ? Math.max(0, Math.min(100, (elapsed / device.duration) * 100)) + '%'
+    : '0%';
+  parts.at.textContent = playing ? clock(elapsed) : '';
+  parts.length.textContent = known ? clock(device.duration) : '';
+
+  var controls = !!device.controls;
+  parts.pause.textContent = paused ? 'Resume' : 'Pause';
+  parts.pause.hidden = !controls;
+  parts.dim.hidden = !controls;
+  parts.noctl.hidden = controls;
+  if (controls && !parts.dragging) {
+    var volume = device.volume;
+    var has = volume !== null && volume !== undefined;
+    parts.readout.firstChild.nodeValue = has ? String(volume) : '--';
+    parts.readout.children[0].textContent = has ? '%' : '';
+    if (has) { parts.slider.value = volume; }
+  }
+
+  // The clip list only when it changed: a file dropped on the Pi shows up
+  // after the next search, and nothing else about it moves.
+  var names = (device.commands || []).filter(function (name) {
+    return name !== 'Stop';
+  });
+  var key = JSON.stringify(names);
+  if (key !== parts.clipsKey) {
+    parts.clipsKey = key;
+    parts.clips.textContent = '';
+    parts.buttons = {};
+    names.forEach(function (name) {
+      var node = el('button', null, name);
+      node.addEventListener('click', function () {
+        act('command', {target: device.id, name: name});
+      });
+      parts.buttons[name] = node;
+      parts.clips.appendChild(node);
+    });
+    if (!names.length) {
+      parts.clips.appendChild(el('p', 'label empty',
+                                 'No clips yet - drop audio files in its folder on the Pi'));
+    }
+  }
+  for (var name in (parts.buttons || {})) {
+    parts.buttons[name].className = name === playing ? 'playing' : '';
+  }
+}
+
+function renderBeacons() {
+  var beacons = beaconList();
+  var box = document.getElementById('beacons');
+  var seen = {};
+  beacons.forEach(function (device) {
+    seen[device.id] = true;
+    var parts = beaconCards[device.id];
+    if (!parts) {
+      parts = beaconCards[device.id] = beaconCard(device);
+      box.appendChild(parts.card);
+    }
+    paintBeacon(parts, device);
+  });
+  for (var id in beaconCards) {
+    if (!seen[id]) {
+      box.removeChild(beaconCards[id].card);
+      delete beaconCards[id];
+    }
+  }
+  document.getElementById('beaconsTab').hidden = !beacons.length;
+}
+
+function pollBeacons() {
+  // A read, not an action: no "Working", no busy, no log line on the box.
+  return api('/api/action', 'POST', {action: 'beacons'}).then(function (data) {
+    if (data.status === 401) { showLogin(); return; }
+    return load();
+  });
 }
 
 function renderDial() {
@@ -3916,7 +4199,7 @@ function renderTv() {
   // The bar shows as soon as there is anywhere else to go, which is either
   // half: a house with a dial and no television still needs it.
   document.getElementById('tabs').hidden =
-    !here && !(state.dial || []).length;
+    !here && !(state.dial || []).length && !beaconList().length;
   if (!here) {
     document.getElementById('tvPanel').hidden = true;
     return;
@@ -3944,6 +4227,7 @@ function render() {
   // Before renderTv, which decides whether the tab bar shows at all and needs
   // to know whether there is a dial to show it for.
   renderDial();
+  renderBeacons();
   renderTv();
   // Re-decided now that there is something to decide with. At load there was
   // no snapshot, so a remembered tab was taken on trust; this is where a
@@ -4037,13 +4321,18 @@ setInterval(function () {
   if (document.hidden || !state || busy) { return; }
   var tv = tvState();
   var every = 20000;
+  var beacons = !document.getElementById('beaconsPanel').hidden;
   if (tv.installed && !document.getElementById('tvPanel').hidden) {
     every = (tv.input && tv.input.open) ? 1000 : 2500;
+  } else if (beacons) {
+    // A progress bar that moves, and a pause pressed in the kitchen
+    // showing up on the tablet in the office.
+    every = 3000;
   }
   var now = Date.now();
   if (now - pollAt < every) { return; }
   pollAt = now;
-  load();
+  if (beacons) { pollBeacons(); } else { load(); }
 }, 1000);
 
 load();

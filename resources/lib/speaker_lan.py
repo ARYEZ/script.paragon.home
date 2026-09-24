@@ -5,8 +5,9 @@ Creator: Aryez
 Year: 2026
 Part of: Paragon TV Project
 
-The wire to a Paragon speaker: a Raspberry Pi with a speaker on it, running
-tools/paragon_speaker.py, that plays a named audio file when asked.
+The wire to a beacon: a Raspberry Pi with a speaker on it, running
+tools/paragon_speaker.py, that plays a named audio file when asked, and can
+be paused, resumed, turned up and down, and asked what it is doing.
 
 Our own protocol, so it is as small as it can be made, and deliberately in the
 shape of the ones already here:
@@ -14,8 +15,10 @@ shape of the ones already here:
     UDP  8765   discovery -- a hello goes out by broadcast, and each speaker
                 answers with who it is and which clips it holds
     HTTP 8766   commands  -- GET /clips says what it can play,
+                             GET /status says what it is doing,
                              POST /play {"clip": name} plays one,
-                             POST /stop ends whatever is playing
+                             POST /stop ends whatever is playing,
+                             POST /pause, /resume, /volume {"volume": n}
 
 One thing plays at a time on a speaker: starting a clip stops the last one,
 and the speaker says which. So an announcement lands when it was sent, not
@@ -105,6 +108,39 @@ def clean_clip_names(raw):
         seen.add(name)
         kept.append(name)
     return kept
+
+
+def clean_status(raw):
+    """A beacon's /status answer, in the shape the rest of the add-on reads.
+
+    Strict about types because this is shown on a phone as numbers: an
+    elapsed time that is a string is a progress bar that does nothing.
+
+    The seconds into the clip are 'elapsed', not 'position': a position is
+    how far open a blind is, and one word for both would have a beacon read
+    as 62% open.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def number(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    playing = raw.get('playing')
+    playing = to_text(playing).strip() if playing else None
+    volume = number(raw.get('volume'))
+    return {
+        'playing': playing or None,
+        'paused': bool(raw.get('paused')) if playing else False,
+        'elapsed': number(raw.get('elapsed')) if playing else None,
+        'duration': number(raw.get('duration')) if playing else None,
+        'volume': int(round(volume)) if volume is not None else None,
+        # Whether pause and volume will work on this one: mpv or not.
+        'controls': bool(raw.get('controls')),
+    }
 
 
 class SpeakerTransport(object):
@@ -258,6 +294,39 @@ class SpeakerTransport(object):
         if not isinstance(answer, dict) or not answer.get('ok'):
             raise SpeakerError('%s did not play "%s"' % (ip, name))
         return True
+
+    def status(self, ip, port=COMMAND_PORT):
+        """What the beacon is doing now. See clean_status for the shape."""
+        answer = clean_status(self._call(ip, port, '/status'))
+        if answer is None:
+            raise SpeakerError('%s sent a reply with no status in it' % ip)
+        return answer
+
+    def _simple(self, ip, port, path, payload, verb):
+        answer = self._call(ip, port, path, payload)
+        if not isinstance(answer, dict) or not answer.get('ok'):
+            raise SpeakerError('%s did not %s' % (ip, verb))
+        return answer
+
+    def pause(self, ip, port=COMMAND_PORT):
+        """Pause what is playing. A beacon with nothing playing, or one
+        without mpv, answers 409 with why, and that comes back as the
+        error."""
+        self._simple(ip, port, '/pause', {}, 'pause')
+        return True
+
+    def resume(self, ip, port=COMMAND_PORT):
+        self._simple(ip, port, '/resume', {}, 'resume')
+        return True
+
+    def set_volume(self, ip, port, volume):
+        """0 to 100. Returns the volume the beacon settled on."""
+        answer = self._simple(ip, port, '/volume',
+                              {'volume': int(volume)}, 'take the volume')
+        try:
+            return int(answer.get('volume'))
+        except (TypeError, ValueError):
+            return int(volume)
 
     def stop(self, ip, port=COMMAND_PORT):
         """End whatever the speaker is playing. Returns its name, or None.

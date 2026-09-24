@@ -20,11 +20,12 @@ Built for **Kodi 17.6 (Krypton)** — `xbmc.python 2.25.0`, Python 2.7.
 
 * **Govee lights** over the Govee LAN protocol, the Govee cloud API, or both —
   power, brightness, RGB colour and colour temperature.
-* **Speakers** — a Raspberry Pi with a speaker on it, running one script,
+* **Beacons** — a Raspberry Pi with a speaker on it, running one script,
   that plays a named audio file as a step in a sequence. *"The eggs are
   done"* in the kitchen, fifteen minutes after you walked away. Nothing is
   learned or uploaded: the Pi that plays the message is the one place the
-  message lives.
+  message lives. The web remote gives them a tab of their own, with pause,
+  stop and volume per room.
 * **Broadlink RM blasters** — learn an infrared or radio code from a remote
   and send it back, over the LAN with no Broadlink account. Radio needs a
   Pro-class blaster; a Mini has no transmitter for it.
@@ -120,10 +121,10 @@ device that gave no reading is looked for at most once every five minutes,
 because each look is a discovery — seconds — and a light off at the wall is
 silent on every sweep.
 
-Only Govee, Kasa and Tuya are looked for: they are found by searching the
-LAN. A blind goes through SwitchBot's servers and has no address to be wrong
-about, and a blaster or a speaker reports no state, so silence from one of
-those is not a symptom. A blaster that moved shows up as a failed command
+Only Govee, Kasa, Tuya and the beacons are looked for: they are found by
+searching the LAN. A blind goes through SwitchBot's servers and has no
+address to be wrong about, and a blaster reports no state, so silence from
+one is not a symptom. A blaster that moved shows up as a failed command
 instead — see *When a blaster stops working* below.
 
 The better fix is a **DHCP reservation** for every device in the router, at
@@ -1386,65 +1387,96 @@ down the old address. Nothing is stuck; it is recording what is true.
 
 ---
 
-## Speakers (Raspberry Pi)
+## Beacons (Raspberry Pi)
 
-**A speaker is a blaster that emits sound.** It has no state to read and
-nothing to switch; what it has is a set of named things it can emit, and a
-step that says *emit this one on that device*. So it claims the one capability
-a Broadlink claims, and its **clips are its commands**:
+**A beacon is a blaster that emits sound.** It has nothing to switch; what
+it has is a set of named things it can emit, and a step that says *emit this
+one on that device*. So it claims the capability a Broadlink claims, and its
+**clips are its commands**:
 
 ```
-3. Kitchen Speaker: hardboiled complete
+3. Kitchen: hardboiled complete
 ```
 
 built with the same picker you use for TV remote codes. Everything that
 already knows what to do with a command — the sequence editor, nesting, the
-speed dial, a phrase, the web remote, **Last run** — works on a speaker
-without learning that it is one. A speaker that is unplugged fails the way a
+speed dial, a phrase, the web remote, **Last run** — works on a beacon
+without learning that it is one. A beacon that is unplugged fails the way a
 plug that is unplugged fails, and says so in the same words.
 
-Each step names **one** speaker, the way each step names one plug. Two
+It is also a player, which a blaster is not. It says what it is playing and
+how far in, it can be paused and resumed, and it has a volume. Those are on
+the web remote's **Beacons** tab, one card per room, and on **Show status**
+in Kodi.
+
+Each step names **one** beacon, the way each step names one plug. Two
 messages in the bedtime sequence go to the bedroom Pi; the kitchen and office
 are no more involved than the office plug is when you switch the bedroom lamp.
 
 ### Setting up a Pi
 
-Any Pi with a speaker plugged in — a Zero 2 W is plenty. Copy
-`tools/paragon_speaker.py` onto it and run:
+Any Pi with a speaker plugged in — a Zero 2 W is plenty. Install the player,
+copy `tools/paragon_speaker.py` onto it, and run it:
 
 ```
-python3 paragon_speaker.py --name "Kitchen Speaker" --folder ~/paragon-clips
+sudo apt install -y mpv
+python3 paragon_speaker.py --name "Kitchen" --folder ~/aurora
 ```
 
-Standard library only; nothing to install. It plays through whatever is
-present — `aplay` for WAV (on every Raspberry Pi OS), `mpg123` for MP3.
+`mpv` is what makes it a player: one stays running for the life of the
+script and is driven over its control socket, which is how pause, volume
+and *how far in* are questions the beacon can answer. Without it the script
+still runs, through `aplay` for WAV and `mpg123` for MP3, and it plays and
+stops and nothing more — the card on the phone says so, and offers only the
+buttons that will work.
 
 **Drop audio files in the folder.** Each one is a clip named by its filename
 with the extension dropped: `hardboiled complete.wav` is the clip
-`hardboiled complete`. Then **Refresh devices** on the Kodi box. The speaker
+`hardboiled complete`. Then **Refresh devices** on the Kodi box. The beacon
 appears under its own kind, and its clips appear in the step picker.
 
 **Adding a message is copying a file.** Nothing to edit in Kodi, nothing to
 learn, nothing to sync. The next search picks up the new name. That is also
 why each message should live only on the Pi that plays it: the picker then
-cannot offer you an impossible step, because choosing `Bedroom Speaker` shows
-you what the bedroom Pi actually has.
+cannot offer you an impossible step, because choosing `Bedroom` shows you
+what the bedroom Pi actually has. For the same library in every room, copy
+the folder to every Pi — from the folder that holds `aurora`:
+
+```
+scp -r aurora aryez@beacon1:
+scp -r aurora aryez@beacon2:
+```
 
 To keep it running across reboots, a systemd unit:
 
 ```
 [Unit]
-Description=Paragon speaker
+Description=Paragon beacon
 After=network-online.target sound.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/pi/paragon_speaker.py --name "Kitchen Speaker" --folder /home/pi/paragon-clips
+ExecStart=/usr/bin/python3 /home/aryez/paragon_speaker.py --name "Kitchen" --folder /home/aryez/aurora
 Restart=always
-User=pi
+User=aryez
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+### The Beacons tab
+
+On the web remote, once a search has found a beacon. One card per beacon:
+what it is playing with a bar that moves, **Pause** (which reads **Resume**
+while it is paused), **Stop**, a volume slider, and its clips as buttons —
+the one playing lit in teal. Press a clip and it plays there; press another
+and it replaces the first.
+
+While the tab is open the phone asks the beacons every three seconds, and
+only the beacons: a pause pressed in the kitchen shows on the tablet in the
+office, and no light in the house is asked for a progress bar it does not
+have. Those polls are not written to the Kodi log. The volume is per beacon
+and it sticks — set the kitchen to 40 and it is 40 for the next clip and
+after a reboot of the Pi, because the Pi writes it down.
 
 ### How it is reached
 
@@ -1453,7 +1485,7 @@ Two ports, both on the LAN, nothing leaving the house:
 | | |
 |---|---|
 | UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and clips |
-| HTTP 8766 | `GET /clips` lists them; `POST /play` starts one, stopping the last; `POST /stop` ends it |
+| HTTP 8766 | `GET /clips` lists them, `GET /status` says what it is doing; `POST /play` starts one, stopping the last; `POST /stop`, `/pause`, `/resume`, `/volume` |
 
 The clip list rides along in the discovery reply, so **one search is one
 complete answer** — which is why a refresh is what picks up a new file. The
@@ -1469,29 +1501,35 @@ as long as it plays for.
 
 **One thing plays at a time, and starting a clip stops the last one.** Not
 queued behind it: an announcement lands when it was sent, not after an hour
-of whatever album was on. So a speaker is as happy with albums as with
-five-second clips — `Beacon1: Stargazer` starts the album, and
-`Beacon1: hardboiled complete` cuts in over it when the eggs are done.
+of whatever album was on. So a beacon is as happy with albums as with
+five-second clips — `Kitchen: Stargazer` starts the album, and
+`Kitchen: hardboiled complete` cuts in over it when the eggs are done.
 
-**`Stop` is the first command on every speaker**, before its clips, so it is
+**`Stop` is the first command on every beacon**, before its clips, so it is
 a step, a dial slot and a phrase like any clip is — *"Aurora, stop the
 music"* costs no more than any other phrase. Stopping when nothing is playing
-is not a fault. Don't name a clip `Stop`; the verb wins and the file is
-hidden.
+is not a fault. Pausing when nothing is playing is: the beacon answers
+`nothing is playing`, and so does the phone. Don't name a clip `Stop`; the
+verb wins and the file is hidden.
 
 A request that cannot be honoured — a clip that is not there, a file nothing
 can play — does not stop what was playing. And stopping the listener stops
 the player with it: `sudo systemctl restart paragon-speaker` ends the music,
 rather than orphaning it with nothing left that can.
 
-**Test connection** on a speaker asks it what it can play, over the HTTP path a
+**Test connection** on a beacon asks it what it can play, over the HTTP path a
 command takes — the hello proves the Pi is on the network; this proves the
 half that `play` goes through — and refreshes the clip list while it is there.
 
-**A clip the speaker does not have is refused by name, before anything goes on
+**A clip the beacon does not have is refused by name, before anything goes on
 the wire.** The Pi would refuse it too, as `HTTP 404`; this says which clip on
-which speaker, and it is what stands between a sequence and a message that
+which beacon, and it is what stands between a sequence and a message that
 was renamed on the Pi last week.
+
+**A beacon that gave no reading is looked for**, the way a light is — see
+*If the lights stop answering after a router reboot*. A Pi that came back
+from a router reboot on a new address is found and written down without a
+refresh.
 
 ### On the Pi, a name is never a path
 

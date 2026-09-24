@@ -5,15 +5,21 @@ Creator: Aryez
 Year: 2026
 Part of: Paragon TV Project
 
-The speaker driver: a Raspberry Pi with a speaker on it, as a Paragon device.
+The beacon driver: a Raspberry Pi with a speaker on it, as a Paragon device.
 
-A speaker is a blaster that emits sound. It has no state to read and nothing
-to switch; what it has is a set of named things it can emit, and a step that
-says "emit this one on that device". So it claims the one capability the
-Broadlink claims, and its clip names are its commands. Everything that
-already knows what to do with a command -- the step picker, the sequence
-editor, the speed dial, a phrase, the web remote's command action, the
-last-run record -- works on a speaker without learning that it is one.
+A beacon is a blaster that emits sound. It has nothing to switch; what it
+has is a set of named things it can emit, and a step that says "emit this
+one on that device". So it claims the capability the Broadlink claims, and
+its clip names are its commands. Everything that already knows what to do
+with a command -- the step picker, the sequence editor, the speed dial, a
+phrase, the web remote's command action, the last-run record -- works on a
+beacon without learning that it is one.
+
+It is also a player, which a blaster is not: it can say what it is playing
+and how far in, be paused and resumed, and be turned up and down. That is
+CAP_PLAYBACK, and the three verbs go through the Hub like every other
+verb. It reports state, so a beacon that gave no reading is looked for the
+way a light is.
 
 The one difference from the blaster: a code is learned into this add-on and
 kept here, whereas a clip is a file on the Pi. So the clip list is read from
@@ -23,7 +29,8 @@ menus can offer clips without a network call. Adding a message to a room is
 copying a file onto that room's Pi and pressing Refresh devices.
 """
 
-from devices import CAP_COMMANDS, ControlError, Device
+from devices import (CAP_COMMANDS, CAP_PLAYBACK, CAP_STATE, ControlError,
+                     Device)
 from speaker_lan import COMMAND_PORT, SpeakerError, SpeakerTransport
 
 CLIP_FILE = 'speaker_clips.json'
@@ -39,8 +46,10 @@ STOP = 'Stop'
 class SpeakerDriver(object):
     """Finds speakers and plays their clips."""
 
+    # The id stays 'speaker': it is in every devices.json and every step
+    # that names one. The word people see is Beacon.
     DRIVER_ID = 'speaker'
-    DRIVER_LABEL = 'Speaker'
+    DRIVER_LABEL = 'Beacon'
 
     def __init__(self, transport=None, clips=None, save_clips=None,
                  log_func=None):
@@ -66,7 +75,7 @@ class SpeakerDriver(object):
                 driver=self.DRIVER_ID,
                 device_id=entry['id'],
                 name=entry.get('name') or '',
-                model='Paragon speaker',
+                model='Paragon beacon',
                 ip=entry.get('ip', ''),
                 lan=True,
                 driver_data={'port': entry.get('port') or COMMAND_PORT},
@@ -79,12 +88,20 @@ class SpeakerDriver(object):
             self._save_clips()
         return devices, []
 
+    def locate(self, devices, timeout=3.0):
+        """Where the listed beacons are right now: {device_id: ip}."""
+        wanted = set(device.device_id for device in devices)
+        return dict((entry['id'], entry['ip'])
+                    for entry in self.transport.discover(timeout=timeout)
+                    if entry.get('ip') and entry['id'] in wanted)
+
     # -- capabilities ------------------------------------------------------
 
     @staticmethod
     def capabilities(device):
-        """Emits clips, and nothing else. No colour, no power, no state."""
-        return set([CAP_COMMANDS])
+        """Emits clips, plays, and says what it is playing. No colour, no
+        power: nothing here is a switch."""
+        return set([CAP_COMMANDS, CAP_STATE, CAP_PLAYBACK])
 
     def commands(self, device):
         """Stop, then the clips. Stop is always there, clips or no clips."""
@@ -151,21 +168,56 @@ class SpeakerDriver(object):
         return True, ('%s answered with %d clip(s):\n\n%s'
                       % (device.name, len(names), '\n'.join(names)))
 
-    # -- state verbs: a speaker has none ------------------------------------
+    # -- playback ------------------------------------------------------------
+
+    def _playback(self, device, verb, call, *args):
+        try:
+            return call(device.ip, self._port(device), *args)
+        except SpeakerError as exc:
+            raise ControlError('%s: %s' % (device.name, exc))
+
+    def pause(self, device):
+        self._playback(device, 'pause', self.transport.pause)
+        self._log('Paused %s' % device.name)
+        return True
+
+    def resume(self, device):
+        self._playback(device, 'resume', self.transport.resume)
+        self._log('Resumed %s' % device.name)
+        return True
+
+    def set_volume(self, device, volume):
+        try:
+            volume = max(0, min(100, int(round(float(volume)))))
+        except (TypeError, ValueError):
+            raise ControlError('%r is not a volume' % (volume,))
+        settled = self._playback(device, 'volume', self.transport.set_volume,
+                                 volume)
+        self._log('%s volume %d' % (device.name, settled))
+        return settled
+
+    # -- state ---------------------------------------------------------------
+
+    def get_state(self, device):
+        """What it is playing, or None if it did not answer."""
+        try:
+            return self.transport.status(device.ip, self._port(device))
+        except SpeakerError as exc:
+            self._log('No status from %s: %s' % (device.name, exc))
+            return None
+
+    def get_states(self, devices, timeout=3.0):
+        """One short HTTP exchange per beacon. A house has three."""
+        return dict((device.device_id, self.get_state(device))
+                    for device in devices)
+
+    # -- switch verbs: a beacon is not a switch ------------------------------
 
     @staticmethod
     def turn(device, on):
-        raise ControlError('%s is a speaker; it cannot be switched'
+        raise ControlError('%s is a beacon; it cannot be switched'
                            % device.name)
 
     set_brightness = turn
     set_color = turn
     set_color_temp = turn
-
-    @staticmethod
-    def get_state(device):
-        return None
-
-    @staticmethod
-    def get_states(devices, timeout=3.0):
-        return dict((device.device_id, None) for device in devices)

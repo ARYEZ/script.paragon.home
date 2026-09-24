@@ -37,6 +37,15 @@ CAP_COLOR_TEMP = 'color_temp'
 CAP_STATE = 'state'        # can report what it is currently doing
 CAP_COMMANDS = 'commands'  # emits named commands, e.g. a learned IR code
 CAP_POSITION = 'position'  # opens and closes to a percentage, e.g. a blind
+CAP_PLAYBACK = 'playback'  # plays, pauses and has a volume: a beacon
+
+# What each driver is called where a person reads it: the menus, the web
+# remote. One table, so a driver renamed here is renamed everywhere. A driver
+# that is loaded answers with its own DRIVER_LABEL; this is for an id read
+# from a file before, or without, its driver.
+DRIVER_LABELS = {'govee': 'Govee', 'broadlink': 'Broadlink', 'tuya': 'Tuya',
+                 'kasa': 'Kasa', 'switchbot': 'SwitchBot',
+                 'speaker': 'Beacon'}
 # Throws a deadbolt.
 CAP_LOCK = 'lock'
 # Withdraws one. Separate from CAP_LOCK rather than folded into it, because the
@@ -50,6 +59,36 @@ CAP_UNLOCK = 'unlock'
 # Devices cached before drivers existed have no driver recorded; they are all
 # Govee, because that is all there was.
 DEFAULT_DRIVER = 'govee'
+
+
+def clock(seconds):
+    """Seconds as m:ss, or h:mm:ss past an hour. '' for nothing."""
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return ''
+    total = max(0, total)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return '%d:%02d:%02d' % (hours, minutes, secs)
+    return '%d:%02d' % (minutes, secs)
+
+
+def describe_playback(state):
+    """One line for what a beacon is doing: playing what, how far in."""
+    playing = state.get('playing')
+    if not playing:
+        return 'Silent'
+    verb = 'Paused' if state.get('paused') else 'Playing'
+    where = ''
+    elapsed = clock(state.get('elapsed'))
+    duration = clock(state.get('duration'))
+    if elapsed and duration:
+        where = ' (%s of %s)' % (elapsed, duration)
+    elif elapsed:
+        where = ' (%s in)' % elapsed
+    return '%s: %s%s' % (verb, playing, where)
 
 
 def describe_state(state):
@@ -67,6 +106,12 @@ def describe_state(state):
     if not isinstance(state, dict):
         return []
     lines = []
+
+    if 'playing' in state:
+        # A beacon. What it is playing and how far in, then the volume.
+        lines.append(describe_playback(state))
+        if state.get('volume') is not None:
+            lines.append('Volume: %s%%' % state['volume'])
 
     bolt = state.get('lock')
     if bolt:
@@ -602,7 +647,7 @@ def build_hub(settings):
             log_func=settings.get('log_func')))
 
     if settings.get('speaker_enabled', True):
-        # A speaker is a blaster that emits sound: same capability, same
+        # A beacon is a blaster that emits sound: same capability, same
         # step, and its clips are kept the way learned codes are.
         from speaker_driver import SpeakerDriver
         from speaker_lan import SpeakerTransport
