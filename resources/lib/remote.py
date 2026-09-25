@@ -704,16 +704,29 @@ def perform(app, action, params, sleep_func=None, on_step=None):
                     'message': '%s does not play anything' % device.name}
         if action == 'pause':
             app.controller.pause(device)
-            return {'ok': True, 'message': '%s paused' % device.name}
-        if action == 'resume':
+            answer = {'ok': True, 'message': '%s paused' % device.name}
+        elif action == 'resume':
             app.controller.resume(device)
-            return {'ok': True, 'message': '%s playing' % device.name}
-        try:
-            volume = int(round(float(params.get('value'))))
-        except (TypeError, ValueError):
-            return {'ok': False, 'message': 'That needs a volume, 0 to 100'}
-        settled = app.controller.set_volume(device, volume)
-        return {'ok': True, 'message': '%s at %d%%' % (device.name, settled)}
+            answer = {'ok': True, 'message': '%s playing' % device.name}
+        else:
+            try:
+                volume = int(round(float(params.get('value'))))
+            except (TypeError, ValueError):
+                return {'ok': False,
+                        'message': 'That needs a volume, 0 to 100'}
+            settled = app.controller.set_volume(device, volume)
+            answer = {'ok': True,
+                      'message': '%s at %d%%' % (device.name, settled)}
+        # Read the beacon back. The snapshot the page redraws from still holds
+        # the last poll's reading, and a reading outranks what we told it -- so
+        # without this the slider snapped back to the old volume, and Pause
+        # kept saying Pause, until the next poll happened to land. A beacon
+        # that does not answer leaves the snapshot as it was rather than
+        # blanking the card.
+        after = app.controller.get_states([device])
+        if after.get(device.device_id) is not None:
+            answer['states_update'] = after
+        return answer
 
     if action == 'beacons':
         # The player half of the state read, on its own: the Beacons tab
@@ -1613,7 +1626,6 @@ PAGE = """<!DOCTYPE html>
   --live: linear-gradient(100deg,
       var(--live-1) 0%, var(--live-2) 45%, var(--live-3) 100%);
   --live-ink: #ff5c86;
-  --teal: #2dd8b8;
   --text: #f2f2f4;
   --muted: #8b8b93;
   --dim: #5f5f68;
@@ -1635,9 +1647,11 @@ PAGE = """<!DOCTYPE html>
      outright keeps the ember an ember. */
   --wash: linear-gradient(118deg,
       #16141a 0%, #1d1519 32%, #3f1b1a 66%, #2c1619 85%, #17131b 100%);
-  /* The same light in the colour a lit device answers in. */
+  /* The same light turned up, for a device that reports itself on: the
+     ember band brighter and more orange, so on and off still read apart
+     now that both are the page's own colour. */
   --wash-lit: linear-gradient(118deg,
-      #121a1c 0%, #12231f 32%, #133429 66%, #12261f 85%, #11191b 100%);
+      #1a1513 0%, #261813 32%, #552314 66%, #371a13 85%, #1b1414 100%);
   --display: 'Paragon', 'Saira Condensed', 'Oswald', 'Roboto Condensed',
              'Arial Narrow', sans-serif;
   --body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -1871,12 +1885,12 @@ button.head[aria-expanded="true"] .caret {
   border-radius: 3px 3px 0 0;
 }
 .card.plain::before { display: none; }
-/* A device that reports itself on wears the teal edge rather than the orange
-   one, so the colour carries the state instead of just being decoration --
-   and the wash inside it turns with the edge. */
+/* A device that reports itself on wears a bright orange edge rather than the
+   orange-to-red one, so the edge carries the state instead of just being
+   decoration -- and the wash inside it brightens with the edge. */
 .card.lit { background-image: var(--wash-lit); }
 .card.lit::before {
-  background: linear-gradient(100deg, #2dd8b8 0%, #17a08c 100%);
+  background: linear-gradient(100deg, #ffa05a 0%, var(--orange) 100%);
 }
 
 .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
@@ -1933,7 +1947,7 @@ button.wide { width: 100%; }
 /* -- beacons ------------------------------------------------------------- */
 
 .beacon .now { margin-top: 4px; }
-.beacon .now.on { color: var(--teal); }
+.beacon .now.on { color: var(--orange); }
 .beacon .meter {
   height: 4px; border-radius: 2px; background: var(--line);
   margin: 14px 0 6px;
@@ -1950,7 +1964,7 @@ button.wide { width: 100%; }
 }
 .beacon .clips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .beacon .clips button { flex: 0 1 auto; }
-.beacon .clips button.playing { border-color: var(--teal); color: var(--teal); }
+.beacon .clips button.playing { border-color: var(--orange); color: var(--orange); }
 .beacon .noctl { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
 
 .dialgrid {
@@ -2035,7 +2049,7 @@ button.tile .sub {
 /* A deadbolt. Given its own edge so a door does not read as another lamp in
    the list, and a jammed bolt takes the red the page already uses for a
    failure, because that is what it is. */
-.card.dev.bolt::before { background: var(--teal); opacity: .9; }
+.card.dev.bolt::before { background: var(--orange); opacity: .9; }
 .card.dev.jammed::before { background: #ff5f5f; opacity: 1; }
 .card.dev.jammed .state { color: #ff5f5f; }
 .lockbtn { font-weight: 700; }
@@ -2122,7 +2136,7 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 2px; }
   letter-spacing: 1.2px;
 }
 .dev .state { margin-top: 2px; }
-.dev .state.on { color: var(--teal); }
+.dev .state.on { color: var(--orange); }
 .dev .controls { display: flex; gap: 8px; margin-top: 12px; }
 .dev .controls button { flex: 1; font-size: 12px; padding: 10px 8px;
                         min-height: 40px; }
@@ -2349,8 +2363,8 @@ footer button { flex: 1 1 auto; }
 /* -- where the two halves differ ---------------------------------------- */
 
 /* `lit` means two things on this page, and they are not the same thing.
-   On the lights it means a device reports itself on, and it wears the teal
-   the rest of that half uses. On the television it means the channel you are
+   On the lights it means a device reports itself on, and it wears the bright
+   orange edge and wash. On the television it means the channel you are
    watching, and it wears the ember Paragon TV draws behind its own
    selection. Scoped to the panel rather than renamed, because within each
    half the word is right.

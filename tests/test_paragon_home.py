@@ -17387,6 +17387,31 @@ class TestWebRemote(unittest.TestCase):
         self.assertIsNotNone(self.app.pending_for('Coffee'),
                              'the phone slept through the brew')
 
+    def test_nothing_on_the_page_is_teal(self):
+        """Aryez: "Everything that is still teal needs to be orange." The
+        beacon's Playing line and its lit clip were the last of it; the
+        lights' on state, a lit card's edge and wash, and the deadbolt's
+        edge went with them. Checked by colour rather than by name, so a
+        teal that comes back under another name is caught too."""
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        style = page[page.index('<style>'):page.index('</style>')]
+
+        self.assertNotIn('--teal', style)
+        green = []
+        for hexa in re.findall(r'#([0-9a-fA-F]{6})\b', style):
+            r, g, b = (int(hexa[i:i + 2], 16) for i in (0, 2, 4))
+            if g > r + 15:
+                green.append('#' + hexa)
+        self.assertEqual(green, [], 'a green or teal is back on the page')
+        for rule in ('.beacon .now.on', '.beacon .clips button.playing',
+                     '.dev .state.on'):
+            body = re.search(re.escape(rule) + r' \{([^}]*)\}', style)
+            self.assertIsNotNone(body, rule)
+            self.assertIn('var(--orange)', body.group(1), rule)
+
     def test_the_status_line_answers_in_the_page_orange(self):
         """"Working" and what came of it are one action, so they are one colour."""
         import re
@@ -17665,6 +17690,56 @@ class TestWebRemote(unittest.TestCase):
                          {'ok': False,
                           'message': 'Hall Blaster does not play anything'})
         self.assertEqual(len(self.recorder.calls), 3)
+
+    def test_the_snapshot_holds_what_the_beacon_was_just_set_to(self):
+        """Aryez, on beacon1: the volume changed, and the slider went back
+        to the number before. The page redraws from the snapshot 600 ms
+        after an action, and the snapshot still held the last poll's reading,
+        which outranks anything told. So the beacon is read back after each
+        of these, and the snapshot takes what it says."""
+        self.beacon()
+        client = self.signed_in()
+        client.act('beacons')
+
+        def beacon():
+            return [d for d in client.state()['data']['devices']
+                    if d['id'] == 'BE:01'][0]
+
+        self.assertEqual(beacon()['volume'], 40)
+
+        # The stand-in beacon now says what a real one would after each.
+        self.recorder.states['BE:01'] = dict(
+            self.recorder.states['BE:01'], volume=56)
+        client.act('volume', target='BE:01', value='56')
+        self.assertEqual(beacon()['volume'], 56,
+                         'the slider would snap back to the old volume')
+
+        self.recorder.states['BE:01'] = dict(
+            self.recorder.states['BE:01'], paused=True)
+        client.act('pause', target='BE:01')
+        self.assertTrue(beacon()['paused'], 'Pause would still say Pause')
+
+        self.recorder.states['BE:01'] = dict(
+            self.recorder.states['BE:01'], paused=False)
+        client.act('resume', target='BE:01')
+        self.assertFalse(beacon()['paused'], 'Resume would still say Resume')
+
+    def test_a_beacon_that_does_not_answer_back_keeps_its_card(self):
+        """The read-back is a second request at the Pi. If that one gets
+        nothing, the card stays as the last poll left it rather than going
+        blank -- and the volume just set still shows, from what was told."""
+        self.beacon()
+        client = self.signed_in()
+        client.act('beacons')
+
+        self.recorder.states['BE:01'] = None
+        answer = client.act('volume', target='BE:01', value='56')
+
+        self.assertTrue(answer['data']['ok'])
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BE:01'][0]
+        self.assertEqual(entry['playing'], 'goodnight',
+                         'a silent read-back blanked the card')
 
     def test_a_beacon_poll_is_not_written_to_the_log(self):
         """Every three seconds while the tab is open. The line that says
