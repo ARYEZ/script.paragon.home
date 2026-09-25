@@ -62,7 +62,11 @@ to `RemoteServer.take_reading`, merged over the rest; a None reading keeps
 the last one (WiFi bulbs miss replies); it does not reset `_states_at`,
 since cloud devices are not in it. 2.68.0: Sequences, Scenes and All lights
 fold like the driver sections (`FOLDS`, `foldSections`), open by default,
-remembered per browser under `paragon.section.home.<body id>`.
+remembered per browser under `paragon.section.home.<body id>`. 2.69.0: a
+beacon clip step (KIND_COMMAND) may carry `volume` 0-100, absent = leave as
+is; set before the clip in `_run_step`; a refused volume still plays and
+fails the step with "Played, but the volume was not set". Asked for in
+`_step_device` (so the dial and phrases get it too), not for Stop.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

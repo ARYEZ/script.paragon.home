@@ -45,6 +45,8 @@ TEMP_PRESETS = [
 ]
 
 BACK = -1
+# Backed out of a question inside a question, where None is a real answer.
+GAVE_UP = object()
 
 # What a light is set to while the naming walkthrough is asking about it.
 # Full brightness magenta reads clearly against normal room lighting and
@@ -3186,7 +3188,8 @@ class ControlPanel(object):
 
     def _step_device(self, driver_id):
         """Which device of this driver, then what to do to it."""
-        from devices import CAP_COMMANDS, CAP_POWER
+        from devices import CAP_COMMANDS, CAP_PLAYBACK, CAP_POWER
+        from speaker_driver import STOP
 
         label = self._driver_label(driver_id)
         devices = self._devices_for(driver_id, self.app.enabled_devices)
@@ -3247,8 +3250,35 @@ class ControlPanel(object):
             if value is None:
                 return None
             chosen = str(max(0, min(100, value)))
-        return {'kind': kind, 'driver': driver_id, 'target': target,
+        step = {'kind': kind, 'driver': driver_id, 'target': target,
                 'action': chosen}
+        # A beacon's clip, then how loud. Not for Stop, which has nothing to
+        # be loud about.
+        if (kind == sequence_lib.KIND_COMMAND
+                and CAP_PLAYBACK in capabilities and chosen != STOP):
+            volume = self._ask_step_volume()
+            if volume is GAVE_UP:
+                return None
+            if volume is not None:
+                step['volume'] = volume
+        return step
+
+    def _ask_step_volume(self):
+        """How loud a beacon plays this clip: a volume, None to leave the
+        beacon as it is, or GAVE_UP to give up on the step."""
+        rows = [('Leave the volume as it is', None)]
+        rows.extend(('%d%%' % level, level) for level in (25, 50, 75, 100))
+        rows.append(('Volume...', 'ask'))
+        choice = _select('How loud', [label for label, _v in rows])
+        if choice == BACK:
+            return GAVE_UP
+        volume = rows[choice][1]
+        if volume == 'ask':
+            value = self._ask_number('Volume (0-100)', '50')
+            if value is None:
+                return GAVE_UP
+            volume = max(0, min(100, value))
+        return volume
 
     def _step_pause(self):
         return 'pause'

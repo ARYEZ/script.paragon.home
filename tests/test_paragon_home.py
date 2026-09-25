@@ -3576,6 +3576,186 @@ class TestSkippingWhatIsDone(unittest.TestCase):
         self.assertIn('1 already done', said)
 
 
+class TestABeaconStepSaysHowLoud(unittest.TestCase):
+    """Aryez: picking a beacon for a step should let the step set its
+    volume. A clip step carries an optional volume, set before the clip so
+    it starts at it; no volume leaves the beacon as it is, which is what
+    every step written before this means."""
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui',
+                     'speeddial'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.seq = sequences
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.command_map = {'BE:01': ['Stop', 'goodnight'],
+                                     'IR:01': ['TV Power']}
+        app.controller = self.recorder
+        app._devices = [
+            Device('BE:01', name='Kitchen', driver='speaker', lan=True,
+                   ip='10.0.0.60'),
+            Device('IR:01', name='Hall Blaster', driver='broadlink',
+                   lan=True, ip='10.0.0.11'),
+        ]
+        app._scenes = []
+        return app
+
+    def clip(self, **extra):
+        step = {'kind': 'command', 'driver': 'speaker', 'target': 'BE:01',
+                'action': 'goodnight'}
+        step.update(extra)
+        return step
+
+    # -- what is written down ----------------------------------------------
+
+    def test_the_volume_is_kept_clamped_and_described(self):
+        normal = self.seq.normalise_step
+        self.assertEqual(normal(self.clip(volume=40))['volume'], 40)
+        self.assertEqual(normal(self.clip(volume='40.4'))['volume'], 40)
+        self.assertEqual(normal(self.clip(volume=140))['volume'], 100)
+        self.assertEqual(normal(self.clip(volume=-5))['volume'], 0)
+        self.assertEqual(normal(self.clip(volume=0))['volume'], 0,
+                         'silent is a volume, not no volume')
+        self.assertEqual(
+            self.seq.describe_step(normal(self.clip(volume=40)), 'Kitchen'),
+            'Kitchen: goodnight at 40%')
+
+    def test_no_volume_is_no_key_so_old_steps_are_unchanged(self):
+        """A step written before this reads exactly as it did."""
+        normal = self.seq.normalise_step
+        for blank in ({}, {'volume': None}, {'volume': ''},
+                      {'volume': 'loud'}, {'volume': True}):
+            step = normal(self.clip(**blank))
+            self.assertNotIn('volume', step, blank)
+            self.assertEqual(step['action'], 'goodnight',
+                             'a bad volume emptied the slot')
+        self.assertEqual(
+            self.seq.describe_step(normal(self.clip()), 'Kitchen'),
+            'Kitchen: goodnight')
+
+    def test_the_volume_survives_a_save_and_a_restart(self):
+        from paragon_home import ParagonHome
+
+        app = self.app()
+        app.save_sequence(self.seq.make_sequence(
+            'Bedtime', [self.clip(volume=30)]))
+
+        after = ParagonHome().sequence_by_name('Bedtime')
+        self.assertEqual(after['steps'][0]['volume'], 30)
+
+    # -- what a run does ---------------------------------------------------
+
+    def run_one(self, step):
+        app = self.app()
+        app._sequences = [self.seq.make_sequence('Bedtime', [step])]
+        app.run_sequence_by_name('Bedtime', announce=False)
+        return app.last_run('Bedtime')
+
+    def test_the_volume_is_set_before_the_clip_plays(self):
+        record = self.run_one(self.clip(volume=30))
+
+        self.assertEqual(self.recorder.calls, [
+            ('volume', 'BE:01', 30), ('command', 'BE:01', 'goodnight')])
+        self.assertEqual(record['steps'][0]['outcome'], self.seq.DID)
+
+    def test_a_step_with_no_volume_leaves_the_beacon_alone(self):
+        self.run_one(self.clip())
+
+        self.assertEqual(self.recorder.calls,
+                         [('command', 'BE:01', 'goodnight')])
+
+    def test_a_beacon_that_will_not_take_a_volume_still_plays(self):
+        """No mpv on the Pi. The announcement is the point of the step, so
+        it goes out; the run says it went out at the wrong volume rather
+        than that it went fine."""
+        from devices import ControlError
+
+        def refuse(device, volume):
+            raise ControlError('this beacon has no volume control')
+
+        app = self.app()
+        self.recorder.set_volume = refuse
+        app._sequences = [self.seq.make_sequence('Bedtime',
+                                                 [self.clip(volume=30)])]
+        app.run_sequence_by_name('Bedtime', announce=False)
+        record = app.last_run('Bedtime')
+
+        self.assertEqual(self.recorder.calls,
+                         [('command', 'BE:01', 'goodnight')],
+                         'the clip was not played')
+        entry = record['steps'][0]
+        self.assertEqual(entry['outcome'], self.seq.FAILED)
+        self.assertIn('volume was not set', entry['why'])
+        self.assertIn('no volume control', entry['why'])
+
+    # -- the menu ----------------------------------------------------------
+
+    def pick(self, driver_id, *answers, **typed):
+        import gui
+
+        panel = gui.ControlPanel(self.app())
+        xbmcgui.SELECT_QUEUE.extend(answers)
+        xbmcgui.INPUT_QUEUE.extend(typed.get('typed', []))
+        step = panel._step_device(driver_id)
+        asked = [heading for heading, _o in xbmcgui.SELECT_CALLS]
+        return step, asked
+
+    def test_a_clip_asks_how_loud_and_keeps_the_answer(self):
+        # Kitchen, goodnight (Stop is first), 50%.
+        step, asked = self.pick('speaker', 1, 1, 2)
+
+        self.assertEqual(asked[-1], 'How loud')
+        self.assertEqual(step['action'], 'goodnight')
+        self.assertEqual(step['volume'], 50)
+        self.assertEqual(self.seq.normalise_step(step)['volume'], 50)
+
+    def test_leave_it_as_it_is_is_no_volume(self):
+        step, _asked = self.pick('speaker', 1, 1, 0)
+
+        self.assertEqual(step['action'], 'goodnight')
+        self.assertNotIn('volume', step)
+
+    def test_a_volume_can_be_typed(self):
+        step, _asked = self.pick('speaker', 1, 1, 5, typed=['130'])
+
+        self.assertEqual(step['volume'], 100)
+
+    def test_backing_out_of_how_loud_gives_up_on_the_step(self):
+        """Not a clip at whatever volume the beacon happens to be at: the
+        question was asked, and not answered."""
+        step, _asked = self.pick('speaker', 1, 1)
+        self.assertIsNone(step)
+
+        xbmcgui.reset()
+        step, _asked = self.pick('speaker', 1, 1, 5, typed=[''])
+        self.assertIsNone(step)
+
+    def test_stop_and_a_blaster_are_not_asked(self):
+        step, asked = self.pick('speaker', 1, 0)
+        self.assertEqual(step['action'], 'Stop')
+        self.assertNotIn('How loud', asked)
+        self.assertNotIn('volume', step)
+
+        xbmcgui.reset()
+        step, asked = self.pick('broadlink', 1, 0)
+        self.assertEqual(step['action'], 'TV Power')
+        self.assertNotIn('How loud', asked)
+
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 

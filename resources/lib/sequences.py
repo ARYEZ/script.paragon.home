@@ -329,6 +329,17 @@ def _clean_int(value, low, high, default=0):
     return max(low, min(high, number))
 
 
+def _volume(value):
+    """0 to 100 from whatever was written down, or None for none."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, number))
+
+
 def normalise_step(raw):
     """Clamp one step, or return an empty slot if it is not usable.
 
@@ -371,6 +382,15 @@ def normalise_step(raw):
         step['driver'] = (raw.get('driver') or '').strip()
         step['target'] = target
         step['action'] = action
+        # A beacon's clip can say how loud: the volume is set first, so the
+        # clip starts at it rather than jumping part way in. Absent is "leave
+        # it where it is", which is what every step written before this
+        # means, so it is left off rather than stored as a blank. One that
+        # is not a number is dropped rather than emptying the slot: the clip
+        # is the step, the volume is how it is said.
+        volume = _volume(raw.get('volume'))
+        if volume is not None:
+            step['volume'] = volume
         return step
 
     if kind == KIND_SEQUENCE:
@@ -519,6 +539,8 @@ def describe_step(step, device_name=None):
         text = '%s: %s' % (target, step.get('action', '').title())
     elif kind == KIND_COMMAND:
         text = '%s: %s' % (target, step.get('action'))
+        if step.get('volume') is not None:
+            text += ' at %d%%' % step['volume']
     elif kind == KIND_POSITION:
         text = '%s: %s%% open' % (target, step.get('action'))
     else:
@@ -999,8 +1021,23 @@ def _run_step(app, step, states=None):
         return
 
     if kind == KIND_COMMAND:
+        volume = step.get('volume')
+        missed = []
         for device in targets:
+            if volume is not None:
+                # Before the clip, so it starts at this volume. A beacon that
+                # will not take one -- no mpv on the Pi -- still plays: the
+                # announcement is the point of the step. It is reported after,
+                # so the run says the clip went out at the wrong volume rather
+                # than that it went out fine.
+                try:
+                    app.controller.set_volume(device, volume)
+                except ControlError as exc:
+                    missed.append('%s: %s' % (device.name, exc))
             app.controller.send_command(device, step['action'])
+        if missed:
+            raise ControlError('Played, but the volume was not set (%s)'
+                               % '; '.join(missed))
         return
 
     if kind == KIND_POSITION:
