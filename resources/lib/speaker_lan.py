@@ -140,7 +140,21 @@ def clean_status(raw):
         'volume': int(round(volume)) if volume is not None else None,
         # Whether pause and volume will work on this one: mpv or not.
         'controls': bool(raw.get('controls')),
+        # Bytes free for clips on the Pi. None from a Pi running a script
+        # older than the question, which is every Pi until it is copied over.
+        'free': _bytes(raw.get('free')),
     }
+
+
+def _bytes(value):
+    """A whole, non-negative number of bytes, or None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 class SpeakerTransport(object):

@@ -126,6 +126,15 @@ class ClipFolder(object):
         """The file behind a clip name, or None. The lookup is the guard."""
         return self.scan().get(name)
 
+    def free_bytes(self):
+        """Room left for clips: the free space on the drive the folder is
+        on, which on a Pi is the SD card. None if it cannot be read -- a
+        folder that is not there yet, say."""
+        try:
+            return shutil.disk_usage(self.folder).free
+        except OSError:
+            return None
+
 
 def player_for(path, override=None):
     """The command that plays this file, or None if nothing installed can.
@@ -510,6 +519,7 @@ class Speaker(object):
                   'paused': False, 'elapsed': None, 'duration': None,
                   'volume': None}
         report.update(self.player.status())
+        report['free'] = self.folder.free_bytes()
         if playing is None:
             report['paused'] = False
             report['elapsed'] = None

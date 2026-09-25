@@ -91,6 +91,18 @@ def describe_playback(state):
     return '%s: %s%s' % (verb, playing, where)
 
 
+def describe_free(count):
+    """Bytes as a person reads them, in the units `df -h` uses, so the two
+    agree when checked against each other: whole gigabytes from ten up, one
+    decimal below that, megabytes under one."""
+    gib = count / float(1024 ** 3)
+    if gib >= 10:
+        return '%d GB' % int(gib)
+    if gib >= 1:
+        return '%.1f GB' % gib
+    return '%d MB' % int(count / float(1024 ** 2))
+
+
 def describe_state(state):
     """What a device says it is doing, as lines to show. [] if it said nothing.
 
@@ -112,6 +124,8 @@ def describe_state(state):
         lines.append(describe_playback(state))
         if state.get('volume') is not None:
             lines.append('Volume: %s%%' % state['volume'])
+        if state.get('free') is not None:
+            lines.append('Free space: %s' % describe_free(state['free']))
 
     bolt = state.get('lock')
     if bolt:

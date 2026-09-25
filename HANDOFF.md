@@ -66,7 +66,11 @@ remembered per browser under `paragon.section.home.<body id>`. 2.69.0: a
 beacon clip step (KIND_COMMAND) may carry `volume` 0-100, absent = leave as
 is; set before the clip in `_run_step`; a refused volume still plays and
 fails the step with "Played, but the volume was not set". Asked for in
-`_step_device` (so the dial and phrases get it too), not for Stop.
+`_step_device` (so the dial and phrases get it too), not for Stop. 2.70.0: the
+Pi's /status carries `free` (bytes, `shutil.disk_usage` on the clip folder);
+`clean_status` keeps it as int or None; `describe_free` words it in df -h
+units; the snapshot sends `free` (words) and `ip` for beacons only; the card
+shows "10.0.0.60 - 24 GB free". Needs the new paragon_speaker.py on each Pi.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

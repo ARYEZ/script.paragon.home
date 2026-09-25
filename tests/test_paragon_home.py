@@ -5234,9 +5234,12 @@ class TestTheSpeaker(unittest.TestCase):
 
         state = driver.get_state(self.device())
 
+        # This stand-in speaks the older script, which says nothing about
+        # free space: None, not a guess.
         self.assertEqual(state, {'playing': 'goodnight', 'paused': True,
                                  'elapsed': 62.4, 'duration': 180.0,
-                                 'volume': 40, 'controls': True})
+                                 'volume': 40, 'controls': True,
+                                 'free': None})
 
     def test_a_silent_beacon_reports_silence_not_nothing(self):
         """Silence is a reading. None is a beacon that did not answer, and
@@ -5266,13 +5269,44 @@ class TestTheSpeaker(unittest.TestCase):
                                    'elapsed': '3.5', 'duration': 'x',
                                    'volume': '40.4', 'controls': 'yes'}),
             {'playing': 'goodnight', 'paused': True, 'elapsed': 3.5,
-             'duration': None, 'volume': 40, 'controls': True})
+             'duration': None, 'volume': 40, 'controls': True,
+             'free': None})
         self.assertEqual(
             self.lan.clean_status({'playing': '', 'paused': True,
                                    'elapsed': 9, 'volume': None}),
             {'playing': None, 'paused': False, 'elapsed': None,
-             'duration': None, 'volume': None, 'controls': False})
+             'duration': None, 'volume': None, 'controls': False,
+             'free': None})
         self.assertIsNone(self.lan.clean_status(['not', 'a', 'dict']))
+
+    def test_the_free_space_is_read_as_whole_bytes(self):
+        """Room left on the Pi, for the card. None from an older script,
+        and from anything that is not a count of bytes."""
+        free = lambda value: self.lan.clean_status({'free': value})['free']
+        self.assertEqual(free(25769803776), 25769803776)
+        self.assertEqual(free('1024'), 1024)
+        self.assertEqual(free(0), 0, 'a full card is a size, not no answer')
+        for bad in (None, -1, 'lots', True, [1]):
+            self.assertIsNone(free(bad), bad)
+        self.assertIsNone(self.lan.clean_status({})['free'],
+                          'an older script said something')
+
+    def test_the_free_space_is_said_in_the_units_df_uses(self):
+        """So the card and `df -h ~/aurora` agree when checked."""
+        from devices import describe_free, describe_state
+
+        gib = 1024 ** 3
+        self.assertEqual(describe_free(24 * gib + gib // 2), '24 GB')
+        self.assertEqual(describe_free(10 * gib), '10 GB')
+        self.assertEqual(describe_free(int(3.46 * gib)), '3.5 GB')
+        self.assertEqual(describe_free(gib), '1.0 GB')
+        self.assertEqual(describe_free(512 * 1024 ** 2), '512 MB')
+        self.assertEqual(describe_free(0), '0 MB')
+        self.assertIn('Free space: 24 GB',
+                      describe_state({'playing': None, 'free': 24 * gib}))
+        self.assertFalse([line for line in
+                          describe_state({'playing': None, 'free': None})
+                          if 'Free' in line])
 
     def test_pause_and_resume_reach_the_beacon_through_the_hub(self):
         hub, _driver = self.hub()
@@ -5953,6 +5987,17 @@ class TestTheBeaconPlayer(unittest.TestCase):
 
     def status(self):
         return self.transport.status('127.0.0.1', self.port)
+
+    def test_it_says_how_much_room_is_left_for_clips(self):
+        """The free space on the drive the clip folder is on, as a count of
+        bytes -- asked of the real script, as the Pi runs it."""
+        expected = shutil.disk_usage(self.clips).free
+        free = self.status()['free']
+
+        self.assertIsInstance(free, int)
+        # Near rather than equal: something else on this machine may write
+        # between the two readings.
+        self.assertLess(abs(free - expected), 256 * 1024 ** 2)
 
     def test_it_plays_through_mpv_and_offers_controls(self):
         state = self.status()
@@ -17872,11 +17917,16 @@ class TestWebRemote(unittest.TestCase):
                                               'hardboiled complete']
         self.recorder.states['BE:01'] = {
             'playing': 'goodnight', 'paused': False, 'elapsed': 62.0,
-            'duration': 180.0, 'volume': 40, 'controls': True}
+            'duration': 180.0, 'volume': 40, 'controls': True,
+            'free': 24 * 1024 ** 3 + 1024 ** 3 // 2}
         return 'BE:01'
 
     def test_a_beacon_is_on_the_snapshot_with_what_it_is_playing(self):
         self.beacon()
+        # A plug with an address of its own, to show only a beacon's is sent.
+        self.app._devices.append(Device('KA:01', name='Porch Plug',
+                                        driver='kasa', lan=True,
+                                        ip='10.0.0.70'))
         client = self.signed_in()
         client.act('beacons')
 
@@ -17889,7 +17939,17 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(entry['duration'], 180.0)
         self.assertEqual(entry['volume'], 40)
         self.assertTrue(entry['controls'])
+        self.assertEqual(entry['free'], '24 GB')
+        self.assertEqual(entry['ip'], '10.0.0.60')
         self.assertEqual(entry['from'], 'read')
+        # Only a beacon's card shows where it is: the others are asked about
+        # every device that has an address to show.
+        others = [d for d in client.state()['data']['devices']
+                  if d['id'] != 'BE:01'
+                  and self.app.device_by_id(d['id']).ip]
+        self.assertTrue(others, 'no other device with an address to test')
+        for other in others:
+            self.assertIsNone(other['ip'], other['name'])
         self.assertEqual(entry['commands'],
                          ['Stop', 'goodnight', 'hardboiled complete'])
         labels = [d['label'] for d in client.state()['data']['drivers']
@@ -18295,6 +18355,9 @@ class TestWebRemote(unittest.TestCase):
                 self.assertFalse(card['pause_hidden'], where)
                 self.assertFalse(card['dim_hidden'], where)
                 self.assertEqual(card['volume'], '40', where)
+                self.assertEqual(card['where'], '10.0.0.60 - 24 GB free',
+                                 where)
+                self.assertFalse(card['where_hidden'], where)
                 self.assertEqual(card['at'], '1:02', where)
                 self.assertEqual(card['length'], '3:00', where)
                 # 62 of 180 seconds.
@@ -18302,6 +18365,21 @@ class TestWebRemote(unittest.TestCase):
                 self.assertEqual(card['clips'],
                                  ['goodnight', 'hardboiled complete'], where)
                 self.assertEqual(card['lit'], ['goodnight'], where)
+
+        # A Pi still on the older script says nothing about its free space:
+        # the card says where it is and no more, rather than "None free".
+        older = dict(snapshot, devices=[
+            dict(d, free=None) if d['id'] == 'BE:01' else d
+            for d in snapshot['devices']])
+        said = self._draw(node, browser, script, older, 'beacons')
+        card = json.loads(said.strip().splitlines()[-1])['card']
+        self.assertEqual(card['where'], '10.0.0.60')
+        no_ip = dict(snapshot, devices=[
+            dict(d, free=None, ip=None) if d['id'] == 'BE:01' else d
+            for d in snapshot['devices']])
+        said = self._draw(node, browser, script, no_ip, 'beacons')
+        card = json.loads(said.strip().splitlines()[-1])['card']
+        self.assertTrue(card['where_hidden'], 'an empty line was left showing')
 
     def _draw(self, node, browser, script, snapshot, tab):
         """Run the page against a snapshot in the stub browser; return what
@@ -18339,6 +18417,7 @@ class TestWebRemote(unittest.TestCase):
             "      dim_hidden: parts.dim.hidden, volume: String(parts.slider.value),\n"
             "      at: parts.at.textContent, length: parts.length.textContent,\n"
             "      width: parts.fill.style.width,\n"
+            "      where: parts.where.textContent, where_hidden: parts.where.hidden,\n"
             "      clips: Object.keys(parts.buttons),\n"
             "      lit: Object.keys(parts.buttons).filter(function (n) {\n"
             "        return parts.buttons[n].className === 'playing'; })};\n"

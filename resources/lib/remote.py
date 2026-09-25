@@ -53,7 +53,7 @@ from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
                     same_secret, to_bytes, to_text)
 from devices import (CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP, CAP_COMMANDS,
                      CAP_LOCK, CAP_PLAYBACK, CAP_POSITION, CAP_POWER, CAP_STATE,
-                     CAP_UNLOCK, DRIVER_LABELS)
+                     CAP_UNLOCK, DRIVER_LABELS, describe_free)
 
 # Where the API token is kept. Not in settings.xml: it is not something anyone
 # types, and Kodi rewrites settings.xml on exit -- which is exactly the race
@@ -834,6 +834,10 @@ def _device_entry(app, device, state):
         'duration': None,
         'volume': None,
         'controls': False,
+        # Room left on the Pi for clips, as a sentence, and where it is --
+        # so the card says both without anybody reaching for SSH.
+        'free': None,
+        'ip': (device.ip or None) if CAP_PLAYBACK in caps else None,
         # Where these numbers came from: 'read' is what the device said when it
         # was last asked, 'told' is what we last set it to and never heard back
         # about, absent is nothing known at all. The page says which, because a
@@ -851,6 +855,8 @@ def _device_entry(app, device, state):
             for key in ('playing', 'paused', 'elapsed', 'duration', 'volume',
                         'controls'):
                 entry[key] = state.get(key, entry[key])
+            if state.get('free') is not None:
+                entry['free'] = describe_free(state['free'])
             return entry
         if any(entry[key] is not None
                for key in ('power', 'brightness', 'position', 'lock')):
@@ -2012,6 +2018,8 @@ button.wide { width: 100%; }
 .beacon .clips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .beacon .clips button { flex: 0 1 auto; }
 .beacon .clips button.playing { border-color: var(--orange); color: var(--orange); }
+.beacon .where { color: var(--sub); font-size: 12px; letter-spacing: 1px;
+                 margin-top: 3px; }
 .beacon .noctl { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
 
 .dialgrid {
@@ -4114,6 +4122,9 @@ function beaconCard(device) {
   var parts = {};
   var card = el('div', 'card beacon');
   card.appendChild(el('div', 'name', device.name));
+  // Where it is and how much room is left on it, so neither needs SSH.
+  parts.where = el('div', 'where', '');
+  card.appendChild(parts.where);
   parts.now = el('div', 'label now', '');
   card.appendChild(parts.now);
 
@@ -4181,6 +4192,12 @@ function paintBeacon(parts, device) {
   var playing = device.playing || null;
   var paused = !!device.paused;
   parts.paused = paused;
+  // The free space only comes from a Pi running the newer script; the
+  // address is known either way.
+  var where = [device.ip, device.free ? device.free + ' free' : '']
+    .filter(function (part) { return !!part; }).join(' - ');
+  parts.where.textContent = where;
+  parts.where.hidden = !where;
   parts.now.textContent = playing
     ? (paused ? 'Paused - ' : 'Playing - ') + playing
     : 'Silent';
