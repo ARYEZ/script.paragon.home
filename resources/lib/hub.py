@@ -191,6 +191,13 @@ class Hub(object):
             return []
         return driver.commands(device)
 
+    def songs(self, device):
+        """Which of a beacon's clips are songs. Nothing for anything else."""
+        driver = self.driver_for(device)
+        if driver is None or not hasattr(driver, 'songs'):
+            return []
+        return driver.songs(device)
+
     def send_command(self, device, name):
         driver = self._require(device)
         if CAP_COMMANDS not in driver.capabilities(device):

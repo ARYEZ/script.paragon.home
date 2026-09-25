@@ -42,6 +42,17 @@ CLIP_FILE = 'speaker_clips.json'
 # and the README says not to name one that.
 STOP = 'Stop'
 
+# The other one: a song the beacon picks at random each time, from its songs
+# folder. Offered only on a beacon that has songs. Hidden the same way if a
+# file is named it.
+RANDOM_SONG = 'Random song'
+RESERVED = (STOP, RANDOM_SONG)
+
+# Where the songs are kept in the clip dict: beside the per-beacon clip
+# lists, under a key no device id can be (they are MAC addresses), so the
+# one file still carries everything to a satellite unchanged.
+SONGS_KEY = '#songs'
+
 
 class SpeakerDriver(object):
     """Finds speakers and plays their clips."""
@@ -81,9 +92,8 @@ class SpeakerDriver(object):
                 driver_data={'port': entry.get('port') or COMMAND_PORT},
             )
             devices.append(device)
-            if self.clips.get(device.device_id) != entry.get('clips', []):
-                self.clips[device.device_id] = list(entry.get('clips') or [])
-                changed = True
+            changed = self._remember(device, entry.get('clips') or [],
+                                     entry.get('songs') or []) or changed
         if changed:
             self._save_clips()
         return devices, []
@@ -103,10 +113,31 @@ class SpeakerDriver(object):
         power: nothing here is a switch."""
         return set([CAP_COMMANDS, CAP_STATE, CAP_PLAYBACK])
 
+    def _remember(self, device, clips, songs):
+        """Write down what a beacon said it has. True if anything changed."""
+        changed = False
+        if self.clips.get(device.device_id) != list(clips):
+            self.clips[device.device_id] = list(clips)
+            changed = True
+        known = self.clips.setdefault(SONGS_KEY, {})
+        if known.get(device.device_id, []) != list(songs):
+            known[device.device_id] = list(songs)
+            changed = True
+        return changed
+
+    def songs(self, device):
+        """The names on this beacon that are songs rather than phrases."""
+        return [name for name in
+                (self.clips.get(SONGS_KEY) or {}).get(device.device_id, [])
+                if name not in RESERVED]
+
     def commands(self, device):
-        """Stop, then the clips. Stop is always there, clips or no clips."""
-        return [STOP] + [name for name in self.clips.get(device.device_id, [])
-                         if name != STOP]
+        """Stop, then Random song where there are songs, then everything
+        it can play by name. Stop is always there, clips or no clips."""
+        verbs = [STOP] + ([RANDOM_SONG] if self.songs(device) else [])
+        return verbs + [name for name in
+                        self.clips.get(device.device_id, [])
+                        if name not in RESERVED]
 
     # -- commands ----------------------------------------------------------
 
@@ -127,6 +158,15 @@ class SpeakerDriver(object):
         which clip and which speaker -- and it is what stands between a
         sequence and a message that was renamed on the Pi last week.
         """
+        if name == RANDOM_SONG:
+            try:
+                picked = self.transport.shuffle(device.ip, self._port(device))
+            except SpeakerError as exc:
+                raise ControlError('%s: %s' % (device.name, exc))
+            self._log('Played "%s", a song at random, on %s'
+                      % (picked, device.name))
+            return True
+
         if name == STOP:
             try:
                 stopped = self.transport.stop(device.ip, self._port(device))
@@ -155,18 +195,20 @@ class SpeakerDriver(object):
         which is why the answer names the clips rather than only saying yes.
         """
         try:
-            names = self.transport.clips(device.ip, self._port(device))
+            listing = self.transport.listing(device.ip, self._port(device))
         except SpeakerError as exc:
             return False, str(exc)
-        if self.clips.get(device.device_id) != names:
-            self.clips[device.device_id] = list(names)
+        names, songs = listing['clips'], listing['songs']
+        if self._remember(device, names, songs):
             self._save_clips()
         if not names:
             return True, ('%s answered, but has no clips.\n\nDrop audio files '
                           'in its clips folder and search again.'
                           % device.name)
-        return True, ('%s answered with %d clip(s):\n\n%s'
-                      % (device.name, len(names), '\n'.join(names)))
+        phrases = [name for name in names if name not in songs]
+        return True, ('%s answered with %d clip(s) and %d song(s):\n\n%s'
+                      % (device.name, len(phrases), len(songs),
+                         '\n'.join(phrases + songs)))
 
     # -- playback ------------------------------------------------------------
 

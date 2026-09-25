@@ -71,6 +71,13 @@ Pi's /status carries `free` (bytes, `shutil.disk_usage` on the clip folder);
 `clean_status` keeps it as int or None; `describe_free` words it in df -h
 units; the snapshot sends `free` (words) and `ip` for beacons only; the card
 shows "10.0.0.60 - 24 GB free". Needs the new paragon_speaker.py on each Pi.
+2.71.0: songs live in `<folder>/songs` (or `--songs`), phrases in the clip
+folder; the Pi's /clips and hello send `clips` (all names, phrases first)
+and `songs`; a phrase hides a song of the same name. `POST /play
+{"shuffle": true}` has the Pi pick a song, never the last one when there is
+another. Kodi keeps songs in speaker_clips.json under `#songs`; the driver
+offers `Random song` (RESERVED with Stop) only when a beacon has songs. The
+card groups phrases, then Songs with Random song first.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

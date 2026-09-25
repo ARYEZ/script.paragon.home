@@ -90,6 +90,9 @@ def parse_hello(data, ip):
         'ip': ip,
         'port': port,
         'clips': clean_clip_names(body.get('clips')),
+        # Which of those are songs. Empty from a Pi on the older script,
+        # which has no songs folder -- its clips are all there is.
+        'songs': clean_clip_names(body.get('songs')),
     }
 
 
@@ -289,12 +292,37 @@ class SpeakerTransport(object):
         except ValueError:
             raise SpeakerError('%s sent something that is not JSON' % ip)
 
-    def clips(self, ip, port=COMMAND_PORT):
-        """What the speaker can play right now, asked directly."""
+    def listing(self, ip, port=COMMAND_PORT):
+        """What the speaker can play right now, asked directly: every
+        name it will play, and which of those are songs."""
         answer = self._call(ip, port, '/clips')
         if not isinstance(answer, dict):
             raise SpeakerError('%s sent a reply with no clips in it' % ip)
-        return clean_clip_names(answer.get('clips'))
+        return {'clips': clean_clip_names(answer.get('clips')),
+                'songs': clean_clip_names(answer.get('songs'))}
+
+    def clips(self, ip, port=COMMAND_PORT):
+        return self.listing(ip, port)['clips']
+
+    def shuffle(self, ip, port=COMMAND_PORT):
+        """Play a song the beacon picks at random. Returns its name.
+
+        The Pi picks, from what is in its songs folder now, so a song copied
+        on this morning is in the draw without a search.
+        """
+        try:
+            answer = self._call(ip, port, '/play', {'shuffle': True})
+        except SpeakerError as exc:
+            if 'HTTP 400' in str(exc):
+                # The older script reads this as a play with no clip named.
+                raise SpeakerError(
+                    '%s does not know about songs yet: copy the new '
+                    'paragon_speaker.py onto it' % ip)
+            raise
+        name = answer.get('playing') if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not answer.get('ok') or not name:
+            raise SpeakerError('%s did not play a song' % ip)
+        return to_text(name)
 
     def play(self, ip, port, name):
         """Play one clip. Returns as soon as the speaker has started it.

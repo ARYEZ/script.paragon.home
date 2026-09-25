@@ -1447,6 +1447,18 @@ scp -r aurora aryez@beacon1:
 scp -r aurora aryez@beacon2:
 ```
 
+**Songs go in a folder of their own:** `songs`, inside the clip folder —
+`~/aurora/songs` — so the phrases stay a short list and the one
+`scp -r aurora` above still copies both. The script makes the folder on
+startup. A song plays by name like any clip, and a beacon with songs has one
+more command, **Random song**, next to **Stop**: a step, a dial slot or a
+phrase on it plays a song the Pi picks from its songs folder at that moment,
+so a song copied on this morning is in the draw without a search. It is
+never the song it picked last time, when there is another to pick. The
+step's **How loud** works on it as on any clip. To keep the songs somewhere
+else, give the script `--songs /path/to/them`. A song with the same name as a
+phrase is not offered as a song: the phrase is what plays.
+
 To keep it running across reboots, a systemd unit:
 
 ```
@@ -1466,10 +1478,12 @@ WantedBy=multi-user.target
 ### The Beacons tab
 
 On the web remote, once a search has found a beacon. One card per beacon:
+its address and how much room is left on it (`10.0.0.60 - 24 GB free`),
 what it is playing with a bar that moves, **Pause** (which reads **Resume**
 while it is paused), **Stop**, a volume slider, and its clips as buttons —
-the one playing lit in teal. Press a clip and it plays there; press another
-and it replaces the first.
+the phrases, then **Songs** with **Random song** first — the one playing lit
+in orange. Press a clip and it plays there; press another and it replaces
+the first.
 
 While the tab is open the phone asks the beacons every three seconds, and
 only the beacons: a pause pressed in the kitchen shows on the tablet in the
@@ -1485,7 +1499,7 @@ Two ports, both on the LAN, nothing leaving the house:
 | | |
 |---|---|
 | UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and clips |
-| HTTP 8766 | `GET /clips` lists them, `GET /status` says what it is doing; `POST /play` starts one, stopping the last; `POST /stop`, `/pause`, `/resume`, `/volume` |
+| HTTP 8766 | `GET /clips` lists them and says which are songs, `GET /status` says what it is doing and how much room is left; `POST /play` starts one, stopping the last, or with `{"shuffle": true}` a song it picks; `POST /stop`, `/pause`, `/resume`, `/volume` |
 
 The clip list rides along in the discovery reply, so **one search is one
 complete answer** — which is why a refresh is what picks up a new file. The

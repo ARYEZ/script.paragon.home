@@ -18,17 +18,28 @@ with the extension dropped -- "hardboiled complete.wav" is the clip
 next Refresh devices. There is nothing to learn and nothing to upload: the Pi
 that plays the message is the one place the message lives.
 
+Songs go in a folder of their own, "songs" inside the clip folder unless
+--songs says otherwise, so the phrases stay a short list and one
+`scp -r aurora` still copies both. A song is a clip like any other and can be
+played by name; a step can also ask for one at random, which this Pi picks
+from what is in the songs folder at that moment -- never the one it picked
+last time, when there is another to choose.
+
 Two things listen:
 
     UDP  8765   discovery. Paragon Home broadcasts PARAGON_SPEAKER? and this
                 answers with who it is and what it can play.
-    HTTP 8766   GET  /clips              -> {"clips": [...]}
+    HTTP 8766   GET  /clips              -> {"clips": [...],
+                                             "songs": [...]}
                 GET  /status             -> {"playing": name or null,
                                              "paused", "elapsed",
                                              "duration", "volume",
                                              "controls"}
                 POST /play {"clip": n}   -> {"ok": true, "stopped": prev},
                                             having started it
+                POST /play {"shuffle": true}
+                                         -> the same, and "playing": the
+                                            song it picked
                 POST /stop               -> {"ok": true, "stopped": name}
                 POST /pause              -> {"ok": true, "paused": true}
                 POST /resume             -> {"ok": true, "paused": false}
@@ -67,6 +78,7 @@ import signal
 import socket
 import subprocess
 import sys
+import random
 import tempfile
 import threading
 import time
@@ -466,9 +478,16 @@ class Speaker(object):
     """The state both listeners share."""
 
     def __init__(self, name, folder, port, device_id=None, log=print,
-                 player=None):
+                 player=None, songs=None):
         self.name = name
         self.folder = ClipFolder(folder)
+        # The songs, in a folder of their own: inside the clip folder unless
+        # told otherwise, so one copy of the clip folder brings both.
+        self.songs = ClipFolder(songs or os.path.join(self.folder.folder,
+                                                      'songs'))
+        # The song a shuffle picked last, so the next one is a different
+        # one whenever there is another to pick.
+        self._shuffled = None
         self.port = port
         self.device_id = device_id or stable_id()
         self.log = log
@@ -526,13 +545,42 @@ class Speaker(object):
             report['duration'] = None
         return report
 
+    def song_names(self):
+        """The songs, less any a phrase of the same name hides."""
+        phrases = set(self.folder.names())
+        return [name for name in self.songs.names() if name not in phrases]
+
+    def all_names(self):
+        """Everything that can be played by name: the phrases, then the
+        songs. One list, so a Paragon Home that has never heard of songs
+        can still play every one of them."""
+        return self.folder.names() + self.song_names()
+
+    def path_for(self, name):
+        """The file behind a name, phrases first. Looked up in what the
+        two folders hold, never joined onto either."""
+        return self.folder.path_for(name) or self.songs.path_for(name)
+
+    def pick_song(self):
+        """A song at random, or None when the folder has none. Not the one
+        picked last time, when there is another -- "random" that plays the
+        same song twice running reads as broken."""
+        names = self.song_names()
+        if len(names) > 1 and self._shuffled in names:
+            names.remove(self._shuffled)
+        if not names:
+            return None
+        self._shuffled = random.choice(names)
+        return self._shuffled
+
     def hello(self):
         return json.dumps({
             'paragon': 'speaker',
             'id': self.device_id,
             'name': self.name,
             'port': self.port,
-            'clips': self.folder.names(),
+            'clips': self.all_names(),
+            'songs': self.song_names(),
         }).encode('utf-8')
 
     def play(self, name):
@@ -546,7 +594,7 @@ class Speaker(object):
         search, the other by apt-get. Neither of those stops what is playing:
         a request that could not be honoured should not cost the music.
         """
-        path = self.folder.path_for(name)
+        path = self.path_for(name)
         if path is None:
             return 404, 'no clip called "%s"' % name, None
         if not self.player.can_play(path):
@@ -585,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split('?')[0]
         speaker = self.server.speaker
         if path == '/clips':
-            self._send(200, {'clips': speaker.folder.names()})
+            self._send(200, {'clips': speaker.all_names(),
+                             'songs': speaker.song_names()})
         elif path == '/status':
             self._send(200, speaker.status())
         else:
@@ -638,14 +687,24 @@ class Handler(BaseHTTPRequestHandler):
         if body is None:
             self._send(400, {'error': 'send JSON with a "clip" in it'})
             return
-        name = str(body.get('clip') or '').strip()
+        if body.get('shuffle') is True:
+            name = speaker.pick_song()
+            if name is None:
+                # 404, like a clip that is not there: the fix is the same --
+                # put some files in the folder.
+                self._send(404, {'ok': False, 'error': 'no songs in %s'
+                                 % speaker.songs.folder, 'stopped': None})
+                return
+        else:
+            name = str(body.get('clip') or '').strip()
         if not name:
             self._send(400, {'error': 'no clip named'})
             return
         status, message, stopped = speaker.play(name)
         ok = status == 200
         self._send(status, {'ok': ok, 'error': '' if ok else message,
-                            'stopped': stopped})
+                            'stopped': stopped, 'playing': name if ok
+                            else None})
 
     def log_message(self, fmt, *args):
         # Quiet: one line per play from Speaker.play is plenty.
@@ -683,6 +742,9 @@ def main(argv=None):
     parser.add_argument('--folder', default='~/paragon-clips',
                         help='where the audio files are (default: '
                              '~/paragon-clips)')
+    parser.add_argument('--songs', default=None,
+                        help='where the songs are (default: a "songs" '
+                             'folder inside --folder)')
     parser.add_argument('--port', type=int, default=COMMAND_PORT,
                         help='HTTP port to take commands on (default: %d)'
                              % COMMAND_PORT)
@@ -701,8 +763,10 @@ def main(argv=None):
                              'command instead of choosing by file type')
     args = parser.parse_args(argv)
 
-    speaker = Speaker(args.name, args.folder, args.port, args.id)
+    speaker = Speaker(args.name, args.folder, args.port, args.id,
+                      songs=args.songs)
     os.makedirs(speaker.folder.folder, exist_ok=True)
+    os.makedirs(speaker.songs.folder, exist_ok=True)
     speaker.player = build_player(args.mpv.split() if args.mpv else None,
                                   speaker.folder.folder,
                                   override=args.player.split()
@@ -715,6 +779,8 @@ def main(argv=None):
         speaker.log('  %s' % name)
     if not names:
         speaker.log('  (drop .wav or .mp3 files in that folder)')
+    songs = speaker.song_names()
+    speaker.log('%d song(s) in %s' % (len(songs), speaker.songs.folder))
 
     stop = threading.Event()
     discovery = threading.Thread(target=serve_discovery,

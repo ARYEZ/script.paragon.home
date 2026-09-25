@@ -267,6 +267,8 @@ class RecordingController(object):
         self.states = {}
         # The codes each blaster has been taught, by device id.
         self.command_map = {}
+        # Which of a beacon's clips are songs, by device id.
+        self.song_map = {}
 
     def capabilities(self, device):
         """The real implementation unless a test asks for something else.
@@ -291,6 +293,10 @@ class RecordingController(object):
 
     def commands(self, device):
         return list(self.command_map.get(device.device_id, []))
+
+    def songs(self, device):
+        # Which of a beacon's clips are songs, as the Hub answers.
+        return list(self.song_map.get(device.device_id, []))
 
     class _StandIn(object):
         """What the Hub would hand back for this device's driver."""
@@ -3723,6 +3729,27 @@ class TestABeaconStepSaysHowLoud(unittest.TestCase):
         self.assertEqual(step['volume'], 50)
         self.assertEqual(self.seq.normalise_step(step)['volume'], 50)
 
+    def test_a_random_song_is_a_step_and_asks_how_loud(self):
+        """The setting Aryez asked for: not a song, but a song at random
+        each time the sequence runs. It is one of the beacon's commands, so
+        it is picked like one, and it is as loud as the step says."""
+        import gui
+
+        app = self.app()
+        self.recorder.command_map['BE:01'] = ['Stop', 'Random song',
+                                              'goodnight']
+        panel = gui.ControlPanel(app)
+        # Kitchen, Random song, 75%.
+        xbmcgui.SELECT_QUEUE.extend([1, 1, 3])
+
+        step = panel._step_device('speaker')
+
+        self.assertEqual(step['action'], 'Random song')
+        self.assertEqual(step['volume'], 75)
+        self.assertEqual(
+            self.seq.describe_step(self.seq.normalise_step(step), 'Kitchen'),
+            'Kitchen: Random song at 75%')
+
     def test_leave_it_as_it_is_is_no_volume(self):
         step, _asked = self.pick('speaker', 1, 1, 0)
 
@@ -4847,6 +4874,12 @@ class FakeSpeaker(object):
         self.elapsed = 12.0
         self.duration = 180.0
         self.volumes = []
+        # The songs folder. None is a Pi on the older script, which sends no
+        # "songs" and reads a shuffle as a play with no clip named. A list
+        # is the newer one; a shuffle takes them in turn, so a test knows
+        # which it will get.
+        self.songs = None
+        self.shuffles = []
 
         speaker = self
 
@@ -4861,7 +4894,7 @@ class FakeSpeaker(object):
 
             def do_GET(self):
                 if self.path == '/clips':
-                    self._send(200, {'clips': list(speaker.clips)})
+                    self._send(200, speaker.listing())
                 elif self.path == '/status':
                     playing = speaker.playing
                     self._send(200, {
@@ -4879,6 +4912,22 @@ class FakeSpeaker(object):
                 body = json.loads(self.rfile.read(length).decode('utf-8')
                                   or '{}')
                 name = body.get('clip')
+                if self.path == '/play' and body.get('shuffle') is True:
+                    if speaker.songs is None:
+                        self._send(400, {'error': 'no clip named'})
+                        return
+                    if not speaker.songs:
+                        self._send(404, {'ok': False,
+                                         'error': 'no songs in /songs'})
+                        return
+                    name = speaker.songs[len(speaker.shuffles)
+                                         % len(speaker.songs)]
+                    speaker.shuffles.append(name)
+                    stopped, speaker.playing = speaker.playing, name
+                    speaker.played.append(name)
+                    self._send(200, {'ok': True, 'error': '',
+                                     'stopped': stopped, 'playing': name})
+                    return
                 if self.path in ('/pause', '/resume'):
                     if speaker.pause_answer is not None:
                         self._send(200, speaker.pause_answer)
@@ -4925,7 +4974,7 @@ class FakeSpeaker(object):
                 elif speaker.refuse_play:
                     self._send(503, {'ok': False,
                                      'error': 'nothing installed can play it'})
-                elif name not in speaker.clips:
+                elif name not in speaker.listing()['clips']:
                     self._send(404, {'ok': False,
                                      'error': 'no clip called "%s"' % name})
                 else:
@@ -4954,6 +5003,13 @@ class FakeSpeaker(object):
         self.udp_thread.start()
         self.HELLO = speaker_lan.HELLO
 
+    def listing(self):
+        """What /clips and the hello say: every name, and which are songs."""
+        said = {'clips': list(self.clips) + list(self.songs or [])}
+        if self.songs is not None:
+            said['songs'] = list(self.songs)
+        return said
+
     def _serve_hello(self):
         while self.running:
             try:
@@ -4968,9 +5024,10 @@ class FakeSpeaker(object):
             if self.miss_hellos > 0:
                 self.miss_hellos -= 1
                 continue
-            reply = json.dumps({'paragon': 'speaker', 'id': self.device_id,
-                                'name': self.name, 'port': self.port,
-                                'clips': list(self.clips)})
+            hello = {'paragon': 'speaker', 'id': self.device_id,
+                     'name': self.name, 'port': self.port}
+            hello.update(self.listing())
+            reply = json.dumps(hello)
             try:
                 self.sock.sendto(reply.encode('utf-8'), sender)
             except socket.error:
@@ -5054,6 +5111,133 @@ class TestTheSpeaker(unittest.TestCase):
                          'the command port did not travel with the device')
         self.assertEqual(driver.commands(devices[0]),
                          ['Stop', 'hardboiled complete', 'goodnight'])
+
+    # -- songs -------------------------------------------------------------
+
+    def test_a_beacon_with_songs_offers_a_random_one(self):
+        """Stop, Random song, the phrases, then the songs -- and the songs
+        written down apart, in the same file, for the card and satellites."""
+        self.pi.songs = ['Stargazer', 'First Flight']
+        driver = self.driver()
+
+        devices, _warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual(driver.commands(devices[0]),
+                         ['Stop', 'Random song', 'hardboiled complete',
+                          'goodnight', 'Stargazer', 'First Flight'])
+        self.assertEqual(driver.songs(devices[0]),
+                         ['Stargazer', 'First Flight'])
+        self.assertEqual(driver.clips['#songs'],
+                         {self.pi.device_id: ['Stargazer', 'First Flight']})
+        self.assertEqual(self.saved, [True])
+
+    def test_no_songs_no_random_song(self):
+        """A row that could only fail is not offered: an older Pi, or one
+        with an empty songs folder."""
+        for songs in (None, []):
+            self.pi.songs = songs
+            driver = self.driver()
+            devices, _warnings = driver.discover(timeout=0.6)
+            self.assertNotIn('Random song', driver.commands(devices[0]))
+            self.assertEqual(driver.songs(devices[0]), [])
+
+    def test_a_file_named_like_a_verb_does_not_shadow_it(self):
+        self.pi.clips = ['Random song', 'goodnight']
+        self.pi.songs = ['Random song', 'Stargazer']
+        driver = self.driver()
+
+        devices, _warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual(driver.commands(devices[0]),
+                         ['Stop', 'Random song', 'goodnight', 'Stargazer'])
+        self.assertEqual(driver.songs(devices[0]), ['Stargazer'])
+
+    def test_random_song_asks_the_beacon_to_pick(self):
+        """The Pi picks, from its folder as it is now -- a song copied on
+        this morning is in the draw without a search."""
+        self.pi.songs = ['Stargazer', 'First Flight']
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+        self.pi.songs.append('New Today')
+
+        for _ in range(3):
+            self.assertTrue(driver.send_command(self.device(), 'Random song'))
+
+        self.assertEqual(self.pi.shuffles,
+                         ['Stargazer', 'First Flight', 'New Today'])
+        self.assertEqual(self.pi.playing, 'New Today')
+
+    def test_random_song_on_an_older_pi_says_what_to_do(self):
+        """It sends no songs, so Random song is not offered -- but a step
+        written while it had them still names it."""
+        self.pi.songs = None
+        driver = self.driver()
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(self.device(), 'Random song')
+
+        self.assertIn('Kitchen Speaker', str(caught.exception))
+        self.assertIn('copy the new paragon_speaker.py', str(caught.exception))
+
+    def test_random_song_with_an_empty_folder_says_so(self):
+        self.pi.songs = []
+        driver = self.driver()
+
+        with self.assertRaises(ControlError) as caught:
+            driver.send_command(self.device(), 'Random song')
+
+        self.assertIn('no songs', str(caught.exception))
+        self.assertNotIn('copy the new', str(caught.exception))
+
+    def test_a_song_plays_by_name(self):
+        self.pi.songs = ['Stargazer']
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+
+        driver.send_command(self.device(), 'Stargazer')
+
+        self.assertEqual(self.pi.played, ['Stargazer'])
+
+    def test_test_connection_counts_and_writes_down_the_songs(self):
+        self.pi.songs = ['Stargazer']
+        driver = self.driver()
+
+        ok, message = driver.test_connection(self.device())
+
+        self.assertTrue(ok)
+        self.assertIn('2 clip(s) and 1 song(s)', message)
+        self.assertEqual(driver.songs(self.device()), ['Stargazer'])
+        self.assertEqual(self.saved, [True])
+
+    def test_new_songs_alone_are_written_down(self):
+        """Songs copied on, phrases unchanged: still a change worth saving,
+        or the card and the satellites never hear of them."""
+        self.pi.songs = ['Stargazer']
+        driver = self.driver(clips={self.pi.device_id: [
+            'hardboiled complete', 'goodnight', 'Stargazer']})
+
+        driver.test_connection(self.device())
+
+        self.assertEqual(self.saved, [True], 'the new songs were not saved')
+        self.assertEqual(driver.songs(self.device()), ['Stargazer'])
+
+    def test_the_songs_travel_in_the_clip_file(self):
+        """One file carries both, so a satellite copying it gets the songs
+        and a reload picks them up."""
+        from paragon_home import ParagonHome
+        import addon_utils as utils
+
+        app = ParagonHome()
+        app.reload_changed()
+        utils.write_json(app.CLIP_FILE, {
+            'AA:BB': ['goodnight', 'Stargazer'],
+            '#songs': {'AA:BB': ['Stargazer']}})
+        app.reload_changed()
+        beacon = Device('AA:BB', name='Kitchen', driver='speaker')
+
+        self.assertEqual(app.controller.songs(beacon), ['Stargazer'])
+        self.assertEqual(app.controller.commands(beacon),
+                         ['Stop', 'Random song', 'goodnight', 'Stargazer'])
 
     def test_a_search_writes_the_clip_list_down(self):
         """So the menus can offer clips with no network call, and so that a
@@ -5646,6 +5830,66 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertIs(app.controller.driver('speaker').clips, app._clips)
 
 
+class TestTheSongFolder(unittest.TestCase):
+    """The Pi script's song folder, in-process: where it is, and that a name
+    is looked up in it rather than joined onto it."""
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            'paragon_speaker_under_test',
+            os.path.join(ROOT, 'tools', 'paragon_speaker.py'))
+        self.pi = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.pi)
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.clips = os.path.join(self.folder, 'aurora')
+        os.makedirs(os.path.join(self.clips, 'songs'))
+
+    def speaker(self, songs=None):
+        return self.pi.Speaker('Kitchen', self.clips, 0, 'AA', log=lambda m: 0,
+                               songs=songs)
+
+    def test_the_songs_can_live_somewhere_else(self):
+        elsewhere = os.path.join(self.folder, 'music')
+        os.makedirs(elsewhere)
+        with open(os.path.join(elsewhere, 'Stargazer.mp3'), 'wb') as handle:
+            handle.write(b'x')
+        with open(os.path.join(self.clips, 'songs', 'Ignored.mp3'),
+                  'wb') as handle:
+            handle.write(b'x')
+
+        self.assertEqual(self.speaker(songs=elsewhere).song_names(),
+                         ['Stargazer'])
+        self.assertEqual(self.speaker().song_names(), ['Ignored'])
+
+    def test_a_song_name_is_looked_up_never_joined(self):
+        with open(os.path.join(self.clips, 'songs', 'Stargazer.mp3'),
+                  'wb') as handle:
+            handle.write(b'x')
+        speaker = self.speaker()
+
+        self.assertEqual(speaker.path_for('Stargazer'),
+                         os.path.join(self.clips, 'songs', 'Stargazer.mp3'))
+        for sneaky in ('../aurora/songs/Stargazer', 'songs/Stargazer',
+                       '../../etc/passwd'):
+            self.assertIsNone(speaker.path_for(sneaky), sneaky)
+
+    def test_a_phrase_and_a_song_of_one_name_is_the_phrase(self):
+        """The phrase is what the step was written for; a song that happens
+        to share its name must not start playing instead."""
+        for where in (self.clips, os.path.join(self.clips, 'songs')):
+            with open(os.path.join(where, 'goodnight.mp3'), 'wb') as handle:
+                handle.write(b'x')
+
+        self.assertEqual(self.speaker().path_for('goodnight'),
+                         os.path.join(self.clips, 'goodnight.mp3'))
+
+    def test_the_songs_folder_is_not_a_phrase(self):
+        self.assertEqual(self.speaker().folder.names(), [])
+
+
 class TestThePiListener(unittest.TestCase):
     """tools/paragon_speaker.py, run as the Pi runs it, against the real
     transport -- so the two halves of the wire are held to each other."""
@@ -5744,6 +5988,98 @@ class TestThePiListener(unittest.TestCase):
         while time.time() < deadline and len(self._player_pids()) < count:
             time.sleep(0.05)
         return self._player_pids()
+
+    # -- songs -------------------------------------------------------------
+
+    def _songs(self, *names):
+        folder = os.path.join(self.clips, 'songs')
+        for name in names:
+            with open(os.path.join(folder, name), 'wb') as handle:
+                handle.write(b'x')
+        return folder
+
+    def _played_lines(self, count, seconds=3):
+        deadline = time.time() + seconds
+        lines = []
+        while time.time() < deadline:
+            try:
+                with open(self.log) as handle:
+                    lines = [line.strip() for line in handle if line.strip()]
+            except (IOError, OSError):
+                lines = []
+            if len(lines) >= count:
+                break
+            time.sleep(0.05)
+        return lines
+
+    def test_the_songs_folder_is_made_inside_the_clip_folder(self):
+        """So `scp -r aurora` copies the phrases and the songs in one go,
+        and there is somewhere obvious to put the first song."""
+        self.assertTrue(os.path.isdir(os.path.join(self.clips, 'songs')))
+
+    def test_songs_are_listed_apart_from_the_phrases(self):
+        """Every name it will play, phrases first, and which are songs. A
+        song with a phrase's name is the phrase: it plays first, so it is
+        not offered as a song."""
+        self._songs('Stargazer.mp3', 'First Flight.mp3', 'goodnight.mp3',
+                    'cover.jpg')
+
+        listing = self.transport.listing('127.0.0.1', self.port)
+        self.assertEqual(listing['clips'], ['goodnight', 'hardboiled complete',
+                                            'First Flight', 'Stargazer'])
+        self.assertEqual(listing['songs'], ['First Flight', 'Stargazer'])
+
+        found = self.transport.discover(
+            timeout=0.6, targets=[('127.0.0.1', self.discovery_port)])
+        self.assertEqual(found[0]['songs'], ['First Flight', 'Stargazer'])
+
+    def test_a_song_plays_by_name_from_the_songs_folder(self):
+        folder = self._songs('Stargazer.mp3')
+
+        self.transport.play('127.0.0.1', self.port, 'Stargazer')
+
+        self.assertEqual(self._played_lines(1),
+                         [os.path.join(folder, 'Stargazer.mp3')])
+
+    def test_a_random_song_is_a_song_and_never_the_last_one(self):
+        folder = self._songs('Stargazer.mp3', 'First Flight.mp3')
+
+        picked = [self.transport.shuffle('127.0.0.1', self.port)
+                  for _ in range(6)]
+
+        self.assertTrue(set(picked) <= set(['Stargazer', 'First Flight']),
+                        'a shuffle played a phrase: %r' % picked)
+        for before, after in zip(picked, picked[1:]):
+            self.assertNotEqual(before, after, 'the same song twice running')
+        # Six plays in a row each end the one before, and a player ended
+        # early may not have logged; the last one is left running.
+        wanted = os.path.join(folder, picked[-1] + '.mp3')
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            played = self._played_lines(1)
+            if played and played[-1] == wanted:
+                break
+            time.sleep(0.05)
+        self.assertEqual(played[-1], wanted)
+
+    def test_one_song_is_played_every_time(self):
+        """Never the last one -- unless it is the only one."""
+        self._songs('Stargazer.mp3')
+
+        self.assertEqual([self.transport.shuffle('127.0.0.1', self.port)
+                          for _ in range(3)], ['Stargazer'] * 3)
+
+    def test_no_songs_says_where_to_put_them(self):
+        with self.assertRaises(self._speaker_error()) as caught:
+            self.transport.shuffle('127.0.0.1', self.port)
+
+        self.assertIn('no songs in', str(caught.exception))
+        self.assertIn(os.path.join(self.clips, 'songs'),
+                      str(caught.exception))
+
+    def _speaker_error(self):
+        import speaker_lan
+        return speaker_lan.SpeakerError
 
     def test_the_real_listener_answers_the_real_search(self):
         found = self.transport.discover(
@@ -17941,6 +18277,8 @@ class TestWebRemote(unittest.TestCase):
         self.assertTrue(entry['controls'])
         self.assertEqual(entry['free'], '24 GB')
         self.assertEqual(entry['ip'], '10.0.0.60')
+        self.assertEqual(entry['songs'], [],
+                         'a beacon with no songs has some')
         self.assertEqual(entry['from'], 'read')
         # Only a beacon's card shows where it is: the others are asked about
         # every device that has an address to show.
@@ -17955,6 +18293,18 @@ class TestWebRemote(unittest.TestCase):
         labels = [d['label'] for d in client.state()['data']['drivers']
                   if d['id'] == 'speaker']
         self.assertEqual(labels, ['Beacon'])
+
+    def test_the_snapshot_says_which_clips_are_songs(self):
+        self.beacon()
+        self.recorder.song_map['BE:01'] = ['hardboiled complete']
+        self.recorder.song_map['EE:FF'] = ['not a beacon']
+        client = self.signed_in()
+
+        devices = dict((d['id'], d) for d in client.state()['data']['devices'])
+
+        self.assertEqual(devices['BE:01']['songs'], ['hardboiled complete'])
+        self.assertEqual(devices['EE:FF']['songs'], [],
+                         'a blaster was asked for songs')
 
     def test_the_beacon_poll_reads_the_beacons_and_keeps_the_lights(self):
         """The tab polls every few seconds. Asking every bulb in the house
@@ -18366,6 +18716,23 @@ class TestWebRemote(unittest.TestCase):
                                  ['goodnight', 'hardboiled complete'], where)
                 self.assertEqual(card['lit'], ['goodnight'], where)
 
+        # A beacon with songs: the phrases, then a heading, then Random song
+        # and the songs -- and the song that is playing is the lit one.
+        tuned = dict(snapshot, devices=[
+            dict(d, commands=['Stop', 'Random song', 'goodnight',
+                              'hardboiled complete', 'Stargazer'],
+                 songs=['Stargazer'], playing='Stargazer')
+            if d['id'] == 'BE:01' else d for d in snapshot['devices']])
+        said = self._draw(node, browser, script, tuned, 'beacons')
+        card = json.loads(said.strip().splitlines()[-1])['card']
+        self.assertEqual(card['kids'], [
+            ['BUTTON', '', 'goodnight'],
+            ['BUTTON', '', 'hardboiled complete'],
+            ['P', 'label songs', 'Songs'],
+            ['BUTTON', 'shuffle', 'Random song'],
+            ['BUTTON', 'playing', 'Stargazer']])
+        self.assertEqual(card['lit'], ['Stargazer'])
+
         # A Pi still on the older script says nothing about its free space:
         # the card says where it is and no more, rather than "None free".
         older = dict(snapshot, devices=[
@@ -18418,6 +18785,8 @@ class TestWebRemote(unittest.TestCase):
             "      at: parts.at.textContent, length: parts.length.textContent,\n"
             "      width: parts.fill.style.width,\n"
             "      where: parts.where.textContent, where_hidden: parts.where.hidden,\n"
+            "      kids: parts.clips.children.map(function (c) {\n"
+            "        return [c.tagName, c.className || '', c.textContent]; }),\n"
             "      clips: Object.keys(parts.buttons),\n"
             "      lit: Object.keys(parts.buttons).filter(function (n) {\n"
             "        return parts.buttons[n].className === 'playing'; })};\n"

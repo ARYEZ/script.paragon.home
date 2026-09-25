@@ -838,6 +838,10 @@ def _device_entry(app, device, state):
         # so the card says both without anybody reaching for SSH.
         'free': None,
         'ip': (device.ip or None) if CAP_PLAYBACK in caps else None,
+        # Which of its clips are songs, so the card can keep them apart from
+        # the phrases.
+        'songs': (sorted(app.controller.songs(device))
+                  if CAP_PLAYBACK in caps else []),
         # Where these numbers came from: 'read' is what the device said when it
         # was last asked, 'told' is what we last set it to and never heard back
         # about, absent is nothing known at all. The page says which, because a
@@ -2017,6 +2021,9 @@ button.wide { width: 100%; }
 }
 .beacon .clips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .beacon .clips button { flex: 0 1 auto; }
+/* The songs start on a line of their own under a heading, rather than
+   running on from the last phrase. */
+.beacon .clips .songs { flex-basis: 100%; margin: 8px 0 0; }
 .beacon .clips button.playing { border-color: var(--orange); color: var(--orange); }
 .beacon .where { color: var(--sub); font-size: 12px; letter-spacing: 1px;
                  margin-top: 3px; }
@@ -4226,29 +4233,45 @@ function paintBeacon(parts, device) {
 
   // The clip list only when it changed: a file dropped on the Pi shows up
   // after the next search, and nothing else about it moves.
+  // The phrases first, then the songs under a heading of their own with
+  // Random song leading them -- a beacon's own verb, like Stop, and the Pi
+  // picks which.
   var names = (device.commands || []).filter(function (name) {
     return name !== 'Stop';
   });
-  var key = JSON.stringify(names);
+  var songs = device.songs || [];
+  var phrases = names.filter(function (name) {
+    return name !== 'Random song' && songs.indexOf(name) < 0;
+  });
+  var tunes = (names.indexOf('Random song') >= 0 ? ['Random song'] : [])
+    .concat(names.filter(function (name) { return songs.indexOf(name) >= 0; }));
+  var key = JSON.stringify([phrases, tunes]);
   if (key !== parts.clipsKey) {
     parts.clipsKey = key;
     parts.clips.textContent = '';
     parts.buttons = {};
-    names.forEach(function (name) {
-      var node = el('button', null, name);
+    var button = function (name, box) {
+      var node = el('button', name === 'Random song' ? 'shuffle' : null, name);
       node.addEventListener('click', function () {
         act('command', {target: device.id, name: name});
       });
       parts.buttons[name] = node;
-      parts.clips.appendChild(node);
-    });
+      box.appendChild(node);
+    };
+    phrases.forEach(function (name) { button(name, parts.clips); });
+    if (tunes.length) {
+      parts.clips.appendChild(el('p', 'label songs', 'Songs'));
+      tunes.forEach(function (name) { button(name, parts.clips); });
+    }
     if (!names.length) {
       parts.clips.appendChild(el('p', 'label empty',
                                  'No clips yet - drop audio files in its folder on the Pi'));
     }
   }
   for (var name in (parts.buttons || {})) {
-    parts.buttons[name].className = name === playing ? 'playing' : '';
+    parts.buttons[name].className = [name === 'Random song' ? 'shuffle' : '',
+                                     name === playing ? 'playing' : '']
+      .filter(function (word) { return !!word; }).join(' ');
   }
 }
 
