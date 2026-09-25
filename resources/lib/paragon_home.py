@@ -463,20 +463,27 @@ class ParagonHome(object):
             utils.log('%s is now at %s' % (device.name, device.ip))
         return self.save_devices()
 
-    def check_addresses(self, timeout=3.0):
+    def check_addresses(self, timeout=3.0, heard=None):
         """Ask the LAN devices whether they are where we think they are.
 
         Returns the devices that turned out to have moved. The asking is a
         state sweep of the devices the hub could look for if one went quiet
         -- and only those: a cloud light or a blind is a cloud request each,
         and there is no address to be wrong about.
+
+        The sweep is a real reading of every one of them, so `heard`, if
+        given, is handed what they said -- the web remote keeps it, and a
+        lamp switched at the wall shows as off on the phone within ten
+        minutes rather than whenever somebody next reads the house.
         """
         watched = [device for device in self.enabled_devices
                    if self.controller.can_locate(device)]
         if not watched:
             return []
         before = dict((device.device_id, device.ip) for device in watched)
-        self.controller.get_states(watched, timeout=timeout)
+        states = self.controller.get_states(watched, timeout=timeout)
+        if heard is not None:
+            heard(states)
         return [device for device in watched
                 if device.ip != before[device.device_id]]
 

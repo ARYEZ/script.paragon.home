@@ -12108,6 +12108,21 @@ class TestLightsThatMoved(unittest.TestCase):
         self.assertEqual(on_disk['L1'], '10.0.0.9',
                          'mended in memory and not on disk')
 
+    def test_what_the_sweep_heard_is_handed_on(self):
+        """The sweep is a real reading, so it is given to whoever wants it
+        -- the web remote -- rather than thrown away. The moved lamp's is
+        the reading from where it was found, not the silence from where it
+        was."""
+        app = self.app()
+        heard = []
+
+        app.check_addresses(heard=heard.append)
+
+        self.assertEqual(len(heard), 1, 'the sweep was not handed on')
+        self.assertEqual(heard[0]['L1'],
+                         {'power': 'on', 'read_at': '10.0.0.9'})
+        self.assertNotIn('B1', heard[0], 'the blind was swept')
+
     def test_the_sweep_asks_only_what_could_be_looked_for(self):
         """A blind is a cloud request each; there is no address to check."""
         app = self.app()
@@ -12131,8 +12146,8 @@ class TestLightsThatMoved(unittest.TestCase):
 
         class StubApp(object):
             @staticmethod
-            def check_addresses(timeout=3.0):
-                calls.append(1)
+            def check_addresses(timeout=3.0, heard=None):
+                calls.append(heard)
                 return []
 
         svc._app = StubApp()
@@ -12141,6 +12156,31 @@ class TestLightsThatMoved(unittest.TestCase):
         self.assertEqual(len(calls), 1, 'checked again before it was due')
         svc._check_addresses(now=1000.0 + service.ADDRESS_CHECK_SECONDS)
         self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[-1], 'no remote, and something was handed')
+
+    def test_the_service_hands_the_sweep_to_the_web_remote(self):
+        """The phone shows what the sweep heard: a lamp switched at the wall
+        is off on the remote within ten minutes."""
+        import service
+
+        svc = service.GoveeService()
+        handed = []
+
+        class StubApp(object):
+            @staticmethod
+            def check_addresses(timeout=3.0, heard=None):
+                heard({'L1': {'power': 'off'}})
+                return []
+
+        class StubRemote(object):
+            @staticmethod
+            def take_reading(states):
+                handed.append(states)
+
+        svc._app = StubApp()
+        svc._remote = StubRemote()
+        svc._check_addresses(now=1000.0)
+        self.assertEqual(handed, [{'L1': {'power': 'off'}}])
 
 
 def utils_read_json(app):
@@ -17773,6 +17813,34 @@ class TestWebRemote(unittest.TestCase):
                          'a silent read-back blanked the card')
 
     # -- reading the house when the remote is opened -----------------------
+
+    def test_the_remote_keeps_what_the_sweep_heard(self):
+        """Laid over what is known, like the beacons' poll: a lamp the sweep
+        heard is shown as read, a device it did not ask keeps its reading,
+        and a bulb that missed one reply keeps its last one rather than
+        going blank. Not a read of the house -- cloud lights were not in it
+        -- so opening the remote still reads."""
+        self.recorder.states['AA:BB'] = {'power': 'on', 'brightness': 70}
+        self.recorder.states['CC:DD'] = {'power': 'on', 'brightness': 30}
+        client = self.signed_in()
+        client.act('states')
+        read_at = self.server._states_at
+
+        kept = self.server.take_reading({'AA:BB': {'power': 'off'},
+                                         'CC:DD': None})
+        self.server.refresh(self.app)
+
+        self.assertEqual(kept, 1)
+        devices = dict((d['id'], d) for d in client.state()['data']['devices'])
+        self.assertEqual(devices['AA:BB']['power'], 'off',
+                         'what the sweep heard is not on the phone')
+        self.assertEqual(devices['AA:BB']['from'], 'read')
+        self.assertEqual(devices['CC:DD']['power'], 'on',
+                         'a missed reply blanked the card')
+        self.assertEqual(self.server._states_at, read_at,
+                         'a LAN sweep counted as reading the whole house')
+        self.assertEqual(self.server.take_reading({'AA:BB': None}), 0)
+        self.assertEqual(self.server.take_reading(None), 0)
 
     def test_opening_the_remote_reads_the_devices_once_a_minute(self):
         """Aryez: a lamp that was already on showed as off until it was

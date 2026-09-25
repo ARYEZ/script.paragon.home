@@ -431,7 +431,9 @@ class GoveeService(xbmc.Monitor):
         if moment - self._last_address_check < ADDRESS_CHECK_SECONDS:
             return []
         self._last_address_check = moment
-        return self.app.check_addresses()
+        remote = self._remote
+        return self.app.check_addresses(
+            heard=remote.take_reading if remote is not None else None)
 
     def _check_sequences(self, now=None):
         """Run anything the clock says is due.

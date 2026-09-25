@@ -56,8 +56,11 @@ the Start Paragon TV button's gradient (`--hot`), ink inverted to #1c0a04.
 2.66.0: the page reads every device when opened and when brought back to
 the front (`readOnOpen`, quiet, no busy). The box skips that read if it read
 everything in the last `OPENED_FRESH` (60 s), because cloud lights are
-rationed requests; "Read the lights" is never skipped. The service's 10-min
-LAN sweep still does not feed the remote's snapshot -- a possible next step.
+rationed requests; "Read the lights" is never skipped. 2.67.0: the
+service's 10-min LAN sweep (`check_addresses(heard=...)`) hands its readings
+to `RemoteServer.take_reading`, merged over the rest; a None reading keeps
+the last one (WiFi bulbs miss replies); it does not reset `_states_at`,
+since cloud devices are not in it.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

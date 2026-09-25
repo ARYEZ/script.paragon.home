@@ -1466,6 +1466,28 @@ class RemoteServer(object):
 
     # -- what the page reads -----------------------------------------------
 
+    def take_reading(self, states):
+        """Keep what some devices said when something else asked them.
+
+        The service's ten-minute sweep of the LAN lights, handed over rather
+        than thrown away. Laid over what is known of the rest, like the
+        beacons' poll. A device that said nothing keeps what it said last:
+        a WiFi bulb misses a status request now and then without having gone
+        anywhere, and blanking its card every time would be worse than a
+        reading ten minutes old. Not counted as reading the house -- it is
+        the LAN devices only -- so opening the remote still reads the rest.
+        Only ever called on the loop's thread; the next pump redraws.
+        """
+        heard = dict((device_id, state) for device_id, state
+                     in (states or {}).items() if state is not None)
+        if not heard:
+            return 0
+        with self._lock:
+            merged = dict(self._states)
+            merged.update(heard)
+            self._states = merged
+        return len(heard)
+
     def current_snapshot(self):
         with self._lock:
             return self._snapshot
