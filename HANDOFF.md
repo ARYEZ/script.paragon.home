@@ -47,11 +47,11 @@ and stop only, `controls: false`. The web remote has a **Beacons** tab
 logged). Hub verbs `pause`, `resume`, `set_volume` gated on `CAP_PLAYBACK`.
 The beacon's seconds-in is `elapsed`, never `position` (a blind's).
 
-**Not yet confirmed on real hardware:** the mpv half was tested against
-`tests/fake_mpv.py`, a stand-in speaking mpv's protocol; this container
-cannot install mpv. Aryez was opening the Beacons tab as the session ended.
-First thing: ask whether play, pause, volume worked on beacon1. The Pi's
-startup log says `Playing through mpv` or `mpv is not installed`.
+**Confirmed on beacon1** (2.65.0): play, pause and volume work through
+mpv. 2.65.1 fixed the slider jumping back to the old number after a change
+(the snapshot held the last poll's reading; the beacon is now read back
+after pause, resume and volume) and turned every teal on the remote orange
+-- Aryez wants no teal anywhere; a lit card is a brighter orange instead.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
