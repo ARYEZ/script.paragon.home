@@ -1647,11 +1647,6 @@ PAGE = """<!DOCTYPE html>
      outright keeps the ember an ember. */
   --wash: linear-gradient(118deg,
       #16141a 0%, #1d1519 32%, #3f1b1a 66%, #2c1619 85%, #17131b 100%);
-  /* The same light turned up, for a device that reports itself on: the
-     ember band brighter and more orange, so on and off still read apart
-     now that both are the page's own colour. */
-  --wash-lit: linear-gradient(118deg,
-      #1a1513 0%, #261813 32%, #552314 66%, #371a13 85%, #1b1414 100%);
   --display: 'Paragon', 'Saira Condensed', 'Oswald', 'Roboto Condensed',
              'Arial Narrow', sans-serif;
   --body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -1885,13 +1880,26 @@ button.head[aria-expanded="true"] .caret {
   border-radius: 3px 3px 0 0;
 }
 .card.plain::before { display: none; }
-/* A device that reports itself on wears a bright orange edge rather than the
-   orange-to-red one, so the edge carries the state instead of just being
-   decoration -- and the wash inside it brightens with the edge. */
-.card.lit { background-image: var(--wash-lit); }
-.card.lit::before {
-  background: linear-gradient(100deg, #ffa05a 0%, var(--orange) 100%);
-}
+/* A device that reports itself on is filled with the gradient the Start
+   Paragon TV button wears, so on and off are told apart across a room rather
+   than by an edge two pixels tall. The edge goes, because the whole card is
+   the signal.
+
+   Everything on it inverts to the near-black the lit channel card uses, for
+   the reason measured there: white is 2.9:1 on the orange end, under the
+   floor, where this is 7.2:1 and still 4.9:1 at the red. The readout and the
+   slider were orange, which on this ground is nothing at all. Its buttons
+   keep their own dark fill and need nothing. */
+.card.dev.lit { background-image: var(--hot); }
+.card.dev.lit::before { display: none; }
+.card.dev.lit,
+.card.dev.lit .label,
+.card.dev.lit .state.on,
+.card.dev.lit .stat,
+.card.dev.lit .stat .unit,
+.card.dev.lit .stat .told,
+.card.dev.lit .empty { color: #1c0a04; }
+.card.dev.lit input[type=range] { accent-color: #1c0a04; }
 
 .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
 .stack { display: flex; flex-direction: column; gap: 9px; }
@@ -2363,8 +2371,8 @@ footer button { flex: 1 1 auto; }
 /* -- where the two halves differ ---------------------------------------- */
 
 /* `lit` means two things on this page, and they are not the same thing.
-   On the lights it means a device reports itself on, and it wears the bright
-   orange edge and wash. On the television it means the channel you are
+   On the lights it means a device reports itself on, and it is filled with
+   the Start Paragon TV button's gradient. On the television it means the channel you are
    watching, and it wears the ember Paragon TV draws behind its own
    selection. Scoped to the panel rather than renamed, because within each
    half the word is right.

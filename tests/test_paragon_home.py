@@ -17412,6 +17412,37 @@ class TestWebRemote(unittest.TestCase):
             self.assertIsNotNone(body, rule)
             self.assertIn('var(--orange)', body.group(1), rule)
 
+    def test_a_device_that_is_on_is_filled_like_the_start_button(self):
+        """Aryez: the lights, switches and blasters that are on should look
+        like the Start Paragon TV button. Compared against that button rather
+        than a colour written here: the point is that the two agree. And what
+        was orange on the card is re-inked, or the readout and the slider
+        vanish into the fill."""
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        def rule(selector, prop):
+            found = re.search(re.escape(selector) + r'\s*\{[^}]*?'
+                              + re.escape(prop) + r':\s*([^;]+);', page)
+            self.assertIsNotNone(found, 'no %s for %s' % (prop, selector))
+            return found.group(1).strip()
+
+        self.assertEqual(rule('.card.dev.lit', 'background-image'),
+                         rule('button.hot', 'background'),
+                         'a lit card and the Start button have drifted')
+        self.assertIn('.card.dev.lit::before { display: none; }', page)
+        ink = re.search(r'((?:\.card\.dev\.lit[^,{]*,\s*)*'
+                        r'\.card\.dev\.lit[^,{]*)\{ color: #1c0a04; \}', page)
+        self.assertIsNotNone(ink, 'nothing on a lit card is re-inked')
+        inked = [part.strip() for part in ink.group(1).split(',')]
+        for part in ('.card.dev.lit .state.on', '.card.dev.lit .stat',
+                     '.card.dev.lit .stat .unit', '.card.dev.lit .label'):
+            self.assertIn(part, inked, '%s stays orange on orange' % part)
+        self.assertEqual(rule('.card.dev.lit input[type=range]',
+                              'accent-color'), '#1c0a04')
+
     def test_the_status_line_answers_in_the_page_orange(self):
         """"Working" and what came of it are one action, so they are one colour."""
         import re

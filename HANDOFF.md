@@ -51,7 +51,8 @@ The beacon's seconds-in is `elapsed`, never `position` (a blind's).
 mpv. 2.65.1 fixed the slider jumping back to the old number after a change
 (the snapshot held the last poll's reading; the beacon is now read back
 after pause, resume and volume) and turned every teal on the remote orange
--- Aryez wants no teal anywhere; a lit card is a brighter orange instead.
+-- Aryez wants no teal anywhere. 2.65.2: a device that is on is filled with
+the Start Paragon TV button's gradient (`--hot`), ink inverted to #1c0a04.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
