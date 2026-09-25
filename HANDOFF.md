@@ -53,6 +53,11 @@ mpv. 2.65.1 fixed the slider jumping back to the old number after a change
 after pause, resume and volume) and turned every teal on the remote orange
 -- Aryez wants no teal anywhere. 2.65.2: a device that is on is filled with
 the Start Paragon TV button's gradient (`--hot`), ink inverted to #1c0a04.
+2.66.0: the page reads every device when opened and when brought back to
+the front (`readOnOpen`, quiet, no busy). The box skips that read if it read
+everything in the last `OPENED_FRESH` (60 s), because cloud lights are
+rationed requests; "Read the lights" is never skipped. The service's 10-min
+LAN sweep still does not feed the remote's snapshot -- a possible next step.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

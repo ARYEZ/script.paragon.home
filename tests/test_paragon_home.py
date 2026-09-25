@@ -17772,6 +17772,121 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(entry['playing'], 'goodnight',
                          'a silent read-back blanked the card')
 
+    # -- reading the house when the remote is opened -----------------------
+
+    def test_opening_the_remote_reads_the_devices_once_a_minute(self):
+        """Aryez: a lamp that was already on showed as off until it was
+        switched off and on again, because nothing read it. The page now
+        reads the house when it is opened -- but a phone picked up twice in a
+        minute reuses the first read, since a cloud light is a rationed
+        request each time. "Read the lights" is never held back."""
+        self.recorder.states['AA:BB'] = {'power': 'on', 'brightness': 70}
+        asked = []
+        real = self.recorder.get_states
+        self.recorder.get_states = lambda devices, timeout=3.0: (
+            asked.append(len(devices)) or real(devices))
+        client = self.signed_in()
+
+        first = client.act('states', opened=True)['data']
+        self.assertTrue(first['ok'])
+        self.assertNotIn('fresh', first)
+        self.assertEqual(len(asked), 1, 'opening the remote read nothing')
+        lamp = [d for d in client.state()['data']['devices']
+                if d['id'] == 'AA:BB'][0]
+        self.assertEqual(lamp['power'], 'on')
+        self.assertEqual(lamp['from'], 'read')
+
+        again = client.act('states', opened=True)['data']
+        self.assertTrue(again['ok'])
+        self.assertTrue(again['fresh'])
+        self.assertEqual(len(asked), 1, 'reopened within a minute, read again')
+
+        client.act('states')
+        self.assertEqual(len(asked), 2, 'Read the lights was held back')
+
+        # A minute on, opening reads again.
+        self.server._states_at -= self.lib.OPENED_FRESH + 1
+        self.assertNotIn('fresh', client.act('states', opened=True)['data'])
+        self.assertEqual(len(asked), 3, 'a stale read was reused')
+
+    def test_the_page_reads_the_house_when_opened_and_when_brought_back(self):
+        """Run, not read: the page in the stub browser, with every request
+        it makes written down. Opening it asks for a read and then redraws;
+        coming back to the front asks again; a read the box says is fresh
+        does not cost another redraw."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.signed_in()
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+
+        def run(fresh):
+            seed = (
+                "var SNAPSHOT = %s, FRESH = %s, SENT = [], HEARD = {};\n"
+                "document.addEventListener = function (name, fn) {\n"
+                "  (HEARD[name] = HEARD[name] || []).push(fn); };\n"
+                "global.fetch = function (path, init) {\n"
+                "  var body = init && init.body ? JSON.parse(init.body) : null;\n"
+                "  SENT.push(body ? body : path);\n"
+                "  var answer = path.indexOf('/api/state') >= 0 ? SNAPSHOT\n"
+                "    : {ok: true, fresh: FRESH || undefined};\n"
+                "  return Promise.resolve({status: 200, ok: true,\n"
+                "    json: function () { return Promise.resolve(answer); }});\n"
+                "};\n" % (json.dumps(snapshot), 'true' if fresh else 'false'))
+            tail = (
+                "\nfunction settle(n) { return n ? new Promise(function (r) {\n"
+                "  setImmediate(r); }).then(function () { return settle(n - 1); })\n"
+                "  : Promise.resolve(); }\n"
+                "settle(20).then(function () {\n"
+                "  var opened = SENT.slice();\n"
+                "  SENT.length = 0;\n"
+                "  (HEARD.visibilitychange || []).forEach(function (fn) { fn(); });\n"
+                "  return settle(20).then(function () {\n"
+                "    console.log(JSON.stringify({opened: opened, back: SENT}));\n"
+                "  });\n"
+                "});\n")
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script + tail)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self.assertEqual(proc.returncode, 0, said[:900])
+            return json.loads(said.strip().splitlines()[-1])
+
+        read = {'action': 'states', 'opened': True}
+        facts = run(fresh=False)
+        self.assertEqual(facts['opened'],
+                         ['/api/state', read, '/api/state'],
+                         'opening did not read the house and redraw')
+        self.assertEqual(facts['back'], [read, '/api/state'],
+                         'coming back to the front did not read again')
+
+        facts = run(fresh=True)
+        self.assertEqual(facts['opened'], ['/api/state', read],
+                         'a fresh read still cost a redraw')
+
     def test_a_beacon_poll_is_not_written_to_the_log(self):
         """Every three seconds while the tab is open. The line that says
         who ran a sequence must not be buried under it."""

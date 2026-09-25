@@ -175,6 +175,13 @@ ACTIONABLE = frozenset([CAP_POWER, CAP_BRIGHTNESS, CAP_COLOR, CAP_COLOR_TEMP,
 # line every three seconds would bury the one that says who ran a sequence.
 READS = ('states', 'beacons')
 
+# The page reads every device when it is opened, so a lamp that was already
+# on shows as on without anybody pressing anything. Opening it twice in a
+# minute -- a phone put down and picked up, a tab flicked away and back --
+# reuses the first read: a cloud light is a request to Govee or SwitchBot
+# each time, and those are rationed. "Read the lights" always reads.
+OPENED_FRESH = 60
+
 
 # ---------------------------------------------------------------------------
 # Secrets
@@ -1390,6 +1397,7 @@ class RemoteServer(object):
         self._snapshot = {'ready': False, 'message': 'Starting up'}
         self._snapshot_at = 0.0
         self._states = {}
+        self._states_at = 0.0
         self._lock = threading.Lock()
         # Whether a sequence is running right now, set by whoever started it.
         # Only ever touched on the service loop's thread -- both the scheduler
@@ -1507,6 +1515,14 @@ class RemoteServer(object):
                 ran += 1
                 continue
 
+            if (job.action == 'states' and (job.params or {}).get('opened')
+                    and moment - self._states_at < OPENED_FRESH):
+                job.finish({'ok': True, 'fresh': True,
+                            'message': 'Read %d seconds ago'
+                                       % int(moment - self._states_at)})
+                ran += 1
+                continue
+
             # Before it runs, so a run that hangs is still on record, and
             # with who asked: what a phone did is otherwise invisible in
             # the log, and a sequence at a quarter to three is a question.
@@ -1536,6 +1552,7 @@ class RemoteServer(object):
             if states is not None:
                 with self._lock:
                     self._states = states
+                    self._states_at = moment
             # A read of some devices, laid over what is known of the rest:
             # the beacons' poll must not blank every light on the Home tab.
             update = result.pop('states_update', None)
@@ -3154,10 +3171,14 @@ function load() {
       return;
     }
     if (!data.ready) { setTimeout(load, 800); return; }
+    var opening = !state;
     state = data;
     document.getElementById('login').hidden = true;
     document.getElementById('remote').hidden = false;
     render();
+    // The first draw is from whatever the box already knew; this fills in
+    // what the devices say now.
+    if (opening) { readOnOpen(); }
   });
 }
 
@@ -4185,6 +4206,19 @@ function renderBeacons() {
   document.getElementById('beaconsTab').hidden = !beacons.length;
 }
 
+/* Read the house when the remote is opened, and again when it comes back to
+   the front, so a lamp that was already on is shown on rather than waiting
+   for somebody to switch it. Quiet: no "Working", and it does not hold the
+   buttons, because nobody pressed anything. The box skips it if it read
+   everything in the last minute. */
+function readOnOpen() {
+  return api('/api/action', 'POST', {action: 'states', opened: true})
+    .then(function (data) {
+      if (data.status === 401) { showLogin(); return; }
+      if (data.ok && !data.fresh) { return load(); }
+    });
+}
+
 function pollBeacons() {
   // A read, not an action: no "Working", no busy, no log line on the box.
   return api('/api/action', 'POST', {action: 'beacons'}).then(function (data) {
@@ -4356,6 +4390,10 @@ setInterval(function () {
   pollAt = now;
   if (beacons) { pollBeacons(); } else { load(); }
 }, 1000);
+
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && state) { readOnOpen(); }
+});
 
 load();
 </script>
