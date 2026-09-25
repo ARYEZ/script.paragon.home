@@ -1866,7 +1866,7 @@ section { margin-top: 26px; }
   background: repeating-linear-gradient(114deg,
       var(--orange) 0 3px, transparent 3px 6px);
 }
-/* A driver heading is a button as well as a heading, so it needs every one
+/* A section heading is a button as well as a heading, so it needs every one
    of the button rules above taken back off it. */
 button.head {
   width: 100%;
@@ -2795,26 +2795,26 @@ button.chan {
 
     <div class="pane">
     <section id="sequencesBlock" hidden>
-      <div class="head">
-        <span class="nick"></span><h2>Sequences</h2><span class="rule"></span>
-      </div>
+      <button class="head" id="sequencesHead" aria-expanded="true">
+        <span class="nick"></span><h2>Sequences</h2><span class="rule"></span><span class="caret"></span>
+      </button>
       <div class="stack" id="sequences"></div>
     </section>
 
     <section id="scenesBlock" hidden>
-      <div class="head">
-        <span class="nick"></span><h2>Scenes</h2><span class="rule"></span>
-      </div>
+      <button class="head" id="scenesHead" aria-expanded="true">
+        <span class="nick"></span><h2>Scenes</h2><span class="rule"></span><span class="caret"></span>
+      </button>
       <div class="grid" id="scenes"></div>
     </section>
     </div>
 
     <div class="pane">
     <section id="allBlock" hidden>
-      <div class="head">
-        <span class="nick"></span><h2>All lights</h2><span class="rule"></span>
-      </div>
-      <div class="card">
+      <button class="head" id="allHead" aria-expanded="true">
+        <span class="nick"></span><h2>All lights</h2><span class="rule"></span><span class="caret"></span>
+      </button>
+      <div class="card" id="allBody">
         <div class="row">
           <button data-act="on">On</button>
           <button data-act="off">Off</button>
@@ -3030,6 +3030,35 @@ function sectionOpen(driver) {
     if (saved !== null) { return saved === '1'; }
   } catch (error) { /* storage off; fall through to the default */ }
   return driver.count <= COLLAPSE_ABOVE;
+}
+
+/* The Home tab's own sections fold the way a driver's does, and are
+   remembered the same way. Open unless this phone has said otherwise: these
+   are what the tab is for, and a first visit should show them. Only the
+   contents are hidden -- the section itself is still shown or not by whether
+   there is anything in it, and folding must not fight that. Keyed apart from
+   the drivers so a driver called "scenes" could never share one. */
+var FOLDS = [['sequencesHead', 'sequences'], ['scenesHead', 'scenes'],
+             ['allHead', 'allBody']];
+
+function foldSections() {
+  FOLDS.forEach(function (pair) {
+    var head = document.getElementById(pair[0]);
+    var body = document.getElementById(pair[1]);
+    var key = 'home.' + pair[1];
+    var open = true;
+    try {
+      open = localStorage.getItem(SECTION_KEY + key) !== '0';
+    } catch (error) { /* storage off; open */ }
+    body.hidden = !open;
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.addEventListener('click', function () {
+      var opening = body.hidden;
+      body.hidden = !opening;
+      head.setAttribute('aria-expanded', opening ? 'true' : 'false');
+      rememberSection(key, opening);
+    });
+  });
 }
 
 function rememberSection(id, open) {
@@ -4412,6 +4441,8 @@ setInterval(function () {
   pollAt = now;
   if (beacons) { pollBeacons(); } else { load(); }
 }, 1000);
+
+foldSections();
 
 document.addEventListener('visibilitychange', function () {
   if (!document.hidden && state) { readOnOpen(); }

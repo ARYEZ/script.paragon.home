@@ -17812,6 +17812,99 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(entry['playing'], 'goodnight',
                          'a silent read-back blanked the card')
 
+    # -- folding the Home tab's own sections -------------------------------
+
+    def test_sequences_scenes_and_all_lights_fold_and_are_remembered(self):
+        """Aryez: the driver sections could be folded away, and Sequences,
+        Scenes and All lights could not. Run in the stub browser, with the
+        headings actually tapped: open on a first visit, a tap folds and is
+        written down, a second tap opens, and a phone that folded one finds
+        it folded next time."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+        folds = [('sequencesHead', 'sequences'), ('scenesHead', 'scenes'),
+                 ('allHead', 'allBody')]
+        for head, body in folds:
+            self.assertIn('<button class="head" id="%s"' % head, page)
+            self.assertIn('id="%s"' % body, page)
+
+        def run(saved):
+            seed = (
+                "El.prototype.addEventListener = function (name, fn) {\n"
+                "  (this.on = this.on || {})[name] = fn; };\n"
+                "El.prototype.setAttribute = function (name, value) {\n"
+                "  (this.attrs = this.attrs || {})[name] = value; };\n"
+                "var SAVED = %s;\n"
+                "for (var k in SAVED) { localStorage.setItem(k, SAVED[k]); }\n"
+                % json.dumps(saved))
+            tail = (
+                "\nvar FOLDED = %s, out = {};\n"
+                "function look(pair) {\n"
+                "  var h = document.getElementById(pair[0]);\n"
+                "  var b = document.getElementById(pair[1]);\n"
+                "  return {hidden: b.hidden, expanded: (h.attrs || {})['aria-expanded'],\n"
+                "          saved: localStorage.getItem('paragon.section.home.' + pair[1])};\n"
+                "}\n"
+                "FOLDED.forEach(function (pair) {\n"
+                "  var h = document.getElementById(pair[0]);\n"
+                "  var at = [look(pair)];\n"
+                "  if (h.on && h.on.click) { h.on.click(); at.push(look(pair));\n"
+                "                            h.on.click(); at.push(look(pair)); }\n"
+                "  out[pair[1]] = at;\n"
+                "});\n"
+                "console.log(JSON.stringify(out));\n" % json.dumps(folds))
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script + tail)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self.assertEqual(proc.returncode, 0, said[:900])
+            return json.loads(said.strip().splitlines()[-1])
+
+        facts = run({})
+        for _head, body in folds:
+            first, folded, opened = facts[body]
+            self.assertEqual(first, {'hidden': False, 'expanded': 'true',
+                                     'saved': None},
+                             '%s is not open on a first visit' % body)
+            self.assertEqual(folded, {'hidden': True, 'expanded': 'false',
+                                      'saved': '0'},
+                             'tapping %s did not fold it' % body)
+            self.assertEqual(opened, {'hidden': False, 'expanded': 'true',
+                                      'saved': '1'},
+                             'tapping %s again did not open it' % body)
+
+        facts = run({'paragon.section.home.scenes': '0'})
+        self.assertEqual(facts['scenes'][0]['hidden'], True,
+                         'a folded section came back open')
+        self.assertEqual(facts['scenes'][0]['expanded'], 'false')
+        self.assertEqual(facts['sequences'][0]['hidden'], False,
+                         'folding one folded another')
+
     # -- reading the house when the remote is opened -----------------------
 
     def test_the_remote_keeps_what_the_sweep_heard(self):
