@@ -86,6 +86,8 @@ opens); the volume is set when the clip's turn comes. Stop or a straight-
 away play clears it. /status has `queued`; the card says "N to come". An
 older Pi answers /queue 404 "no such path" and the step says to update it
 rather than falling back to cutting in. Checked on real mpv 0.37 (--ao=null).
+Confirmed on beacon1 by Aryez: step volumes, Random song, and three beacon
+steps in a row played in turn.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
