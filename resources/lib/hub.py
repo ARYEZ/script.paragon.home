@@ -273,6 +273,11 @@ class Hub(object):
     def resume(self, device):
         return self._player(device).resume(device)
 
+    def queue_command(self, device, name, volume=None):
+        """A beacon's clip, played when what it is playing ends, at its own
+        volume if given. Only a player has a turn to wait for."""
+        return self._player(device).queue_command(device, name, volume)
+
     def set_volume(self, device, volume):
         """0 to 100. Remembered, so the phone can show it before the beacon
         is next asked."""

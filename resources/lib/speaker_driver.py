@@ -187,6 +187,29 @@ class SpeakerDriver(object):
         self._log('Played "%s" on %s' % (name, device.name))
         return True
 
+    def queue_command(self, device, name, volume=None):
+        """Play a clip, or a random song, when what is playing ends.
+
+        Checked by name here as send_command checks it, before anything goes
+        on the wire. Stop cannot wait its turn: a stop is for now.
+        """
+        if name == STOP:
+            raise ControlError('Stop cannot wait its turn on %s'
+                               % device.name)
+        shuffle = name == RANDOM_SONG
+        if not shuffle and name not in self.commands(device):
+            raise ControlError('%s has no clip called "%s"'
+                               % (device.name, name))
+        try:
+            picked = self.transport.queue(device.ip, self._port(device),
+                                          name=None if shuffle else name,
+                                          shuffle=shuffle, volume=volume)
+        except SpeakerError as exc:
+            raise ControlError('%s: %s' % (device.name, exc))
+        self._log('Queued "%s"%s on %s' % (picked, ' (a song at random)'
+                                           if shuffle else '', device.name))
+        return True
+
     def test_connection(self, device):
         """Ask the speaker what it can play, over the path a command takes.
 

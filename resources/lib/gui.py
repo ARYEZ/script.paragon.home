@@ -3261,6 +3261,12 @@ class ControlPanel(object):
                 return None
             if volume is not None:
                 step['volume'] = volume
+            when = _select('When', ['Straight away - stops what is playing',
+                                    'After what is playing'])
+            if when == BACK:
+                return None
+            if when == 1:
+                step['after'] = True
         return step
 
     def _ask_step_volume(self):

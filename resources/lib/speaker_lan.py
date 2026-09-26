@@ -146,6 +146,8 @@ def clean_status(raw):
         # Bytes free for clips on the Pi. None from a Pi running a script
         # older than the question, which is every Pi until it is copied over.
         'free': _bytes(raw.get('free')),
+        # What is waiting its turn after this, by name.
+        'queued': clean_clip_names(raw.get('queued')),
     }
 
 
@@ -303,6 +305,30 @@ class SpeakerTransport(object):
 
     def clips(self, ip, port=COMMAND_PORT):
         return self.listing(ip, port)['clips']
+
+    def queue(self, ip, port, name=None, shuffle=False, volume=None):
+        """Play a clip when what the beacon is playing ends -- or now, if
+        nothing is. `shuffle` asks for a song it picks. The volume travels
+        with it and is set when its turn comes, not now: setting it now
+        would turn up the clip still playing. Returns the name."""
+        body = {'shuffle': True} if shuffle else {'clip': name}
+        if volume is not None:
+            body['volume'] = int(volume)
+        try:
+            answer = self._call(ip, port, '/queue', body)
+        except SpeakerError as exc:
+            if 'no such path' in str(exc):
+                # The older script has no queue. Said rather than falling
+                # back to playing straight away, which would cut off
+                # exactly what this was asked to wait for.
+                raise SpeakerError(
+                    '%s cannot queue a clip yet: copy the new '
+                    'paragon_speaker.py onto it' % ip)
+            raise
+        played = answer.get('playing') if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not answer.get('ok') or not played:
+            raise SpeakerError('%s did not queue it' % ip)
+        return to_text(played)
 
     def shuffle(self, ip, port=COMMAND_PORT):
         """Play a song the beacon picks at random. Returns its name.

@@ -78,6 +78,14 @@ and `songs`; a phrase hides a song of the same name. `POST /play
 another. Kodi keeps songs in speaker_clips.json under `#songs`; the driver
 offers `Random song` (RESERVED with Stop) only when a beacon has songs. The
 card groups phrases, then Songs with Random song first.
+2.72.0: a beacon step may be `after: True` ("in turn"): `_run_step` calls
+`Hub.queue_command` (CAP_PLAYBACK) -> driver -> `POST /queue {clip|shuffle,
+volume}`. The Pi keeps the queue (`Speaker.enqueue/advance`, a `serve_queue`
+thread every 0.2 s, START_GRACE 1 s because mpv reads idle until a file
+opens); the volume is set when the clip's turn comes. Stop or a straight-
+away play clears it. /status has `queued`; the card says "N to come". An
+older Pi answers /queue 404 "no such path" and the step says to update it
+rather than falling back to cutting in. Checked on real mpv 0.37 (--ao=null).
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

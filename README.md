@@ -1519,6 +1519,19 @@ of whatever album was on. So a beacon is as happy with albums as with
 five-second clips — `Kitchen: Stargazer` starts the album, and
 `Kitchen: hardboiled complete` cuts in over it when the eggs are done.
 
+**Unless the step says to wait its turn.** After **How loud**, a beacon step
+asks **When**: *Straight away* is the cutting-in above; *After what is
+playing* hands the clip to the beacon to play when what it is playing ends,
+at the step's own volume, set when its turn comes rather than turning up the
+clip still playing. So three beacon steps in a row — two phrases and a
+**Random song** — play one after another, in order, each in full, and the
+sequence carries on with its other steps while they do. The step reads
+`Kitchen: goodnight at 25%, in turn`, and the card says `Playing -
+goodnight, 2 to come`. **Stop**, or a clip played straight away, lets the
+queue go. A Pi on the older script says to copy the new one over rather
+than playing the clip straight away and cutting off what it was told to
+wait for.
+
 **`Stop` is the first command on every beacon**, before its clips, so it is
 a step, a dial slot and a phrase like any clip is — *"Aurora, stop the
 music"* costs no more than any other phrase. Stopping when nothing is playing

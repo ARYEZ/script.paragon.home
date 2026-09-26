@@ -40,6 +40,9 @@ Two things listen:
                 POST /play {"shuffle": true}
                                          -> the same, and "playing": the
                                             song it picked
+                POST /queue {"clip": n or "shuffle": true, "volume"?}
+                                         -> {"ok": true, "playing": name,
+                                             "started": now or later}
                 POST /stop               -> {"ok": true, "stopped": name}
                 POST /pause              -> {"ok": true, "paused": true}
                 POST /resume             -> {"ok": true, "paused": false}
@@ -47,7 +50,10 @@ Two things listen:
 
 One thing plays at a time. Starting a clip stops whatever was playing, and
 says which, so "the eggs are done" lands when it was sent rather than after
-an hour of whatever album was on. Playback starts and the request returns;
+an hour of whatever album was on. A clip can instead be queued, to play when
+what is playing ends, at a volume of its own: that is how a sequence says
+three things in a row. Stop, or a clip played straight away, clears the
+queue. Playback starts and the request returns;
 it does not wait for the clip to end. A pause on the step in Paragon Home is
 how two clips are kept apart, the same way a pause spaces anything else.
 
@@ -88,6 +94,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 DISCOVERY_PORT = 8765
 COMMAND_PORT = 8766
 HELLO = b'PARAGON_SPEAKER?'
+
+# How long a clip that has just been started counts as playing whatever the
+# player says. mpv reports itself idle until the file it was handed has
+# opened; a queue that believed it would play every clip for a blink.
+START_GRACE = 1.0
 
 # What counts as a clip, and which player each kind wants. Order matters only
 # for the fallback: ffplay handles all of them, if it is installed.
@@ -488,6 +499,12 @@ class Speaker(object):
         # The song a shuffle picked last, so the next one is a different
         # one whenever there is another to pick.
         self._shuffled = None
+        # What waits its turn: (name, volume or None), oldest first. Held
+        # with _turn, which every start and stop takes, because the queue
+        # watcher starts clips from a thread of its own.
+        self._queue = []
+        self._turn = threading.RLock()
+        self._started_at = 0.0
         self.port = port
         self.device_id = device_id or stable_id()
         self.log = log
@@ -508,7 +525,13 @@ class Speaker(object):
             return self._playing
 
     def stop(self):
-        """End whatever is playing. Returns the clip name, or None."""
+        """End whatever is playing, and whatever was waiting. Returns the
+        clip name, or None."""
+        with self._turn:
+            self._queue = []
+            return self._stop()
+
+    def _stop(self):
         with self._lock:
             name, self._playing = self._playing, None
         stopped = self.player.stop()
@@ -539,6 +562,8 @@ class Speaker(object):
                   'volume': None}
         report.update(self.player.status())
         report['free'] = self.folder.free_bytes()
+        with self._turn:
+            report['queued'] = [name for name, _volume in self._queue]
         if playing is None:
             report['paused'] = False
             report['elapsed'] = None
@@ -584,6 +609,51 @@ class Speaker(object):
         }).encode('utf-8')
 
     def play(self, name):
+        """Start a clip straight away: whatever was playing stops, and
+        whatever was waiting is let go -- this one has taken over."""
+        with self._turn:
+            self._queue = []
+            return self._start(name)
+
+    def enqueue(self, name, volume=None):
+        """Play a clip when what is playing ends, at its own volume.
+
+        Returns (HTTP status, message, started now). With nothing playing and
+        nothing waiting it starts at once -- a queue of one is just a play.
+        A name that is not here is refused now, not when its turn comes.
+        """
+        with self._turn:
+            if self.path_for(name) is None:
+                return 404, 'no clip called "%s"' % name, False
+            if self.now_playing() is None and not self._queue:
+                status, message, _stopped = self._start(name, volume)
+                return status, message, status == 200
+            self._queue.append((name, volume))
+            self.log('Queued "%s"' % name)
+            return 200, 'queued', False
+
+    def advance(self, now=None):
+        """Start the next clip if the last one has ended. The queue
+        watcher calls this a few times a second.
+
+        A clip that has only just been started is left alone for a moment:
+        mpv reports itself idle until the file it was handed has opened,
+        and reading that as "finished" would skip straight past it.
+        """
+        moment = now if now is not None else time.time()
+        with self._turn:
+            if not self._queue or moment - self._started_at < START_GRACE:
+                return None
+            if self.now_playing() is not None:
+                return None
+            name, volume = self._queue.pop(0)
+            status, message, _stopped = self._start(name, volume)
+            if status != 200:
+                self.log('Could not play "%s" in turn: %s' % (name, message))
+                return None
+            return name
+
+    def _start(self, name, volume=None):
         """Start a clip, stopping whatever was playing.
 
         Returns (HTTP status, message, what was stopped or None).
@@ -597,6 +667,12 @@ class Speaker(object):
         path = self.path_for(name)
         if path is None:
             return 404, 'no clip called "%s"' % name, None
+        if volume is not None:
+            # Before the clip, so it starts at its own volume. One that
+            # will not take it -- no mpv -- still plays.
+            problem = self.player.set_volume(volume)
+            if problem:
+                self.log('Volume for "%s" not set: %s' % (name, problem))
         if not self.player.can_play(path):
             return 503, 'nothing installed can play %s' % \
                 os.path.basename(path), None
@@ -607,12 +683,13 @@ class Speaker(object):
             if stopped:
                 self.log('Stopped "%s"' % stopped)
         else:
-            stopped = self.stop()
+            stopped = self._stop()
         problem = self.player.play(path)
         if problem:
             return 503, problem, stopped
         with self._lock:
             self._playing = name
+        self._started_at = time.time()
         self.log('Playing "%s"' % name)
         return 200, 'playing', stopped
 
@@ -680,6 +757,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {'ok': True, 'volume': volume})
             return
+        if path == '/queue':
+            self._queue_one()
+            return
         if path != '/play':
             self._send(404, {'error': 'no such path'})
             return
@@ -706,9 +786,50 @@ class Handler(BaseHTTPRequestHandler):
                             'stopped': stopped, 'playing': name if ok
                             else None})
 
+    def _queue_one(self):
+        speaker = self.server.speaker
+        body = self._body()
+        if body is None:
+            self._send(400, {'ok': False,
+                             'error': 'send JSON with a "clip" in it'})
+            return
+        volume = body.get('volume')
+        if volume is not None:
+            try:
+                volume = clamp_volume(volume)
+            except (ValueError, TypeError):
+                self._send(400, {'ok': False,
+                                 'error': '"volume" is 0-100'})
+                return
+        if body.get('shuffle') is True:
+            name = speaker.pick_song()
+            if name is None:
+                self._send(404, {'ok': False, 'error': 'no songs in %s'
+                                 % speaker.songs.folder})
+                return
+        else:
+            name = str(body.get('clip') or '').strip()
+        if not name:
+            self._send(400, {'ok': False, 'error': 'no clip named'})
+            return
+        status, message, started = speaker.enqueue(name, volume)
+        ok = status == 200
+        self._send(status, {'ok': ok, 'error': '' if ok else message,
+                            'playing': name if ok else None,
+                            'started': started})
+
     def log_message(self, fmt, *args):
         # Quiet: one line per play from Speaker.play is plenty.
         pass
+
+
+def serve_queue(speaker, stop, every=0.2):
+    """Start each queued clip when the one before it ends."""
+    while not stop.wait(every):
+        try:
+            speaker.advance()
+        except Exception as exc:
+            speaker.log('Queue: %s' % exc)
 
 
 def serve_discovery(speaker, port, stop):
@@ -787,6 +908,9 @@ def main(argv=None):
                                  args=(speaker, args.discovery_port, stop))
     discovery.daemon = True
     discovery.start()
+    turns = threading.Thread(target=serve_queue, args=(speaker, stop))
+    turns.daemon = True
+    turns.start()
 
     server = HTTPServer(('', args.port), Handler)
     server.speaker = speaker

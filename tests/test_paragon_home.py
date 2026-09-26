@@ -351,6 +351,9 @@ class RecordingController(object):
     def resume(self, device):
         self._record('resume', device)
 
+    def queue_command(self, device, name, volume=None):
+        self._record('queue', device, name, volume)
+
     def set_volume(self, device, volume):
         # The Hub answers with the volume the beacon settled on.
         settled = max(0, min(100, int(volume)))
@@ -3721,10 +3724,11 @@ class TestABeaconStepSaysHowLoud(unittest.TestCase):
         return step, asked
 
     def test_a_clip_asks_how_loud_and_keeps_the_answer(self):
-        # Kitchen, goodnight (Stop is first), 50%.
-        step, asked = self.pick('speaker', 1, 1, 2)
+        # Kitchen, goodnight (Stop is first), 50%, straight away.
+        step, asked = self.pick('speaker', 1, 1, 2, 0)
 
-        self.assertEqual(asked[-1], 'How loud')
+        self.assertEqual(asked[-2:], ['How loud', 'When'])
+        self.assertNotIn('after', step, 'straight away was stored as queued')
         self.assertEqual(step['action'], 'goodnight')
         self.assertEqual(step['volume'], 50)
         self.assertEqual(self.seq.normalise_step(step)['volume'], 50)
@@ -3739,8 +3743,8 @@ class TestABeaconStepSaysHowLoud(unittest.TestCase):
         self.recorder.command_map['BE:01'] = ['Stop', 'Random song',
                                               'goodnight']
         panel = gui.ControlPanel(app)
-        # Kitchen, Random song, 75%.
-        xbmcgui.SELECT_QUEUE.extend([1, 1, 3])
+        # Kitchen, Random song, 75%, straight away.
+        xbmcgui.SELECT_QUEUE.extend([1, 1, 3, 0])
 
         step = panel._step_device('speaker')
 
@@ -3750,14 +3754,60 @@ class TestABeaconStepSaysHowLoud(unittest.TestCase):
             self.seq.describe_step(self.seq.normalise_step(step), 'Kitchen'),
             'Kitchen: Random song at 75%')
 
+    def test_in_turn_is_kept_and_described(self):
+        normal = self.seq.normalise_step
+        step = normal(self.clip(volume=25, after=True))
+        self.assertTrue(step['after'])
+        self.assertEqual(self.seq.describe_step(step, 'Kitchen'),
+                         'Kitchen: goodnight at 25%, in turn')
+        for other in ({}, {'after': False}, {'after': 'yes'}, {'after': 1}):
+            self.assertNotIn('after', normal(self.clip(**other)), other)
+
+    def test_a_step_in_turn_is_handed_to_the_beacon_with_its_volume(self):
+        """Not set now and played now: queued, volume and all, so the clip
+        still playing is neither cut off nor turned up."""
+        record = self.run_one(self.clip(volume=25, after=True))
+
+        self.assertEqual(self.recorder.calls,
+                         [('queue', 'BE:01', 'goodnight', 25)])
+        self.assertEqual(record['steps'][0]['outcome'], self.seq.DID)
+
+    def test_three_steps_in_a_row_all_reach_the_beacon_in_order(self):
+        app = self.app()
+        app._sequences = [self.seq.make_sequence('Bedtime', [
+            self.clip(action='goodnight', volume=25, after=True),
+            self.clip(action='goodnight', volume=60, after=True),
+            self.clip(action='Random song', volume=100, after=True)])]
+        self.recorder.command_map['BE:01'] = ['Stop', 'Random song',
+                                              'goodnight']
+
+        app.run_sequence_by_name('Bedtime', announce=False)
+
+        self.assertEqual(self.recorder.calls, [
+            ('queue', 'BE:01', 'goodnight', 25),
+            ('queue', 'BE:01', 'goodnight', 60),
+            ('queue', 'BE:01', 'Random song', 100)])
+
+    def test_after_what_is_playing_is_a_choice_in_the_menu(self):
+        # Kitchen, goodnight, 25%, after what is playing.
+        step, asked = self.pick('speaker', 1, 1, 1, 1)
+
+        self.assertEqual(asked[-1], 'When')
+        self.assertTrue(step['after'])
+        self.assertEqual(step['volume'], 25)
+
+    def test_backing_out_of_when_gives_up_on_the_step(self):
+        step, _asked = self.pick('speaker', 1, 1, 1)
+        self.assertIsNone(step)
+
     def test_leave_it_as_it_is_is_no_volume(self):
-        step, _asked = self.pick('speaker', 1, 1, 0)
+        step, _asked = self.pick('speaker', 1, 1, 0, 0)
 
         self.assertEqual(step['action'], 'goodnight')
         self.assertNotIn('volume', step)
 
     def test_a_volume_can_be_typed(self):
-        step, _asked = self.pick('speaker', 1, 1, 5, typed=['130'])
+        step, _asked = self.pick('speaker', 1, 1, 5, 0, typed=['130'])
 
         self.assertEqual(step['volume'], 100)
 
@@ -4880,6 +4930,12 @@ class FakeSpeaker(object):
         # which it will get.
         self.songs = None
         self.shuffles = []
+        # The queue: False is a Pi on a script older than it, which answers
+        # /queue as a path it has never heard of.
+        self.can_queue = True
+        self.queued = []
+        # Every /queue that arrived, accepted or not.
+        self.queue_requests = 0
 
         speaker = self
 
@@ -4912,6 +4968,22 @@ class FakeSpeaker(object):
                 body = json.loads(self.rfile.read(length).decode('utf-8')
                                   or '{}')
                 name = body.get('clip')
+                if self.path == '/queue':
+                    speaker.queue_requests += 1
+                    if not speaker.can_queue:
+                        self._send(404, {'error': 'no such path'})
+                        return
+                    if body.get('shuffle') is True:
+                        name = (speaker.songs or [None])[0]
+                    if name not in speaker.listing()['clips']:
+                        self._send(404, {'ok': False,
+                                         'error': 'no clip called "%s"'
+                                                  % name})
+                        return
+                    speaker.queued.append((name, body.get('volume')))
+                    self._send(200, {'ok': True, 'error': '',
+                                     'playing': name, 'started': False})
+                    return
                 if self.path == '/play' and body.get('shuffle') is True:
                     if speaker.songs is None:
                         self._send(400, {'error': 'no clip named'})
@@ -5221,6 +5293,61 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertEqual(self.saved, [True], 'the new songs were not saved')
         self.assertEqual(driver.songs(self.device()), ['Stargazer'])
 
+    def test_a_clip_is_queued_with_its_volume(self):
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+
+        driver.queue_command(self.device(), 'goodnight', 25)
+
+        self.assertEqual(self.pi.queued, [('goodnight', 25)])
+        self.assertEqual(self.pi.played, [], 'queued, and played at once too')
+
+    def test_a_random_song_is_queued_as_a_shuffle(self):
+        self.pi.songs = ['Stargazer']
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+
+        driver.queue_command(self.device(), 'Random song')
+
+        self.assertEqual(self.pi.queued, [('Stargazer', None)])
+
+    def test_stop_and_an_unknown_clip_are_refused_before_the_wire(self):
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+
+        for name, why in (('Stop', 'cannot wait its turn'),
+                          ('nope', 'no clip called "nope"')):
+            with self.assertRaises(ControlError) as caught:
+                driver.queue_command(self.device(), name)
+            self.assertIn(why, str(caught.exception))
+        # Refused here, not by the Pi: the Pi says the same words, and a
+        # test that only read the words could not tell which one refused.
+        self.assertEqual(self.pi.queue_requests, 0)
+
+    def test_an_older_pi_says_to_update_rather_than_cutting_in(self):
+        """Falling back to playing straight away would cut off exactly what
+        the step was told to wait for."""
+        self.pi.can_queue = False
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+
+        with self.assertRaises(ControlError) as caught:
+            driver.queue_command(self.device(), 'goodnight')
+
+        self.assertIn('copy the new paragon_speaker.py', str(caught.exception))
+        self.assertEqual(self.pi.played, [])
+
+    def test_the_hub_queues_only_on_a_player(self):
+        from devices import build_hub
+
+        hub = build_hub({'log_func': lambda m: None, 'speaker_clips': {},
+                         'save_speaker_clips': lambda: None})
+        blaster = Device('IR:01', name='Hall Blaster', driver='broadlink')
+
+        with self.assertRaises(ControlError) as caught:
+            hub.queue_command(blaster, 'TV Power')
+        self.assertIn('does not play anything', str(caught.exception))
+
     def test_the_songs_travel_in_the_clip_file(self):
         """One file carries both, so a satellite copying it gets the songs
         and a reload picks them up."""
@@ -5423,7 +5550,7 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertEqual(state, {'playing': 'goodnight', 'paused': True,
                                  'elapsed': 62.4, 'duration': 180.0,
                                  'volume': 40, 'controls': True,
-                                 'free': None})
+                                 'free': None, 'queued': []})
 
     def test_a_silent_beacon_reports_silence_not_nothing(self):
         """Silence is a reading. None is a beacon that did not answer, and
@@ -5454,13 +5581,13 @@ class TestTheSpeaker(unittest.TestCase):
                                    'volume': '40.4', 'controls': 'yes'}),
             {'playing': 'goodnight', 'paused': True, 'elapsed': 3.5,
              'duration': None, 'volume': 40, 'controls': True,
-             'free': None})
+             'free': None, 'queued': []})
         self.assertEqual(
             self.lan.clean_status({'playing': '', 'paused': True,
                                    'elapsed': 9, 'volume': None}),
             {'playing': None, 'paused': False, 'elapsed': None,
              'duration': None, 'volume': None, 'controls': False,
-             'free': None})
+             'free': None, 'queued': []})
         self.assertIsNone(self.lan.clean_status(['not', 'a', 'dict']))
 
     def test_the_free_space_is_read_as_whole_bytes(self):
@@ -5890,6 +6017,167 @@ class TestTheSongFolder(unittest.TestCase):
         self.assertEqual(self.speaker().folder.names(), [])
 
 
+class TestTheBeaconQueue(unittest.TestCase):
+    """Aryez: three beacon steps in a row, and only the last was heard --
+    each one cut off the one before. A clip can now wait its turn. The Pi's
+    queue, in-process, with a player whose "has it finished" the test
+    decides, so the order and the one-second grace are checked exactly."""
+
+    class Player(object):
+        controls = True
+        replaces = True
+
+        def __init__(self):
+            self.now = None
+            self.log = []
+
+        def can_play(self, path):
+            return True
+
+        def play(self, path):
+            self.now = os.path.splitext(os.path.basename(path))[0]
+            self.log.append(('play', self.now))
+
+        def playing(self):
+            return self.now is not None
+
+        def finish(self):
+            self.now = None
+
+        def stop(self):
+            was, self.now = self.now, None
+            return was is not None
+
+        def set_volume(self, volume):
+            self.log.append(('volume', volume))
+
+        def status(self):
+            return {}
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            'paragon_speaker_under_test',
+            os.path.join(ROOT, 'tools', 'paragon_speaker.py'))
+        self.pi = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.pi)
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        os.makedirs(os.path.join(self.folder, 'songs'))
+        for name in ('one.wav', 'two.wav', 'songs/Stargazer.mp3'):
+            with open(os.path.join(self.folder, name), 'wb') as handle:
+                handle.write(b'x')
+        self.player = self.Player()
+        self.said = []
+        self.speaker = self.pi.Speaker('Kitchen', self.folder, 0, 'AA',
+                                       log=self.said.append,
+                                       player=self.player)
+
+    def later(self, seconds=None):
+        """A moment past the grace after the last start."""
+        return self.speaker._started_at + (seconds if seconds is not None
+                                           else self.pi.START_GRACE + 0.1)
+
+    def test_with_nothing_playing_it_starts_at_once_at_its_volume(self):
+        self.assertEqual(self.speaker.enqueue('one', 25), (200, 'playing', True))
+        self.assertEqual(self.player.log, [('volume', 25), ('play', 'one')])
+
+    def test_each_waits_for_the_one_before_and_brings_its_own_volume(self):
+        self.speaker.enqueue('one', 25)
+        self.assertEqual(self.speaker.enqueue('two', 60)[2], False)
+        self.assertEqual(self.speaker.enqueue('Stargazer', 100)[2], False)
+        self.assertEqual(self.speaker.status()['queued'], ['two', 'Stargazer'])
+
+        # Still playing: nothing moves, however long it has been.
+        self.assertIsNone(self.speaker.advance(now=self.later(60)))
+        self.player.finish()
+        self.assertEqual(self.speaker.advance(now=self.later()), 'two')
+        self.player.finish()
+        self.assertEqual(self.speaker.advance(now=self.later()), 'Stargazer')
+        self.player.finish()
+        self.assertIsNone(self.speaker.advance(now=self.later()))
+
+        self.assertEqual(self.player.log, [
+            ('volume', 25), ('play', 'one'),
+            ('volume', 60), ('play', 'two'),
+            ('volume', 100), ('play', 'Stargazer')])
+        self.assertEqual(self.speaker.status()['queued'], [])
+
+    def test_a_clip_just_started_is_not_taken_for_finished(self):
+        """mpv reports itself idle until the file it was handed opens. A
+        queue that believed it would play every clip for a blink."""
+        started = time.time()
+        self.speaker.enqueue('one')
+        self.speaker.enqueue('two')
+        self.player.finish()  # what mpv says in the first instant
+
+        # Measured on the clock, not from the speaker's own note of when it
+        # started -- a note never written would pass a test read from it.
+        self.assertIsNone(self.speaker.advance(now=started + 0.5))
+        self.assertEqual(
+            self.speaker.advance(now=started + self.pi.START_GRACE + 0.5),
+            'two')
+
+    def test_a_clip_queued_between_two_waits_behind_the_rest(self):
+        """The last one has ended and the watcher has not started the next
+        yet: a clip queued in that gap goes to the back, not the front."""
+        self.speaker.enqueue('one')
+        self.speaker.enqueue('two')
+        self.player.finish()
+
+        self.assertEqual(self.speaker.enqueue('Stargazer')[2], False)
+        self.assertEqual(self.speaker.status()['queued'], ['two', 'Stargazer'])
+        self.assertEqual(self.speaker.advance(now=self.later()), 'two')
+
+    def test_no_volume_leaves_the_volume_alone(self):
+        self.speaker.enqueue('one')
+        self.assertEqual(self.player.log, [('play', 'one')])
+
+    def test_stop_and_a_play_straight_away_let_the_queue_go(self):
+        self.speaker.enqueue('one')
+        self.speaker.enqueue('two')
+        self.speaker.stop()
+        self.assertEqual(self.speaker.status()['queued'], [])
+
+        self.speaker.enqueue('one')
+        self.speaker.enqueue('two')
+        self.speaker.play('Stargazer')
+        self.assertEqual(self.speaker.status()['queued'], [],
+                         'a clip played straight away left a queue behind')
+        self.assertEqual(self.player.now, 'Stargazer')
+
+    def test_a_name_that_is_not_here_is_refused_now(self):
+        self.speaker.enqueue('one')
+
+        status, message, started = self.speaker.enqueue('nope')
+
+        self.assertEqual(status, 404)
+        self.assertIn('no clip called "nope"', message)
+        self.assertEqual(self.speaker.status()['queued'], [])
+
+    def test_the_watcher_starts_the_next_one(self):
+        """serve_queue, the thread main starts, doing its job."""
+        import threading
+
+        self.speaker.enqueue('one')
+        self.speaker.enqueue('two')
+        self.speaker._started_at -= self.pi.START_GRACE + 1
+        self.player.finish()
+        stop = threading.Event()
+        watcher = threading.Thread(target=self.pi.serve_queue,
+                                   args=(self.speaker, stop, 0.02))
+        watcher.start()
+        try:
+            deadline = time.time() + 2
+            while time.time() < deadline and self.player.now != 'two':
+                time.sleep(0.02)
+        finally:
+            stop.set()
+            watcher.join(2)
+        self.assertEqual(self.player.now, 'two')
+
+
 class TestThePiListener(unittest.TestCase):
     """tools/paragon_speaker.py, run as the Pi runs it, against the real
     transport -- so the two halves of the wire are held to each other."""
@@ -6080,6 +6368,29 @@ class TestThePiListener(unittest.TestCase):
     def _speaker_error(self):
         import speaker_lan
         return speaker_lan.SpeakerError
+
+    def test_a_clip_can_be_queued_over_http(self):
+        """The wire half, against the real script: the first starts, the
+        next waits and is listed, and Stop lets the queue go."""
+        self._songs('Stargazer.mp3')
+
+        first = self.transport.queue('127.0.0.1', self.port, name='goodnight')
+        then = self.transport.queue('127.0.0.1', self.port, shuffle=True,
+                                    volume=100)
+
+        self.assertEqual((first, then), ('goodnight', 'Stargazer'))
+        status = self.transport.status('127.0.0.1', self.port)
+        self.assertEqual(status['playing'], 'goodnight')
+        self.assertEqual(status['queued'], ['Stargazer'])
+        self.transport.stop('127.0.0.1', self.port)
+        self.assertEqual(
+            self.transport.status('127.0.0.1', self.port)['queued'], [])
+
+    def test_a_queued_volume_that_is_not_one_is_refused(self):
+        with self.assertRaises(self._speaker_error()) as caught:
+            self.transport._call('127.0.0.1', self.port, '/queue',
+                                 {'clip': 'goodnight', 'volume': 'loud'})
+        self.assertIn('0-100', str(caught.exception))
 
     def test_the_real_listener_answers_the_real_search(self):
         found = self.transport.discover(
@@ -18279,6 +18590,13 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(entry['ip'], '10.0.0.60')
         self.assertEqual(entry['songs'], [],
                          'a beacon with no songs has some')
+        self.assertEqual(entry['queued'], [], 'nothing was waiting')
+        self.recorder.states['BE:01'] = dict(self.recorder.states['BE:01'],
+                                             queued=['two'])
+        client.act('beacons')
+        entry = [d for d in client.state()['data']['devices']
+                 if d['id'] == 'BE:01'][0]
+        self.assertEqual(entry['queued'], ['two'])
         self.assertEqual(entry['from'], 'read')
         # Only a beacon's card shows where it is: the others are asked about
         # every device that has an address to show.
@@ -18732,6 +19050,13 @@ class TestWebRemote(unittest.TestCase):
             ['BUTTON', 'shuffle', 'Random song'],
             ['BUTTON', 'playing', 'Stargazer']])
         self.assertEqual(card['lit'], ['Stargazer'])
+
+        waiting = dict(snapshot, devices=[
+            dict(d, queued=['two', 'Stargazer']) if d['id'] == 'BE:01' else d
+            for d in snapshot['devices']])
+        said = self._draw(node, browser, script, waiting, 'beacons')
+        card = json.loads(said.strip().splitlines()[-1])['card']
+        self.assertEqual(card['now'], 'Playing - goodnight, 2 to come')
 
         # A Pi still on the older script says nothing about its free space:
         # the card says where it is and no more, rather than "None free".

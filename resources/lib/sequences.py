@@ -391,6 +391,11 @@ def normalise_step(raw):
         volume = _volume(raw.get('volume'))
         if volume is not None:
             step['volume'] = volume
+        # A beacon's clip that waits for what is playing to end rather than
+        # cutting it off. Absent is "straight away", which is every step
+        # written before this.
+        if raw.get('after') is True:
+            step['after'] = True
         return step
 
     if kind == KIND_SEQUENCE:
@@ -541,6 +546,8 @@ def describe_step(step, device_name=None):
         text = '%s: %s' % (target, step.get('action'))
         if step.get('volume') is not None:
             text += ' at %d%%' % step['volume']
+        if step.get('after'):
+            text += ', in turn'
     elif kind == KIND_POSITION:
         text = '%s: %s%% open' % (target, step.get('action'))
     else:
@@ -1018,6 +1025,14 @@ def _run_step(app, step, states=None):
             _report(app.toggle_all(targets))
         else:
             _report(app.power_all(action == ACTION_ON, targets))
+        return
+
+    if kind == KIND_COMMAND and step.get('after'):
+        # Handed to the beacon to play when what it is playing ends, volume
+        # and all -- the sequence carries on, and the beacon keeps the order.
+        for device in targets:
+            app.controller.queue_command(device, step['action'],
+                                         step.get('volume'))
         return
 
     if kind == KIND_COMMAND:

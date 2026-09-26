@@ -834,6 +834,7 @@ def _device_entry(app, device, state):
         'duration': None,
         'volume': None,
         'controls': False,
+        'queued': [],
         # Room left on the Pi for clips, as a sentence, and where it is --
         # so the card says both without anybody reaching for SSH.
         'free': None,
@@ -857,7 +858,7 @@ def _device_entry(app, device, state):
         entry['from'] = 'read'
         if 'playing' in state:
             for key in ('playing', 'paused', 'elapsed', 'duration', 'volume',
-                        'controls'):
+                        'controls', 'queued'):
                 entry[key] = state.get(key, entry[key])
             if state.get('free') is not None:
                 entry['free'] = describe_free(state['free'])
@@ -4205,9 +4206,12 @@ function paintBeacon(parts, device) {
     .filter(function (part) { return !!part; }).join(' - ');
   parts.where.textContent = where;
   parts.where.hidden = !where;
-  parts.now.textContent = playing
+  // What is waiting its turn, counted rather than listed: the card has a
+  // line for it, not a page.
+  var waiting = (device.queued || []).length;
+  parts.now.textContent = (playing
     ? (paused ? 'Paused - ' : 'Playing - ') + playing
-    : 'Silent';
+    : 'Silent') + (waiting ? ', ' + waiting + ' to come' : '');
   parts.now.className = 'label now' + (playing && !paused ? ' on' : '');
 
   var known = playing && device.duration;
