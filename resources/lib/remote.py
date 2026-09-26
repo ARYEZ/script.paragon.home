@@ -47,6 +47,7 @@ import xbmcvfs
 import addon_utils as utils
 import scenes as scene_lib
 import sequences as sequence_lib
+import reracks as rerack_lib
 import speeddial as dial_lib
 import tv
 from compat import (BaseHTTPRequestHandler, HTTPServer, ThreadingMixIn,
@@ -656,9 +657,16 @@ def perform(app, action, params, sleep_func=None, on_step=None):
 
     if action == 'sequence':
         name = params.get('name') or params.get('value') or ''
-        sequence = app.sequence_by_name(name)
+        # "Bedtime" is tonight's Bedtime -- Bedtime Alpha on an Alpha
+        # evening. Everything after this is about the one that runs.
+        sequence = app.sequence_for_today(name)
         if sequence is None:
+            family = app.sequence_family(name)
+            if family is not None:
+                return {'ok': False, 'message': 'No %s for %s' % (
+                    family['base'], app.evening_rerack() or 'today')}
             return {'ok': False, 'message': 'No sequence called "%s"' % name}
+        name = sequence['name']
         if app.pending_for(name) is not None:
             # Already part way through, waiting out a long pause. Starting it
             # again would repeat its opening steps and leave one tail owed to
@@ -889,6 +897,59 @@ def _driver_label(app, driver_id):
         or DRIVER_LABELS.get(driver_id) or driver_id.title()
 
 
+def _sequence_tile(app, sequence, now):
+    name = sequence.get('name', '')
+    return {'name': name,
+            # The one a press runs, which is the tile's own name unless the
+            # tile stands for a family -- see _sequence_tiles.
+            'runs': name,
+            'note': '',
+            'schedule': sequence_lib.describe_schedule(sequence),
+            'steps': len(sequence_lib.filled_steps(sequence)),
+            # What became of it last time. The phone is usually the only
+            # place a scheduled run is ever seen from.
+            'last': sequence_lib.describe_run(app.last_run(name), now),
+            'failed': (app.last_run(name) or {}).get(sequence_lib.FAILED) or 0,
+            # Seconds still to wait if it is part way through a long pause,
+            # 0 if it is not. The page shows the wait and offers to stop it,
+            # because a sequence waiting is a sequence that has done half of
+            # what it was asked and left a plug on.
+            'waiting': _waiting_for(app, name, now)}
+
+
+def _sequence_tiles(app, now):
+    """One tile per sequence -- except a family, "Bedtime Alpha", "Bedtime
+    Omega" and "Bedtime Delta", which is one "Bedtime" tile where the first of
+    them stood. It says which version tonight is, and what that one did last;
+    a press sends "Bedtime", and the box picks, so a page left open since the
+    afternoon still runs the right one after midnight."""
+    families = rerack_lib.variant_groups(app.sequences)
+    tonight_rerack = app.evening_rerack()
+    tiles, placed = [], set()
+    for sequence in app.sequences:
+        base, preset = rerack_lib.split_variant(sequence.get('name', ''))
+        key = (preset and base.lower()) or \
+            (sequence.get('name', '').strip().lower())
+        family = families.get(key)
+        if family is None:
+            tiles.append(_sequence_tile(app, sequence, now))
+            continue
+        if key in placed:
+            continue
+        placed.add(key)
+        runs = app.sequence_for_today(family['base'])
+        if runs is None:
+            tile = {'name': family['base'], 'runs': '', 'schedule': '',
+                    'steps': 0, 'last': '', 'failed': 0, 'waiting': 0,
+                    'note': 'Nothing for %s' % (tonight_rerack or 'today')}
+        else:
+            tile = _sequence_tile(app, runs, now)
+            tile['name'] = family['base']
+            tile['note'] = 'Tonight: %s' % runs['name']
+        tiles.append(tile)
+    return tiles
+
+
 def _waiting_for(app, name, now):
     """Seconds left on a sequence's long pause, or 0 if it is not in one."""
     try:
@@ -938,23 +999,7 @@ def snapshot(app, states=None, allow_sequences=True):
                      'count': counts[driver]} for driver in counts],
         'devices': devices,
         'scenes': [{'name': scene.get('name', '')} for scene in app.scenes],
-        'sequences': [{'name': sequence.get('name', ''),
-                       'schedule': sequence_lib.describe_schedule(sequence),
-                       'steps': len(sequence_lib.filled_steps(sequence)),
-                       # What became of it last time. The phone is usually the
-                       # only place a scheduled run is ever seen from.
-                       'last': sequence_lib.describe_run(
-                           app.last_run(sequence.get('name', '')), now),
-                       'failed': (app.last_run(sequence.get('name', '')) or {}
-                                  ).get(sequence_lib.FAILED) or 0,
-                       # Seconds still to wait if it is part way through a
-                       # long pause, 0 if it is not. The page shows the wait
-                       # and offers to stop it, because a sequence waiting is
-                       # a sequence that has done half of what it was asked
-                       # and left a plug on.
-                       'waiting': _waiting_for(app, sequence.get('name', ''),
-                                               now)}
-                      for sequence in app.sequences],
+        'sequences': _sequence_tiles(app, now),
         # Numbered, so an empty slot keeps its place: the thing a thumb knows
         # is third stays third when the second is cleared.
         'dial': [{'slot': number, 'label': app.dial_label(slot)}
@@ -3365,11 +3410,22 @@ function renderSequences() {
     /* What it did last time, where there is one -- a scheduled run at seven in
        the morning is usually seen from here or nowhere. The schedule is what
        it will do and matters less than what it did. */
+    // A family's tile says which version tonight is, ahead of the rest.
+    var said = sequence.last ||
+      (sequence.steps + ' step(s) - ' + sequence.schedule);
     var sub = waiting
       ? 'Waiting ' + saidWait(waiting) + ' - press to stop'
-      : (sequence.last || (sequence.steps + ' step(s) - ' + sequence.schedule));
+      : (sequence.note
+         ? sequence.note + (sequence.runs ? ' - ' + said : '')
+         : said);
     var node = tile(sequence.name, sub, function () {
-      act(waiting ? 'cancel_sequence' : 'sequence', {name: sequence.name});
+      // A family with no version for tonight: say so here. Sent, it would
+      // be answered "Started" and then quietly do nothing.
+      if (!waiting && !sequence.runs) { say(sequence.note, 'bad'); return; }
+      // Stopping names the one that is waiting; starting names the tile, and
+      // the box decides which version that is at the moment it is pressed.
+      act(waiting ? 'cancel_sequence' : 'sequence',
+          {name: waiting ? (sequence.runs || sequence.name) : sequence.name});
     });
     if (waiting) { node.classList.add('waiting'); }
     if (sequence.failed) { node.classList.add('lastfailed'); }

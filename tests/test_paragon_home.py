@@ -4060,6 +4060,143 @@ class TestAStepForCertainDates(unittest.TestCase):
         self.assertEqual(step['dates'], [1], 'a new clip lost its dates')
 
 
+class TestTonightsVersionOfASequence(unittest.TestCase):
+    """Aryez: Bedtime Alpha, Bedtime Omega and Bedtime Delta, and one Bedtime
+    to press -- the one for the day's rerack. The name is the link; the day
+    is Paragon Home's weekly table; and until the day's Initial Shutdown it is
+    still the evening before."""
+
+    # Monday 28 September 2026 onwards.
+    WEEK = ['Alpha', 'Delta', 'Omega', '', 'Gamma', '', '']
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'reracks',
+                     'gui', 'speeddial'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import reracks
+        import sequences
+
+        self.seq = sequences
+        self.reracks = reracks
+        self.at(2026, 9, 28, 21, 30)  # Monday evening: Alpha
+        self.seq.now = lambda: self.when
+
+    def tearDown(self):
+        clean_profile()
+
+    def at(self, *when):
+        import datetime
+        self.when = datetime.datetime(*when)
+
+    def app(self, names=('Bedtime Alpha', 'Bedtime Omega', 'Bedtime Delta')):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        app.controller = self.recorder
+        app._devices = [Device('AA:BB', name='Lamp', lan=True)]
+        app._scenes = []
+        # Each version switches the lamp its own way, so a run says which.
+        app._sequences = [self.seq.make_sequence(name, [
+            {'kind': 'power', 'target': 'AA:BB',
+             'action': ('off' if name.endswith('Delta') else 'on')
+             if name != 'Bedtime' else 'toggle'}]) for name in names]
+        app._week = list(self.WEEK)
+        app._week_follows_tv = False
+        return app
+
+    # -- the rules ---------------------------------------------------------
+
+    def test_a_version_is_a_name_ending_in_a_preset(self):
+        split = self.reracks.split_variant
+        self.assertEqual(split('Bedtime Alpha'), ('Bedtime', 'Alpha'))
+        self.assertEqual(split('wind down delta'), ('wind down', 'Delta'))
+        self.assertEqual(split('Alpha'), ('Alpha', ''))
+        self.assertEqual(split('Bedtime Alphas'), ('Bedtime Alphas', ''))
+
+    def test_a_family_needs_two_versions_or_a_plain_one(self):
+        groups = self.reracks.variant_groups
+        named = lambda *names: [{'name': n} for n in names]
+        self.assertEqual(
+            groups(named('Bedtime Alpha', 'Bedtime Delta'))['bedtime']
+            ['variants'], {'Alpha': 'Bedtime Alpha', 'Delta': 'Bedtime Delta'})
+        self.assertEqual(groups(named('Bedtime', 'Bedtime Omega'))
+                         ['bedtime']['plain'], 'Bedtime')
+        self.assertEqual(groups(named('Project Delta')), {},
+                         'a lone name with a Greek letter became a family')
+
+    def test_the_evening_runs_until_the_days_initial_shutdown(self):
+        import paragon_tv
+
+        starts = paragon_tv.SHUTDOWN_TIMES
+        evening = lambda: self.reracks.evening_rerack(self.WEEK, self.when,
+                                                      starts)
+        self.at(2026, 9, 28, 21, 30)   # Monday, Alpha
+        self.assertEqual(evening(), 'Alpha')
+        self.at(2026, 9, 29, 0, 15)    # Tuesday is Delta, from 03:30
+        self.assertEqual(evening(), 'Alpha', 'midnight ended the evening')
+        self.at(2026, 9, 29, 3, 45)
+        self.assertEqual(evening(), 'Delta')
+        self.at(2026, 9, 28, 0, 20)    # Monday is Alpha, from 00:30
+        self.assertEqual(evening(), '', "Sunday's evening has no rerack")
+        self.at(2026, 9, 28, 0, 40)
+        self.assertEqual(evening(), 'Alpha')
+        self.at(2026, 10, 1, 3, 59)    # Thursday has none: 04:00
+        self.assertEqual(evening(), 'Omega')
+        self.at(2026, 10, 1, 4, 1)
+        self.assertEqual(evening(), '')
+
+    # -- picking and running -----------------------------------------------
+
+    def test_bedtime_is_tonights_version(self):
+        app = self.app()
+        self.assertEqual(app.sequence_for_today('Bedtime')['name'],
+                         'Bedtime Alpha')
+        self.at(2026, 9, 29, 21, 0)
+        self.assertEqual(app.sequence_for_today('bedtime')['name'],
+                         'Bedtime Delta')
+        self.at(2026, 9, 30, 0, 45)    # still Tuesday's evening
+        self.assertEqual(app.sequence_for_today('Bedtime')['name'],
+                         'Bedtime Delta')
+        self.assertEqual(app.sequence_for_today('Bedtime Omega')['name'],
+                         'Bedtime Omega', 'a named version stopped being '
+                                          'runnable by name')
+
+    def test_a_day_with_no_version_runs_the_plain_one_or_says_so(self):
+        self.at(2026, 10, 2, 21, 0)    # Friday: Gamma, no Gamma version
+        app = self.app()
+        self.assertIsNone(app.sequence_for_today('Bedtime'))
+        xbmcgui.reset()
+        self.assertFalse(app.run_sequence_by_name('Bedtime'))
+        said = ' '.join(str(note) for note in xbmcgui.NOTIFICATIONS)
+        self.assertIn('No Bedtime for Gamma', said)
+
+        app = self.app(names=('Bedtime', 'Bedtime Alpha'))
+        self.assertEqual(app.sequence_for_today('Bedtime')['name'], 'Bedtime')
+
+    def test_running_it_by_name_runs_tonights(self):
+        app = self.app()
+        self.assertTrue(app.run_sequence_by_name('Bedtime', announce=False))
+        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', True)])
+        self.assertIsNotNone(app.last_run('Bedtime Alpha'))
+        self.assertIsNone(app.last_run('Bedtime'))
+
+        self.at(2026, 9, 29, 22, 0)
+        del self.recorder.calls[:]
+        app.run_sequence_by_name('Bedtime', announce=False)
+        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', False)])
+
+    def test_a_dial_slot_or_phrase_for_bedtime_is_tonights(self):
+        app = self.app()
+        found = app.sequence_for_step({'kind': 'sequence',
+                                       'target': 'Bedtime'}, 'Dial 3')
+        self.assertEqual(found['name'], 'Bedtime Alpha')
+
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 
@@ -20193,7 +20330,8 @@ class TestWebRemote(unittest.TestCase):
         client = self.serve()
         page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
 
-        self.assertIn("(sequence.last || (sequence.steps + ' step(s) - '", page)
+        self.assertIn("var said = sequence.last ||\n"
+                      "      (sequence.steps + ' step(s) - '", page)
         self.assertIn("if (sequence.failed) { node.classList.add('lastfailed')",
                       page)
 
@@ -20210,6 +20348,166 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(tile['name'], 'Coffee')
         self.assertGreater(tile['waiting'], 700)
         self.assertLessEqual(tile['waiting'], 720)
+
+    def bedtimes(self, *names):
+        import datetime
+        import sequences as sequence_lib
+
+        self.app._sequences = [sequence_lib.make_sequence(name, [
+            {'kind': 'power', 'target': 'AA:BB', 'action': 'on'}])
+            for name in names]
+        self.app._week = ['Alpha', 'Delta', '', '', '', '', '']
+        self.app._week_follows_tv = False
+        when = datetime.datetime(2026, 9, 28, 21, 30)  # Monday: Alpha
+        real = sequence_lib.now
+        sequence_lib.now = lambda: when
+        self.addCleanup(setattr, sequence_lib, 'now', real)
+
+    def test_a_family_is_one_tile_saying_which_is_tonights(self):
+        self.bedtimes('Wake Up', 'Bedtime Alpha', 'Bedtime Omega',
+                      'Project Delta', 'Bedtime Delta')
+        client = self.signed_in()
+
+        tiles = client.state()['data']['sequences']
+
+        self.assertEqual([t['name'] for t in tiles],
+                         ['Wake Up', 'Bedtime', 'Project Delta'])
+        bedtime = tiles[1]
+        self.assertEqual(bedtime['runs'], 'Bedtime Alpha')
+        self.assertEqual(bedtime['note'], 'Tonight: Bedtime Alpha')
+        self.assertEqual(tiles[2]['runs'], 'Project Delta')
+
+    def test_pressing_the_family_runs_tonights(self):
+        self.bedtimes('Bedtime Alpha', 'Bedtime Delta')
+        client = self.signed_in()
+
+        # A sequence is started in the background and answered "Started";
+        # which one ran is in the record once the loop has run it.
+        self.assertTrue(client.act('sequence', name='Bedtime')['data']['ok'])
+        deadline = time.time() + 5
+        while time.time() < deadline and \
+                self.app.last_run('Bedtime Alpha') is None:
+            time.sleep(0.05)
+
+        self.assertIsNotNone(self.app.last_run('Bedtime Alpha'))
+        self.assertIsNone(self.app.last_run('Bedtime Delta'))
+
+    def test_a_family_with_nothing_for_tonight_says_so(self):
+        self.bedtimes('Bedtime Omega', 'Bedtime Delta')
+        client = self.signed_in()
+
+        tile = client.state()['data']['sequences'][0]
+        self.assertEqual(tile['note'], 'Nothing for Alpha')
+        self.assertEqual(tile['runs'], '')
+        # The page says the note rather than sending a press that would be
+        # answered "Started"; and one sent anyway runs nothing.
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        self.assertIn("if (!waiting && !sequence.runs) "
+                      "{ say(sequence.note, 'bad'); return; }", page)
+        import remote as remote_lib
+        self.assertEqual(remote_lib.perform(self.app, 'sequence',
+                                            {'name': 'Bedtime'}),
+                         {'ok': False, 'message': 'No Bedtime for Alpha'})
+        self.assertIsNone(self.app.last_run('Bedtime Omega'))
+        self.assertIsNone(self.app.last_run('Bedtime Delta'))
+
+    def test_a_waiting_family_tile_stops_the_one_that_is_waiting(self):
+        """The tile is "Bedtime"; what is waiting is "Bedtime Alpha". Stop
+        has to name that, or it stops nothing."""
+        self.bedtimes('Bedtime Alpha', 'Bedtime Delta')
+        self.app.defer_sequence('Bedtime Alpha', 1, 600)
+        client = self.signed_in()
+
+        tile = client.state()['data']['sequences'][0]
+        self.assertGreater(tile['waiting'], 500)
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        self.assertIn("{name: waiting ? (sequence.runs || sequence.name) "
+                      ": sequence.name}", page)
+
+    def test_the_family_tile_is_drawn_and_pressed_right(self):
+        """Run, not read: the tile says tonight's version; a press sends the
+        family's name; one with nothing for tonight says so and sends
+        nothing; a waiting one stops the version that is waiting."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.signed_in()
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+        tiles = [
+            {'name': 'Bedtime', 'runs': 'Bedtime Alpha',
+             'note': 'Tonight: Bedtime Alpha', 'schedule': 'Manual',
+             'steps': 3, 'last': '', 'failed': 0, 'waiting': 0},
+            {'name': 'Wake Up', 'runs': '', 'note': 'Nothing for Alpha',
+             'schedule': '', 'steps': 0, 'last': '', 'failed': 0,
+             'waiting': 0},
+            {'name': 'Wind Down', 'runs': 'Wind Down Alpha',
+             'note': 'Tonight: Wind Down Alpha', 'schedule': '', 'steps': 2,
+             'last': '', 'failed': 0, 'waiting': 300}]
+        seed = (
+            "var SENT = [];\n"
+            "El.prototype.addEventListener = function (name, fn) {\n"
+            "  (this.on = this.on || {})[name] = fn; };\n"
+            "var SNAPSHOT = %s;\n"
+            "global.fetch = function (path, init) {\n"
+            "  if (init && init.body) { SENT.push(JSON.parse(init.body)); }\n"
+            "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+            "  return Promise.resolve({status: 200, ok: true,\n"
+            "    json: function () { return Promise.resolve(body); }});\n"
+            "};\n" % json.dumps(dict(snapshot, allow_sequences=True,
+                                      sequences=tiles)))
+        tail = (
+            "\nsetImmediate(function () { setImmediate(function () {\n"
+            "  var box = document.getElementById('sequences').children;\n"
+            "  var out = {subs: box.map(function (b) {\n"
+            "    return b.children[1] ? b.children[1].textContent : ''; })};\n"
+            "  SENT.length = 0;\n"
+            "  box[0].on.click(); out.first = SENT.slice(); SENT.length = 0;\n"
+            "  busy = false;\n"
+            "  box[1].on.click(); out.second = SENT.slice(); SENT.length = 0;\n"
+            "  out.said = document.getElementById('status').textContent;\n"
+            "  busy = false;\n"
+            "  box[2].on.click(); out.third = SENT.slice();\n"
+            "  console.log(JSON.stringify(out));\n"
+            "}); });\n")
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, 'run.js')
+            out = io.open(path, 'w', encoding='utf-8')
+            try:
+                out.write(browser + '\n' + seed + '\n' + script + tail)
+            finally:
+                out.close()
+            proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            said = proc.communicate()[0].decode('utf-8', 'replace')
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.assertEqual(proc.returncode, 0, said[:900])
+        facts = json.loads(said.strip().splitlines()[-1])
+
+        self.assertEqual(facts['subs'][0],
+                         'Tonight: Bedtime Alpha - 3 step(s) - Manual')
+        self.assertEqual(facts['subs'][1], 'Nothing for Alpha')
+        self.assertEqual(facts['first'], [{'action': 'sequence',
+                                           'name': 'Bedtime'}])
+        self.assertEqual(facts['second'], [], 'nothing for tonight was sent')
+        self.assertEqual(facts['said'], 'Nothing for Alpha')
+        self.assertEqual(facts['third'], [{'action': 'cancel_sequence',
+                                           'name': 'Wind Down Alpha'}])
 
     def test_a_sequence_that_is_not_waiting_says_so(self):
         import sequences as sequence_lib

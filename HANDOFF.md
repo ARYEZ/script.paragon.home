@@ -134,6 +134,15 @@ OK held LONG_PRESS (500 ms) sends 'context' (Input.ContextMenu, action 117,
 which Paragon TV reads as a long press), a tap sends 'select' on the lift.
 The click after a touch is swallowed; a keyboard click still presses.
 Checked in real Chromium with the mouse.
+2.78.0: sequence families. "<Base> <Preset>" (PRESET_NAMES, any case) are
+versions of <Base> when there are two or more, or a plain <Base>
+(reracks.variant_groups). app.sequence_for_today(name) picks the version for
+reracks.evening_rerack(effective_week, now, paragon_tv.SHUTDOWN_TIMES) --
+today's rerack, or yesterday's before today's Initial Shutdown (04:00 with no
+preset). Used by run_sequence_by_name, sequence_for_step (dial, phrases) and
+the remote's 'sequence' action. Snapshot collapses a family into one tile
+with runs/note; the page cancels by `runs`, and says the note instead of
+sending when runs is ''. Nested sequence steps stay exact names on purpose.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

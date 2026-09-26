@@ -1216,7 +1216,8 @@ class ParagonHome(object):
         """
         step = step or {}
         if step.get('kind') == sequence_lib.KIND_SEQUENCE:
-            found = self.sequence_by_name(step.get('target') or '')
+            # A dial slot or a phrase for "Bedtime" is tonight's Bedtime.
+            found = self.sequence_for_today(step.get('target') or '')
             if found is not None:
                 return found
         return sequence_lib.one_step(step, fallback_name)
@@ -1667,13 +1668,45 @@ class ParagonHome(object):
             ran.append('%s phase %d' % (rerack['name'], number))
         return ran
 
+    # -- tonight's version of a sequence --------------------------------------
+
+    def evening_rerack(self, now=None):
+        """The rerack whose evening it is -- see reracks.evening_rerack."""
+        import paragon_tv
+
+        return rerack_lib.evening_rerack(self.effective_week(),
+                                         now or sequence_lib.now(),
+                                         paragon_tv.SHUTDOWN_TIMES)
+
+    def sequence_family(self, name):
+        """The family a name heads -- "Bedtime" for "Bedtime Alpha" and its
+        siblings -- or None."""
+        return rerack_lib.variant_groups(self.sequences).get(
+            (name or '').strip().lower())
+
+    def sequence_for_today(self, name, now=None):
+        """The sequence a name means now: "Bedtime" is "Bedtime Alpha" on
+        an Alpha evening, the plain "Bedtime" on a day none of its versions
+        is for, and None if there is neither. Any other name is itself."""
+        family = self.sequence_family(name)
+        if family is not None:
+            tonight = family['variants'].get(self.evening_rerack(now))
+            if tonight:
+                return self.sequence_by_name(tonight)
+        return self.sequence_by_name(name)
+
     def run_sequence_by_name(self, name, announce=True):
-        sequence = self.sequence_by_name(name)
+        sequence = self.sequence_for_today(name)
         if sequence is None:
-            utils.log('No sequence named "%s"' % name)
+            family = self.sequence_family(name)
+            why = ('No %s for %s' % (family['base'],
+                                     self.evening_rerack() or 'today')
+                   if family else 'No sequence named "%s"' % name)
+            utils.log(why)
             if announce:
-                utils.force_notify('No sequence named "%s"' % name)
+                utils.force_notify(why)
             return False
+        name = sequence['name']
         waiting = self.pending_for(name)
         if waiting is not None:
             # Starting it again would run its opening steps a second time and

@@ -521,6 +521,22 @@ Steps run top to bottom. Each can hold a **pause afterwards**, which matters
 more than it sounds: a television told to switch on and change channel in the
 same breath will miss the second command, because it is still waking up.
 
+**One sequence, a version for each kind of day.** Name sequences
+`Bedtime Alpha`, `Bedtime Omega` and `Bedtime Delta` — the base name, a space,
+and a rerack's name — and they are one Bedtime in three versions. The web
+remote shows a single **Bedtime** tile that says which is tonight's
+(*Tonight: Bedtime Alpha*); pressing it runs that one. A speed dial slot, a
+phrase, a keymap or `RunScript(...,action=sequence,name=Bedtime)` naming
+*Bedtime* does the same. Tonight is the day's rerack in the weekly table —
+Paragon TV's, or our own copy of it — and **it stays tonight until that day's
+Initial Shutdown**: Bedtime pressed at a quarter past midnight after an Alpha
+evening is Bedtime Alpha, even when Tuesday is a Delta day. A plain `Bedtime`
+beside the versions runs on a day none of them is for; without one, the tile
+says *Nothing for Gamma* and pressing it does nothing. Each version is still
+its own sequence — it can be run by its full name, keeps its own Last run,
+and a sequence step naming a version runs exactly that one. A name ending in
+a Greek letter on its own, `Project Delta`, is not a version of anything.
+
 **A step can be for certain dates of the month.** *Only on certain dates* in
 the step's menu takes the days, typed — `1`, or `1, 15`, or `last` for the
 last day of whatever month it is. On any other date the step is passed over,

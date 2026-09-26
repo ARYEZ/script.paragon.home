@@ -151,6 +151,73 @@ def todays_rerack(week, reracks, now):
     return find(reracks, week[now.weekday()])
 
 
+# -- a sequence for each kind of day ------------------------------------------
+#
+# "Bedtime Alpha", "Bedtime Omega" and "Bedtime Delta" are one bedtime in three
+# versions, and which is tonight's is the day's rerack. The name is the whole
+# of the link: nothing to set up, and a glance at the list says what goes with
+# what. A plain "Bedtime" beside them is what runs on a day none of them is
+# for.
+
+def split_variant(name):
+    """(base, preset) for "Bedtime Alpha", or (name, '') for anything else.
+    The preset is matched without regard to case and given back as spelt in
+    PRESET_NAMES."""
+    text = (name or '').strip()
+    head, _, tail = text.rpartition(' ')
+    for preset in PRESET_NAMES:
+        if head.strip() and tail.lower() == preset.lower():
+            return head.strip(), preset
+    return text, ''
+
+
+def variant_groups(sequences):
+    """{base, lowered: {'base', 'plain', 'variants': {preset: name}}}.
+
+    Only where there is a family to speak of: two versions or more, or a
+    version beside a plain sequence of the base name. "Project Delta" on its
+    own is a sequence with a Greek letter in its name, not a Delta-day
+    version of something, and pressing it should run it."""
+    names = [(sequence.get('name') or '').strip() for sequence in sequences]
+    plain = dict((name.lower(), name) for name in names if name)
+    groups = {}
+    for name in names:
+        base, preset = split_variant(name)
+        if not preset:
+            continue
+        group = groups.setdefault(base.lower(), {
+            'base': base, 'plain': None, 'variants': {}})
+        group['variants'][preset] = name
+    for key in list(groups):
+        group = groups[key]
+        group['plain'] = plain.get(key)
+        if len(group['variants']) < 2 and group['plain'] is None:
+            del groups[key]
+    return groups
+
+
+# Before this on a day with no preset, it is still the evening before.
+DEFAULT_DAY_START = '04:00'
+
+
+def evening_rerack(week, now, day_starts=None):
+    """The rerack whose evening this is: today's, unless it is still before
+    today's day begins -- Paragon TV's Initial Shutdown for that preset, from
+    `day_starts` -- in which case yesterday's. Bedtime pressed at a quarter
+    past midnight after an Alpha evening is Alpha's bedtime, whatever the
+    calendar says about Tuesday."""
+    week = clean_week(week)
+    today = week[now.weekday()]
+    start = (day_starts or {}).get(today) or DEFAULT_DAY_START
+    try:
+        hour, minute = [int(part) for part in start.split(':')]
+    except (TypeError, ValueError):
+        hour, minute = 4, 0
+    if (now.hour, now.minute) < (hour, minute):
+        return week[(now.weekday() - 1) % 7]
+    return today
+
+
 def matching_week(tv_week):
     """Paragon TV's weekly table, as ours. The preset names are the same nine,
     so a day set to Gamma there is a day set to Gamma here."""
