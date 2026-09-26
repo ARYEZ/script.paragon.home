@@ -127,6 +127,13 @@ skips the pause. NOT_TODAY is its own outcome (not SKIPPED, which reads
 "already done"), counted in the run record and summary. Editor row "Only on
 certain dates" in edit_step; replacing a step's action keeps its dates, as
 it keeps its pause. Aryez's use: a rent reminder on the 1st.
+2.77.0: web remote keys hold like a remote. wireKeys: arrows and volume
+(HOLD_REPEATS) press on pointerdown then repeat every 125 ms after 400 ms,
+stopped by pointerup/leave/cancel, the page hiding, or HOLD_LIMIT (20 s);
+OK held LONG_PRESS (500 ms) sends 'context' (Input.ContextMenu, action 117,
+which Paragon TV reads as a long press), a tap sends 'select' on the lift.
+The click after a touch is swallowed; a keyboard click still presses.
+Checked in real Chromium with the mouse.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

@@ -2707,6 +2707,15 @@ button.key {
    the buttons someone taps twenty times in a row, and without an answer they
    tap again thinking it missed. */
 button.key:active { background: var(--card-2); border-color: var(--orange); }
+/* The keys that do something when held. A phone would otherwise take a long
+   touch for text to select or a page to scroll, and cancel the hold. */
+.dpad button.key, button.key[data-press="volumeup"],
+button.key[data-press="volumedown"] {
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
 .hint {
   margin: 0;
   font-size: 10px;
@@ -3008,9 +3017,10 @@ button.chan {
 
         <!-- Said out loud, because a keyboard that works and says nothing is
              a keyboard nobody tries. -->
-        <p class="hint">Keyboard: arrows, Enter, Backspace &middot; space
-          plays &middot; PgUp/PgDn changes channel &middot; H I C O T &middot;
-          M and &plusmn;</p>
+        <p class="hint">Hold OK for the menu &middot; hold an arrow or
+          &plusmn; to repeat &middot; Keyboard: arrows, Enter, Backspace
+          &middot; space plays &middot; PgUp/PgDn changes channel &middot;
+          H I C O T &middot; M and &plusmn;</p>
 
       </div>
     </section>
@@ -3861,9 +3871,105 @@ function tvKeyPressed(event) {
 function wireKeys() {
   var keys = document.querySelectorAll('[data-press]');
   Array.prototype.forEach.call(keys, function (key) {
-    key.addEventListener('click', function () {
-      press(key.getAttribute('data-press'), key);
-    });
+    var name = key.getAttribute('data-press');
+    if (HOLD_REPEATS[name]) {
+      wireRepeat(key, name);
+    } else if (name === 'select') {
+      wireLongPress(key, name, HOLD_OK_SENDS);
+    } else {
+      key.addEventListener('click', function () { press(name, key); });
+    }
+  });
+  // Nothing keeps repeating once the page is out of sight.
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { stopHolding(); }
+  });
+}
+
+/* Held down, like a physical remote.
+
+   The arrows and the volume repeat while held: one press as the finger
+   lands, then after a moment a stream of them at the rate a held keyboard
+   arrow sends -- the same walk down a menu a real remote gives. Lifting the
+   finger, sliding off the key, the page going out of sight or HOLD_LIMIT all
+   stop it: a key that kept pressing because a lift went missing would walk
+   the guide on its own.
+
+   OK held for LONG_PRESS sends what a held OK sends on a physical remote:
+   the context menu action, which Paragon TV reads as a long press. A short
+   tap is still OK, sent on the lift; a finger that slides off first sends
+   nothing, like a real button.
+
+   The click that follows a touch is the same press, already sent, and is
+   swallowed. A click with no touch before it -- a keyboard's Enter or space
+   on a focused key -- is still a press. */
+var HOLD_REPEATS = {up: 1, down: 1, left: 1, right: 1,
+                    volumeup: 1, volumedown: 1};
+var HOLD_OK_SENDS = 'context';
+var REPEAT_AFTER = 400;
+var REPEAT_EVERY = 125;
+var HOLD_LIMIT = 20000;
+var LONG_PRESS = 500;
+var holding = [];
+
+function stopHolding() {
+  holding.forEach(function (stop) { stop(); });
+}
+
+function wireRepeat(key, name) {
+  var wait = null, tick = null, limit = null, swallow = false;
+  function stop() {
+    clearTimeout(wait); clearInterval(tick); clearTimeout(limit);
+    wait = tick = limit = null;
+  }
+  holding.push(stop);
+  key.addEventListener('pointerdown', function (event) {
+    if (event.button) { return; }  // the main button or a touch only
+    stop();
+    swallow = true;
+    press(name, key);
+    wait = setTimeout(function () {
+      tick = setInterval(function () { press(name, key); }, REPEAT_EVERY);
+    }, REPEAT_AFTER);
+    limit = setTimeout(stop, HOLD_LIMIT);
+  });
+  key.addEventListener('pointerup', stop);
+  key.addEventListener('pointerleave', stop);
+  key.addEventListener('pointercancel', function () { stop(); swallow = false; });
+  key.addEventListener('click', function () {
+    if (swallow) { swallow = false; return; }
+    press(name, key);
+  });
+  key.addEventListener('contextmenu', function (event) {
+    event.preventDefault();
+  });
+}
+
+function wireLongPress(key, name, held) {
+  var timer = null, swallow = false;
+  function drop() { clearTimeout(timer); timer = null; }
+  holding.push(drop);
+  key.addEventListener('pointerdown', function (event) {
+    if (event.button) { return; }
+    drop();
+    swallow = true;
+    timer = setTimeout(function () {
+      timer = null;
+      press(held, key);
+    }, LONG_PRESS);
+  });
+  key.addEventListener('pointerup', function () {
+    // Still waiting: it was a tap.
+    if (timer) { drop(); press(name, key); }
+  });
+  key.addEventListener('pointerleave', drop);
+  key.addEventListener('pointercancel', function () { drop(); swallow = false; });
+  key.addEventListener('click', function () {
+    if (swallow) { swallow = false; return; }
+    press(name, key);
+  });
+  key.addEventListener('contextmenu', function (event) {
+    event.preventDefault();
   });
 }
 

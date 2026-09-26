@@ -19257,6 +19257,150 @@ class TestWebRemote(unittest.TestCase):
         # is read from the page itself.
         self.assertIn('<section id="tv_jobs" hidden>', page)
 
+    def test_keys_held_down_behave_like_a_physical_remote(self):
+        """Aryez: long press, like the physical remote. Run in the stub
+        browser with a clock the test turns, and every press the page sends
+        written down: arrows and volume repeat while held and stop the
+        moment they are let go of; OK held sends the long-press action; a
+        tap is still one press."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+
+        seed = (
+            "var NOW = 0, TIMERS = [], NEXT = 1, SENT = [], HEARD = {};\n"
+            "global.setTimeout = function (fn, ms) {\n"
+            "  var t = {id: NEXT++, at: NOW + (ms || 0), fn: fn};\n"
+            "  TIMERS.push(t); return t.id; };\n"
+            "global.setInterval = function (fn, ms) {\n"
+            "  var t = {id: NEXT++, at: NOW + ms, every: ms, fn: fn};\n"
+            "  TIMERS.push(t); return t.id; };\n"
+            "global.clearTimeout = global.clearInterval = function (id) {\n"
+            "  TIMERS = TIMERS.filter(function (t) { return t.id !== id; }); };\n"
+            "function advance(ms) {\n"
+            "  var end = NOW + ms;\n"
+            "  while (true) {\n"
+            "    var due = TIMERS.filter(function (t) { return t.at <= end; })\n"
+            "      .sort(function (a, b) { return a.at - b.at; })[0];\n"
+            "    if (!due) { break; }\n"
+            "    NOW = due.at;\n"
+            "    if (due.every) { due.at += due.every; }\n"
+            "    else { TIMERS = TIMERS.filter(function (t) { return t !== due; }); }\n"
+            "    due.fn();\n"
+            "  }\n"
+            "  NOW = end;\n"
+            "}\n"
+            "global.fetch = function (path, init) {\n"
+            "  var body = init && init.body ? JSON.parse(init.body) : {};\n"
+            "  if (body.action === 'tv.press') { SENT.push(body.button); }\n"
+            "  return new Promise(function () {});\n"
+            "};\n"
+            "El.prototype.addEventListener = function (name, fn) {\n"
+            "  (this.on = this.on || {})[name] = fn; };\n"
+            "document.addEventListener = function (name, fn) {\n"
+            "  (HEARD[name] = HEARD[name] || []).push(fn); };\n"
+            "var KEYS = {};\n"
+            "['up', 'down', 'select', 'volumeup', 'volumedown', 'back']\n"
+            "  .forEach(function (name) {\n"
+            "    var key = new El('button');\n"
+            "    key.getAttribute = function () { return name; };\n"
+            "    KEYS[name] = key; });\n"
+            "var plainAll = document.querySelectorAll;\n"
+            "document.querySelectorAll = function (q) {\n"
+            "  if (q === '[data-press]') {\n"
+            "    return Object.keys(KEYS).map(function (k) { return KEYS[k]; });\n"
+            "  }\n"
+            "  return plainAll.call(document, q); };\n")
+        tail = (
+            "\nfunction fire(key, name, extra) {\n"
+            "  var handler = KEYS[key].on && KEYS[key].on[name];\n"
+            "  if (handler) { handler(extra || {button: 0, preventDefault: function () {}}); }\n"
+            "}\n"
+            "function take() { var s = SENT.slice(); SENT.length = 0; return s; }\n"
+            "var out = {};\n"
+            "fire('up', 'pointerdown'); advance(100); fire('up', 'pointerup');\n"
+            "fire('up', 'click'); out.tap = take();\n"
+            "fire('down', 'pointerdown'); advance(1000); fire('down', 'pointerup');\n"
+            "advance(1000); fire('down', 'click'); out.hold = take();\n"
+            "fire('volumeup', 'pointerdown'); advance(700);\n"
+            "fire('volumeup', 'pointerleave'); advance(2000); out.slid = take();\n"
+            "fire('volumedown', 'pointerdown'); advance(25000); out.runaway = take();\n"
+            "fire('volumedown', 'pointerup'); fire('volumedown', 'click');\n"
+            "fire('up', 'pointerdown'); advance(600);\n"
+            "document.hidden = true; HEARD.visibilitychange.forEach(function (f) { f(); });\n"
+            "document.hidden = false; advance(2000); out.hidden = take();\n"
+            "fire('up', 'pointercancel');\n"
+            "fire('select', 'pointerdown'); advance(200); fire('select', 'pointerup');\n"
+            "fire('select', 'click'); out.ok_tap = take();\n"
+            "fire('select', 'pointerdown'); advance(600); fire('select', 'pointerup');\n"
+            "fire('select', 'click'); out.ok_held = take();\n"
+            "fire('select', 'pointerdown'); advance(200); fire('select', 'pointerleave');\n"
+            "advance(1000); fire('select', 'pointerup'); out.ok_slid = take();\n"
+            "fire('select', 'pointercancel');\n"
+            "fire('select', 'click'); fire('up', 'click'); out.keyboard = take();\n"
+            "fire('up', 'pointerdown', {button: 2}); advance(1000); out.right = take();\n"
+            "fire('back', 'click'); out.other = take();\n"
+            "var menu = {prevented: false};\n"
+            "fire('select', 'contextmenu', {preventDefault: function () { menu.prevented = true; }});\n"
+            "out.callout = menu.prevented;\n"
+            "var arrow = {prevented: false};\n"
+            "fire('up', 'contextmenu', {preventDefault: function () { arrow.prevented = true; }});\n"
+            "out.arrow_callout = arrow.prevented;\n"
+            "console.log(JSON.stringify(out));\n")
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, 'run.js')
+            out = io.open(path, 'w', encoding='utf-8')
+            try:
+                out.write(browser + '\n' + seed + '\n' + script + tail)
+            finally:
+                out.close()
+            proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            said = proc.communicate()[0].decode('utf-8', 'replace')
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.assertEqual(proc.returncode, 0, said[:900])
+        facts = json.loads(said.strip().splitlines()[-1])
+
+        self.assertEqual(facts['tap'], ['up'], 'a tap was not one press')
+        # One as the finger lands, then from 400 ms every 125 ms to 1000 ms.
+        self.assertEqual(facts['hold'], ['down'] * 5)
+        self.assertEqual(facts['slid'], ['volumeup'] * 3,
+                         'it kept pressing after the finger slid off')
+        # However long it is held, 20 s is the end of it.
+        self.assertEqual(len(facts['runaway']), 1 + (20000 - 400) // 125)
+        # 0 and 525 ms before the page went out of sight at 600, and
+        # nothing in the two seconds after.
+        self.assertEqual(facts['hidden'], ['up'] * 2,
+                         'it kept pressing with the page out of sight')
+        self.assertEqual(facts['ok_tap'], ['select'])
+        self.assertEqual(facts['ok_held'], ['context'],
+                         'OK held did not send the long press, or sent OK too')
+        self.assertEqual(facts['ok_slid'], [], 'a slid-off OK still pressed')
+        self.assertEqual(facts['keyboard'], ['select', 'up'],
+                         'Enter on a focused key stopped working')
+        self.assertEqual(facts['right'], [], 'a right-click pressed')
+        self.assertEqual(facts['other'], ['back'])
+        self.assertTrue(facts['callout'], "the phone's long-press menu opens")
+        self.assertTrue(facts['arrow_callout'],
+                        "the phone's long-press menu opens on an arrow")
+
     def test_quiet_and_louder_light_like_the_channel_you_are_watching(self):
         """Aryez: the active one should look like the playing channel, the
         bright red and orange fill. Compared against that card rather than a
