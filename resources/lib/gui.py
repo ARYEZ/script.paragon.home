@@ -3069,6 +3069,14 @@ class ControlPanel(object):
             kinds.append((self._driver_label(driver_id),
                           lambda d=driver_id: self._step_device(d)))
         kinds.append(('Pause after this step', self._step_pause))
+        # Only on a slot that holds something: an empty one has nothing to
+        # hold back.
+        if sequence['steps'][index].get('kind') != sequence_lib.KIND_NONE:
+            dates = sequence['steps'][index].get('dates') or []
+            kinds.append(('Only on certain dates: %s'
+                          % (sequence_lib.describe_dates(dates)
+                             if dates else 'every day'),
+                          lambda: 'dates'))
         # Offered only on a slot that holds something, since moving an empty
         # slot somewhere else achieves nothing but renumbering.
         if sequence['steps'][index].get('kind') != sequence_lib.KIND_NONE:
@@ -3089,10 +3097,16 @@ class ControlPanel(object):
         if step == 'move':
             self._move_step(sequence, index)
             return
+        if step == 'dates':
+            self._ask_dates(sequence, index)
+            return
 
         # A step's pause belongs to the slot rather than to what is in it, so
         # replacing the action does not silently drop the gap after it.
         step['pause'] = sequence['steps'][index].get('pause', 0)
+        # The dates too: a rent reminder given a new clip is still for the 1st.
+        if sequence['steps'][index].get('dates'):
+            step['dates'] = sequence['steps'][index]['dates']
         sequence['steps'][index] = sequence_lib.normalise_step(step)
         self.app.save_sequence(sequence)
 
@@ -3291,6 +3305,29 @@ class ControlPanel(object):
 
     def _step_move(self):
         return 'move'
+
+    def _ask_dates(self, sequence, index):
+        """Which dates of the month the step is for. Blank is every day."""
+        step = sequence['steps'][index]
+        current = ', '.join('%s' % day for day in step.get('dates') or [])
+        typed = _dialog().input('Dates of the month, e.g. 1, 15, last '
+                                '(blank for every day)', current)
+        if typed is None:
+            return
+        typed = typed.strip()
+        dates = sequence_lib.clean_dates(typed)
+        if typed and not dates:
+            utils.force_notify('No dates in that: use 1 to 31, or last')
+            return
+        if dates:
+            step['dates'] = dates
+        else:
+            step.pop('dates', None)
+        sequence['steps'][index] = sequence_lib.normalise_step(step)
+        self.app.save_sequence(sequence)
+        utils.notify('Step %d: %s' % (index + 1,
+                                      'on ' + sequence_lib.describe_dates(dates)
+                                      if dates else 'every day'))
 
     def _ask_pause(self, sequence, index):
         current = str(sequence['steps'][index].get('pause') or 0)

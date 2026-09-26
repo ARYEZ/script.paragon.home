@@ -121,6 +121,12 @@ a counted "Songs" heading (open up to SONGS_OPEN_UP_TO = 12), Random song
 outside the fold, remembered per beacon as paragon.section.songs.<id>.
 Seen in beacon1's /clips: nothing between "Spirits Of Europa" and "The
 Twilight Realm" -- asked Aryez to check that range on the drive.
+2.76.0: any step may carry `dates` (ints 1-31 and/or 'last'); run() checks
+sequences.due_on(step, now()) first and, off-date, reports NOT_TODAY and
+skips the pause. NOT_TODAY is its own outcome (not SKIPPED, which reads
+"already done"), counted in the run record and summary. Editor row "Only on
+certain dates" in edit_step; replacing a step's action keeps its dates, as
+it keeps its pause. Aryez's use: a rent reminder on the 1st.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

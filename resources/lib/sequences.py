@@ -340,7 +340,78 @@ def _volume(value):
     return max(0, min(100, number))
 
 
+LAST_DAY = 'last'
+
+
+def clean_dates(raw):
+    """The dates of the month a step is for: whole days 1 to 31 and/or
+    'last', in order, without repeats. Takes a list or what was typed --
+    "1, 15, last". Anything else in it is dropped; nothing usable is []."""
+    if isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    elif raw:
+        parts = re.split(r'[\s,;/]+', '%s' % raw)
+    else:
+        parts = []
+    days, last = set(), False
+    for part in parts:
+        text = ('%s' % part).strip().lower()
+        if text in ('last', 'l'):
+            last = True
+            continue
+        try:
+            day = int(text)
+        except ValueError:
+            continue
+        if 1 <= day <= 31:
+            days.add(day)
+    return sorted(days) + ([LAST_DAY] if last else [])
+
+
+def _ordinal(day):
+    if 10 <= day % 100 <= 20:
+        return '%dth' % day
+    return '%d%s' % (day, {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th'))
+
+
+def describe_dates(dates):
+    """'the 1st', 'the 1st and 15th', 'the 1st, 15th and last day'."""
+    words = [('last day' if day == LAST_DAY else _ordinal(day))
+             for day in dates]
+    if not words:
+        return ''
+    if len(words) == 1:
+        return 'the ' + words[0]
+    return 'the ' + ', '.join(words[:-1]) + ' and ' + words[-1]
+
+
+def due_on(step, when):
+    """Whether a step runs on this date. A step without dates runs every
+    time, as every step written before this does. 'last' is whatever the last
+    day of this month is -- the 30th, the 31st, the 28th or 29th -- because a
+    step for the 31st never runs in a month that has no 31st."""
+    dates = step.get('dates') or []
+    if not dates:
+        return True
+    if when.day in dates:
+        return True
+    if LAST_DAY in dates:
+        return (when + datetime.timedelta(days=1)).month != when.month
+    return False
+
+
 def normalise_step(raw):
+    """One step, clamped -- see _normalise_kind -- with the dates of the
+    month it is for, if it is only for some. Absent is every day."""
+    step = _normalise_kind(raw)
+    if step.get('kind') != KIND_NONE and isinstance(raw, dict):
+        dates = clean_dates(raw.get('dates'))
+        if dates:
+            step['dates'] = dates
+    return step
+
+
+def _normalise_kind(raw):
     """Clamp one step, or return an empty slot if it is not usable.
 
     A step naming a kind it cannot carry out -- a power action with no target,
@@ -553,6 +624,8 @@ def describe_step(step, device_name=None):
     else:
         text = 'Empty'
 
+    if step.get('dates'):
+        text += ' (on %s)' % describe_dates(step['dates'])
     pause = step.get('pause') or 0
     if pause:
         text += '  (+%ds)' % pause
@@ -707,6 +780,7 @@ def expand(sequence, sequences, _depth=0, _seen=None, _budget=None):
 # "skipped" never has to be inferred from "not done and not failed".
 DID = 'done'
 SKIPPED = 'skipped'      # nothing left to do; see already_there
+NOT_TODAY = 'not today'  # a step for other dates of the month; see due_on
 FAILED = 'failed'
 WAITING = 'waiting'      # stopped here for a long pause, will carry on
 CANCELLED = 'cancelled'  # somebody backed out of the progress dialog
@@ -723,7 +797,7 @@ def describe_run(record, now=None):
         return ''
     bits = []
     for key, word in ((DID, 'done'), (SKIPPED, 'already done'),
-                      (FAILED, 'FAILED')):
+                      (NOT_TODAY, 'not today'), (FAILED, 'FAILED')):
         count = record.get(key) or 0
         if count:
             bits.append('%d %s' % (count, word))
@@ -760,7 +834,8 @@ def describe_when(stamp, now=None):
 def describe_outcome(outcome):
     """The one word a person would use for it."""
     return {DID: 'done', SKIPPED: 'already done', FAILED: 'FAILED',
-            WAITING: 'waiting', CANCELLED: 'cancelled'}.get(outcome, outcome)
+            WAITING: 'waiting', CANCELLED: 'cancelled',
+            NOT_TODAY: 'not today'}.get(outcome, outcome)
 
 
 def describe_wait(seconds):
@@ -927,6 +1002,16 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
         def said(outcome, why=''):
             if on_outcome is not None:
                 on_outcome(index, step, outcome, why)
+
+        # A step for other dates of the month is passed over, pause and all:
+        # the pause is there to let it land, and on the 2nd there is nothing
+        # to land. Not "already done", which is a different answer.
+        if not due_on(step, now()):
+            said(NOT_TODAY, 'Only on %s' % describe_dates(step['dates']))
+            log('Sequence "%s" step %d: not today (only on %s)'
+                % (sequence.get('name'), index + 1,
+                   describe_dates(step['dates'])))
+            continue
 
         if on_step is not None and on_step(index, step) is False:
             said(CANCELLED)

@@ -951,6 +951,8 @@ class ParagonHome(object):
                                       states=states, on_outcome=_outcome)
         skipped = [entry for entry in outcomes
                    if entry['outcome'] == sequence_lib.SKIPPED]
+        not_today = [entry for entry in outcomes
+                     if entry['outcome'] == sequence_lib.NOT_TODAY]
         self.record_run(name, outcomes, waiting=bool(waited))
         if announce:
             if waited:
@@ -972,12 +974,14 @@ class ParagonHome(object):
                 # The whole point of asking: everything it would have done was
                 # already done, so say that rather than "no steps yet".
                 utils.notify('%s: nothing to do' % name)
+            elif not_today:
+                utils.notify('%s: nothing for today' % name)
             else:
                 utils.force_notify('%s has no steps yet' % name)
         # Skipped counts as having run. A sequence that found everything
         # already done did exactly what it was asked, and a caller told
         # otherwise says "has no steps yet" about a sequence full of steps.
-        return done > 0 or bool(skipped)
+        return done > 0 or bool(skipped) or bool(not_today)
 
     @staticmethod
     def _also_skipped(skipped):
@@ -1086,7 +1090,7 @@ class ParagonHome(object):
             'steps': list(outcomes),
         }
         for outcome in (sequence_lib.DID, sequence_lib.SKIPPED,
-                        sequence_lib.FAILED):
+                        sequence_lib.NOT_TODAY, sequence_lib.FAILED):
             record[outcome] = len([entry for entry in outcomes
                                    if entry.get('outcome') == outcome])
 

@@ -521,6 +521,14 @@ Steps run top to bottom. Each can hold a **pause afterwards**, which matters
 more than it sounds: a television told to switch on and change channel in the
 same breath will miss the second command, because it is still waking up.
 
+**A step can be for certain dates of the month.** *Only on certain dates* in
+the step's menu takes the days, typed — `1`, or `1, 15`, or `last` for the
+last day of whatever month it is. On any other date the step is passed over,
+its pause with it, and **Last run** says *not today* rather than *already
+done*. So `Beacon1: rent is due (on the 1st)` goes at the top of the bedtime
+sequence and is heard once a month; every other night the sequence starts at
+the next step. Changing what the step does keeps its dates.
+
 **A failing step does not stop the ones after it.** A plug that has been
 unplugged is no reason to leave the rest of the room untouched — every failure
 is collected and reported together at the end.

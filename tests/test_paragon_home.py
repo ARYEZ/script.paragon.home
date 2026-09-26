@@ -3833,6 +3833,233 @@ class TestABeaconStepSaysHowLoud(unittest.TestCase):
         self.assertNotIn('How loud', asked)
 
 
+class TestAStepForCertainDates(unittest.TestCase):
+    """Aryez: "your rent is due today" in the bedtime sequence, heard only on
+    the 1st. Any step can be for certain dates of the month; on other dates
+    it is passed over -- pause and all -- and the run says "not today"
+    rather than "already done", which is a different answer."""
+
+    def setUp(self):
+        import datetime
+
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'gui',
+                     'speeddial'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import sequences
+
+        self.seq = sequences
+        self.when = datetime.datetime(2026, 10, 1, 21, 30)
+        self.seq.now = lambda: self.when
+        self.slept = []
+
+    def tearDown(self):
+        clean_profile()
+
+    def on(self, year, month, day):
+        import datetime
+        self.when = datetime.datetime(year, month, day, 21, 30)
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.command_map = {'BE:01': ['Stop', 'rent is due',
+                                               'bedtime']}
+        app.controller = self.recorder
+        app._devices = [Device('BE:01', name='Beacon1', driver='speaker',
+                               lan=True, ip='10.0.0.60')]
+        app._scenes = []
+        return app
+
+    def clip(self, action, **extra):
+        step = {'kind': 'command', 'driver': 'speaker', 'target': 'BE:01',
+                'action': action}
+        step.update(extra)
+        return step
+
+    def bedtime(self, app):
+        app._sequences = [self.seq.make_sequence('Bedtime', [
+            self.clip('rent is due', dates=[1], pause=5),
+            self.clip('bedtime')])]
+        app.run_sequence(app.sequence_by_name('Bedtime'), announce=True,
+                         sleep_func=self.slept.append)
+        return app.last_run('Bedtime')
+
+    # -- what is written down ----------------------------------------------
+
+    def test_dates_are_read_from_what_is_typed(self):
+        clean = self.seq.clean_dates
+        self.assertEqual(clean('1, 15, last'), [1, 15, 'last'])
+        self.assertEqual(clean('15 1 1'), [1, 15])
+        # 17 and 1 share a slot in a small set, and come out of one in the
+        # order they went in: sorted, not left to the set.
+        self.assertEqual(clean('17 1'), [1, 17])
+        self.assertEqual(clean('31 32 0 -1 x'), [31])
+        self.assertEqual(clean([1, 'last', True, None]), [1, 'last'])
+        self.assertEqual(clean(''), [])
+        self.assertEqual(clean(None), [])
+
+    def test_dates_are_said_the_way_a_person_says_them(self):
+        said = self.seq.describe_dates
+        self.assertEqual(said([1]), 'the 1st')
+        self.assertEqual(said([2, 3, 4]), 'the 2nd, 3rd and 4th')
+        self.assertEqual(said([11, 12, 13]), 'the 11th, 12th and 13th')
+        self.assertEqual(said([21, 22, 23, 31]),
+                         'the 21st, 22nd, 23rd and 31st')
+        self.assertEqual(said([1, 'last']), 'the 1st and last day')
+        self.assertEqual(said([]), '')
+
+    def test_the_last_day_is_whatever_this_month_has(self):
+        import datetime
+
+        due = lambda y, m, d: self.seq.due_on(
+            {'dates': ['last']}, datetime.datetime(y, m, d))
+        self.assertTrue(due(2026, 4, 30))
+        self.assertFalse(due(2026, 4, 29))
+        self.assertTrue(due(2026, 12, 31))
+        self.assertTrue(due(2027, 2, 28))
+        self.assertFalse(due(2028, 2, 28), '2028 is a leap year')
+        self.assertTrue(due(2028, 2, 29))
+
+    def test_a_step_for_a_date_and_one_for_every_day(self):
+        import datetime
+
+        first = datetime.datetime(2026, 10, 1)
+        second = datetime.datetime(2026, 10, 2)
+        self.assertTrue(self.seq.due_on({'dates': [1]}, first))
+        self.assertFalse(self.seq.due_on({'dates': [1]}, second))
+        self.assertTrue(self.seq.due_on({}, second))
+        self.assertFalse(self.seq.due_on({'dates': [31]},
+                                         datetime.datetime(2026, 4, 30)))
+
+    def test_any_kind_of_step_keeps_its_dates_and_says_them(self):
+        normal = self.seq.normalise_step
+        clip = normal(self.clip('rent is due', dates='1'))
+        self.assertEqual(clip['dates'], [1])
+        self.assertEqual(self.seq.describe_step(clip, 'Beacon1'),
+                         'Beacon1: rent is due (on the 1st)')
+        power = normal({'kind': 'power', 'target': 'AA', 'action': 'on',
+                        'dates': [1, 15]})
+        self.assertEqual(power['dates'], [1, 15])
+        self.assertNotIn('dates', normal({'kind': 'none', 'dates': [1]}))
+        self.assertNotIn('dates', normal(self.clip('bedtime')),
+                         'a step without dates grew some')
+        self.assertNotIn('dates', normal(self.clip('bedtime', dates='x')))
+
+    def test_the_dates_survive_a_save_and_a_restart(self):
+        from paragon_home import ParagonHome
+
+        app = self.app()
+        app.save_sequence(self.seq.make_sequence(
+            'Bedtime', [self.clip('rent is due', dates=[1, 'last'])]))
+
+        after = ParagonHome().sequence_by_name('Bedtime')
+        self.assertEqual(after['steps'][0]['dates'], [1, 'last'])
+
+    # -- what a run does ---------------------------------------------------
+
+    def test_on_the_1st_it_plays(self):
+        self.on(2026, 10, 1)
+        record = self.bedtime(self.app())
+
+        self.assertEqual(self.recorder.calls, [
+            ('command', 'BE:01', 'rent is due'),
+            ('command', 'BE:01', 'bedtime')])
+        self.assertEqual(self.slept, [5])
+        self.assertEqual([e['outcome'] for e in record['steps']],
+                         [self.seq.DID, self.seq.DID])
+
+    def test_on_any_other_day_it_is_passed_over_pause_and_all(self):
+        self.on(2026, 10, 2)
+        record = self.bedtime(self.app())
+
+        self.assertEqual(self.recorder.calls,
+                         [('command', 'BE:01', 'bedtime')])
+        self.assertEqual(self.slept, [], 'the pause after it still ran')
+        rent = record['steps'][0]
+        self.assertEqual(rent['outcome'], self.seq.NOT_TODAY)
+        self.assertEqual(rent['why'], 'Only on the 1st')
+        self.assertEqual(record[self.seq.NOT_TODAY], 1)
+        self.assertEqual(record[self.seq.SKIPPED], 0,
+                         'not today was counted as already done')
+        self.assertIn('1 not today', self.seq.describe_run(record))
+        self.assertNotIn('already done', self.seq.describe_run(record))
+
+    def test_a_sequence_with_nothing_for_today_says_so(self):
+        self.on(2026, 10, 2)
+        app = self.app()
+        app._sequences = [self.seq.make_sequence('Rent', [
+            self.clip('rent is due', dates=[1])])]
+        xbmcgui.reset()
+
+        ran = app.run_sequence(app.sequence_by_name('Rent'), announce=True)
+
+        self.assertTrue(ran, 'a sequence that did as asked reads as not run')
+        said = ' '.join(str(note) for note in xbmcgui.NOTIFICATIONS)
+        self.assertIn('nothing for today', said)
+        self.assertNotIn('no steps yet', said)
+
+    # -- the menu ----------------------------------------------------------
+
+    def saved_bedtime(self, app):
+        sequence = self.seq.make_sequence('Bedtime', [
+            self.clip('rent is due'), self.clip('bedtime')])
+        app.save_sequence(sequence)
+        return app.sequence_by_name('Bedtime')
+
+    def test_dates_are_typed_in_and_can_be_cleared(self):
+        import gui
+
+        app = self.app()
+        sequence = self.saved_bedtime(app)
+        panel = gui.ControlPanel(app)
+
+        xbmcgui.INPUT_QUEUE.append('1, last')
+        panel._ask_dates(sequence, 0)
+        self.assertEqual(app.sequence_by_name('Bedtime')['steps'][0]['dates'],
+                         [1, 'last'])
+
+        xbmcgui.INPUT_QUEUE.append('nonsense')
+        panel._ask_dates(app.sequence_by_name('Bedtime'), 0)
+        self.assertEqual(app.sequence_by_name('Bedtime')['steps'][0]['dates'],
+                         [1, 'last'], 'nonsense replaced the dates')
+
+        xbmcgui.INPUT_QUEUE.append('')
+        panel._ask_dates(app.sequence_by_name('Bedtime'), 0)
+        self.assertNotIn('dates',
+                         app.sequence_by_name('Bedtime')['steps'][0])
+
+    def test_the_editor_offers_it_and_a_new_clip_keeps_the_dates(self):
+        import gui
+
+        app = self.app()
+        sequence = self.saved_bedtime(app)
+        sequence['steps'][0]['dates'] = [1]
+        app.save_sequence(sequence)
+        sequence = app.sequence_by_name('Bedtime')
+        panel = gui.ControlPanel(app)
+
+        panel.edit_step(sequence, 0)  # nothing queued: backs out
+        rows = xbmcgui.SELECT_CALLS[-1][1]
+        self.assertIn('Only on certain dates: the 1st', rows)
+        beacon = rows.index('Beacon')
+
+        # Beacon, Beacon1, "bedtime" (Stop, rent is due, bedtime), leave the
+        # volume, straight away.
+        xbmcgui.reset()
+        xbmcgui.SELECT_QUEUE.extend([beacon, 1, 2, 0, 0])
+        panel.edit_step(app.sequence_by_name('Bedtime'), 0)
+
+        step = app.sequence_by_name('Bedtime')['steps'][0]
+        self.assertEqual(step['action'], 'bedtime')
+        self.assertEqual(step['dates'], [1], 'a new clip lost its dates')
+
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 
