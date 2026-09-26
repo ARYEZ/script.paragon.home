@@ -766,6 +766,11 @@ BUTTONS = {
     # Not Application.SetMute: this drops to a level you can talk over
     # rather than silencing the room. See toggle_quiet.
     'mute': (None, 'quiet'),
+    # The same two levels as two buttons, one way each: Quiet always goes
+    # down to the quiet level, Louder always back up to the normal one,
+    # wherever the volume is when pressed.
+    'quiet': (None, 'to-quiet'),
+    'louder': (None, 'to-normal'),
 }
 
 
@@ -831,6 +836,8 @@ def press(button):
 
     if shape == 'quiet':
         return toggle_quiet()
+    if shape in ('to-quiet', 'to-normal'):
+        return one_way(shape == 'to-quiet')
 
     if shape == 'increment' and method == 'Application.SetVolume':
         return (_rpc(method, {'volume': 'increment'}) is not None), ''
@@ -998,8 +1005,38 @@ def toggle_quiet():
     here = percent_to_db(percent)
     # The midpoint decides, so anywhere down at the quiet end comes back up
     # and anywhere above it goes down -- including levels neither button set.
-    target = normal if here <= (quiet + normal) / 2.0 else quiet
+    return go_to_level(normal if here <= (quiet + normal) / 2.0 else quiet)
 
+
+def one_way(down):
+    """Quiet (down) or Louder (up): to that level, and only that way.
+
+    Louder on a television already louder than normal leaves it be, and
+    Quiet on one already quieter than quiet does too -- a button that turns
+    the sound the other way from its name is worse than one that does
+    nothing. Kodi's own mute is cleared either way: pressing either one
+    says the room wants to hear it.
+    """
+    quiet, normal = levels()
+    target = quiet if down else normal
+    percent = volume_percent()
+    if percent is None:
+        return False, 'Could not read the volume'
+    here = percent_to_db(percent)
+    if (here <= target + LEVEL_TOLERANCE_DB) if down \
+            else (here >= target - LEVEL_TOLERANCE_DB):
+        _rpc('Application.SetMute', {'mute': False}, quiet=True)
+        return True, 'Already %s' % ('quiet' if down else 'up')
+    return go_to_level(target)
+
+
+def go_to_level(target):
+    """Set the volume to a level in dB. What Quiet, Louder and the toggle
+    all come down to.
+
+    Kodi's own mute is cleared on the way, so a television muted from the
+    Kodi remote comes back rather than silently staying off at a new level.
+    """
     _rpc('Application.SetMute', {'mute': False}, quiet=True)
     set_volume_percent(db_to_percent(target))
     return True, '%.1f dB' % target

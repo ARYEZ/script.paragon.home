@@ -2698,6 +2698,8 @@ button.key:active { background: var(--card-2); border-color: var(--orange); }
   text-align: center;
 }
 button.key.lit { border-color: var(--orange); color: var(--orange); }
+/* Quiet under On now, while the television is at the quiet level. */
+#tv_tuneRow button.lit { border-color: var(--orange); color: var(--orange); }
 
 /* -- the channel list ---------------------------------------------------- */
 
@@ -2912,9 +2914,10 @@ button.chan {
     </section>
 
     <section>
-      <div class="head">
-        <span class="nick"></span><h2>On now</h2><span class="rule"></span>
-      </div>
+      <button class="head" id="tv_onairHead" aria-expanded="true">
+        <span class="nick"></span><h2>On now</h2><span class="rule"></span><span class="caret"></span>
+      </button>
+      <div id="tv_onairBody">
       <div class="card onair" id="tv_onair">
         <div class="art" id="tv_onairArt" hidden></div>
         <div class="num" id="tv_onairNum">--</div>
@@ -2925,20 +2928,23 @@ button.chan {
       <div id="tv_launchRow" hidden style="margin-top:10px">
         <button class="hot wide" id="tv_launch">Start Paragon TV</button>
       </div>
+      <!-- The two volume levels, one way each. data-press, so they are
+           wired with every other key on the remote. -->
       <div class="row" id="tv_tuneRow" hidden style="margin-top:10px">
-        <button id="tv_chanDown">Channel down</button>
-        <button id="tv_chanUp">Channel up</button>
+        <button data-press="quiet" id="tv_quietKey">Quiet</button>
+        <button data-press="louder" id="tv_louderKey">Louder</button>
+      </div>
       </div>
     </section>
 
     <section id="tv_controls">
-      <div class="head">
+      <button class="head" id="tv_remoteHead" aria-expanded="true">
         <span class="nick"></span><h2>Remote</h2>
         <span class="rule"></span>
-        <span class="tag" id="tv_volNow"></span>
-      </div>
+        <span class="tag" id="tv_volNow"></span><span class="caret"></span>
+      </button>
 
-      <div class="card pad">
+      <div class="card pad" id="tv_remoteBody">
         <!-- The cross, laid out as it sits under a thumb rather than in
              source order: the middle row is left, OK, right. -->
         <div class="dpad">
@@ -2987,12 +2993,12 @@ button.chan {
          are built from and re-read the library underneath them, which is not
          something to do to a channel that is playing. -->
     <section id="tv_jobs" hidden>
-      <div class="head">
+      <button class="head" id="tv_jobsHead" aria-expanded="true">
         <span class="nick"></span><h2>Maintenance</h2>
         <span class="rule"></span>
-        <span class="tag">TV OFF ONLY</span>
-      </div>
-      <div class="card pad">
+        <span class="tag">TV OFF ONLY</span><span class="caret"></span>
+      </button>
+      <div class="card pad" id="tv_jobsBody">
         <div class="keys jobs" id="tv_jobList"></div>
         <p class="hint">These run on the Kodi box and take a few minutes.
           Watch the television for what they are doing.</p>
@@ -3002,14 +3008,16 @@ button.chan {
 
     <div class="pane">
     <section>
-      <div class="head">
+      <button class="head" id="tv_channelsHead" aria-expanded="true">
         <span class="nick"></span><h2>Channels</h2>
         <span class="count" id="tv_channelCount"></span>
-        <span class="rule"></span>
-      </div>
+        <span class="rule"></span><span class="caret"></span>
+      </button>
+      <div id="tv_channelsBody">
       <div class="stack" id="tv_channels"></div>
       <p class="label" id="tv_noChannels" hidden
          style="margin-top:12px">No channels configured yet</p>
+      </div>
     </section>
     </div>
    </div>
@@ -3048,14 +3056,19 @@ function sectionOpen(driver) {
   return driver.count <= COLLAPSE_ABOVE;
 }
 
-/* The Home tab's own sections fold the way a driver's does, and are
+/* The Home and TV tabs' own sections fold the way a driver's does, and are
    remembered the same way. Open unless this phone has said otherwise: these
    are what the tab is for, and a first visit should show them. Only the
    contents are hidden -- the section itself is still shown or not by whether
    there is anything in it, and folding must not fight that. Keyed apart from
    the drivers so a driver called "scenes" could never share one. */
 var FOLDS = [['sequencesHead', 'sequences'], ['scenesHead', 'scenes'],
-             ['allHead', 'allBody']];
+             ['allHead', 'allBody'],
+             // The television's, the same way. Not "Type on the TV": it is
+             // only there while the television is waiting for words, and
+             // folded it would hide the one thing that needs doing.
+             ['tv_onairHead', 'tv_onairBody'], ['tv_remoteHead', 'tv_remoteBody'],
+             ['tv_jobsHead', 'tv_jobsBody'], ['tv_channelsHead', 'tv_channelsBody']];
 
 function foldSections() {
   FOLDS.forEach(function (pair) {
@@ -3864,6 +3877,9 @@ function renderControls() {
   var mute = document.getElementById('tv_muteKey');
   mute.classList.toggle('lit', !!player.quiet);
   mute.textContent = player.quiet ? 'Louder' : 'Quiet';
+  // The one-way Quiet under On now is lit the same way: it is where the
+  // volume is, not what was last pressed.
+  document.getElementById('tv_quietKey').classList.toggle('lit', !!player.quiet);
 
   var volume = document.getElementById('tv_volNow');
   volume.textContent = (player.volume === null ||

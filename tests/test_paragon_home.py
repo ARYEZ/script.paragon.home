@@ -18722,6 +18722,30 @@ class TestWebRemote(unittest.TestCase):
 
     # -- folding the Home tab's own sections -------------------------------
 
+    def test_quiet_and_louder_sit_under_on_now_and_are_wired(self):
+        """Aryez: in place of Channel down and Channel up -- which had no
+        click handler, and did nothing. data-press is what wires a key, so
+        a button without it is a button that does nothing again."""
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        row = re.search(r'<div class="row" id="tv_tuneRow"[^>]*>(.*?)</div>',
+                        page, re.S).group(1)
+
+        self.assertIn('data-press="quiet"', row)
+        self.assertIn('data-press="louder"', row)
+        self.assertEqual(re.findall(r'>([^<]+)</button>', row),
+                         ['Quiet', 'Louder'])
+        self.assertNotIn('Channel down', page)
+        self.assertNotIn('tv_chanUp', page)
+        # Only buttons the television half knows: a name it does not have
+        # comes back "Unknown button".
+        import tv
+        markup = page[:page.index('<script>')]
+        for name in re.findall(r'data-press="([^"]+)"', markup):
+            self.assertIn(name, tv.BUTTONS, name)
+
     def test_sequences_scenes_and_all_lights_fold_and_are_remembered(self):
         """Aryez: the driver sections could be folded away, and Sequences,
         Scenes and All lights could not. Run in the stub browser, with the
@@ -18747,7 +18771,11 @@ class TestWebRemote(unittest.TestCase):
         script = page[page.index('<script>') + len('<script>'):
                       page.rindex('</script>')]
         folds = [('sequencesHead', 'sequences'), ('scenesHead', 'scenes'),
-                 ('allHead', 'allBody')]
+                 ('allHead', 'allBody'),
+                 ('tv_onairHead', 'tv_onairBody'),
+                 ('tv_remoteHead', 'tv_remoteBody'),
+                 ('tv_jobsHead', 'tv_jobsBody'),
+                 ('tv_channelsHead', 'tv_channelsBody')]
         for head, body in folds:
             self.assertIn('<button class="head" id="%s"' % head, page)
             self.assertIn('id="%s"' % body, page)
@@ -20212,6 +20240,73 @@ class TestTheQuietButton(unittest.TestCase):
         self.assertAlmostEqual(self.tv.db_to_percent(-39.3, floor=0.0), 100.0)
 
     # -- pressing it -------------------------------------------------------
+
+    # -- Quiet and Louder, one way each ------------------------------------
+
+    def unmutes(self):
+        return [call for call in xbmc.rpc_calls
+                if call.get('method') == 'Application.SetMute'
+                and call.get('params', {}).get('mute') is False]
+
+    def test_quiet_goes_down_to_the_quiet_level(self):
+        self.at(80.0)
+
+        ok, message = self.tv.press('quiet')
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(self.volumes_set()[-1], 34.5, places=1)
+        self.assertIn('-39.3', message)
+
+    def test_quiet_at_the_quiet_level_stays_there(self):
+        """Not a toggle: pressed twice, it is still quiet."""
+        self.at(34.5)
+
+        ok, message = self.tv.press('quiet')
+
+        self.assertTrue(ok)
+        self.assertEqual(self.volumes_set(), [])
+        self.assertIn('Already quiet', message)
+
+    def test_louder_comes_back_up_to_the_normal_level(self):
+        self.at(34.5)
+
+        ok, message = self.tv.press('louder')
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(self.volumes_set()[-1], 66.67, places=1)
+        self.assertIn('-20.0', message)
+
+    def test_neither_turns_the_sound_the_other_way(self):
+        """Louder on a television already louder than normal, and Quiet on
+        one already quieter than quiet, leave it be."""
+        self.at(80.0)
+        self.assertIn('Already up', self.tv.press('louder')[1])
+        self.at(10.0)
+        self.assertIn('Already quiet', self.tv.press('quiet')[1])
+        self.assertEqual(self.volumes_set(), [])
+
+    def test_both_clear_kodis_mute(self):
+        """Pressing either says the room wants to hear it -- whether or not
+        the level moves."""
+        for level, button in ((80.0, 'quiet'), (34.5, 'quiet'),
+                              (34.5, 'louder'), (80.0, 'louder')):
+            xbmc.reset_rpc()
+            self.at(level)
+            self.tv.press(button)
+            self.assertEqual(len(self.unmutes()), 1, (level, button))
+
+    def test_quiet_and_louder_take_their_levels_from_settings(self):
+        xbmcaddon.SETTINGS['tv_quiet_db'] = '-45'
+        xbmcaddon.SETTINGS['tv_normal_db'] = '-10'
+        self.at(80.0)
+        self.tv.press('quiet')
+        self.at(0.0)
+        self.tv.press('louder')
+
+        self.assertAlmostEqual(self.volumes_set()[0],
+                               self.tv.db_to_percent(-45), places=1)
+        self.assertAlmostEqual(self.volumes_set()[1],
+                               self.tv.db_to_percent(-10), places=1)
 
     def test_a_loud_television_goes_quiet(self):
         self.at(80.0)

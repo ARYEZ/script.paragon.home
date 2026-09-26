@@ -88,6 +88,11 @@ older Pi answers /queue 404 "no such path" and the step says to update it
 rather than falling back to cutting in. Checked on real mpv 0.37 (--ao=null).
 Confirmed on beacon1 by Aryez: step volumes, Random song, and three beacon
 steps in a row played in turn.
+2.73.0: TV tab -- tv_tuneRow holds Quiet/Louder (data-press "quiet" and
+"louder" -> tv.one_way: to the quiet or normal level from settings, only in
+that direction, Kodi mute cleared). The old Channel down/up buttons had no
+handler and did nothing. On now, Remote, Maintenance and Channels are in
+FOLDS; Type on the TV deliberately is not.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
