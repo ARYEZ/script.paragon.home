@@ -101,6 +101,13 @@ on or off (it is in the signature).
 2.74.1: Quiet/Louder light with class `on` (not `lit`, which a press
 flashes) in the lit channel card's fill and ink; Louder at the normal level
 via player_state()['normal'] / tv.at_normal_level.
+2.74.2: MpvPlayer._property treats OSError (mpv gone) as no answer. systemd
+stops the whole control group, mpv included; the script's tidy-up used to
+crash on the dead socket and every restart logged exit status 1. beacon1's
+songs now live on a USB NTFS partition: fstab mounts UUID 908C2D0B8C2CEE02
+at /mnt/songs (ntfs3, nofail), the service has --songs /mnt/songs/Songs and
+Wants/After mnt-songs.mount. sda1 on that stick is an old LibreELEC boot
+partition -- harmless while the SD card boots first.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

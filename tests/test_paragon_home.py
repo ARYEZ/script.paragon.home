@@ -6635,6 +6635,42 @@ class TestTheBeaconPlayer(unittest.TestCase):
     def status(self):
         return self.transport.status('127.0.0.1', self.port)
 
+    def test_a_stop_that_reaches_mpv_first_is_still_a_clean_stop(self):
+        """On beacon1: `systemctl restart` logged a ConnectionResetError and
+        exit status 1 every time. systemd signals the whole service -- mpv
+        too -- and mpv went first, so the script's own tidy-up asked a dead
+        mpv whether it was playing and fell over. A player that has gone is
+        a player that is not playing."""
+        self.transport.play('127.0.0.1', self.port, 'goodnight')
+        pids = self._mpv_pids()
+        self.assertTrue(pids, 'the stand-in mpv never started')
+        for pid in pids:
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 3
+        while time.time() < deadline and not all(self._ended(pid)
+                                                 for pid in pids):
+            time.sleep(0.05)
+
+        # Still answering while its player is gone, rather than a 500.
+        state = self.status()
+        self.assertIsNone(state['playing'])
+
+        self.proc.send_signal(signal.SIGTERM)
+        out = self.proc.communicate(timeout=5)[0].decode('utf-8', 'replace')
+        self.assertEqual(self.proc.returncode, 0, out[-800:])
+        self.assertNotIn('Traceback', out)
+
+    @staticmethod
+    def _ended(pid):
+        """Exited, whether or not the script has reaped it yet -- which it
+        will not have, having not noticed. _alive counts a zombie as alive,
+        and a test of "mpv outlived the listener" wants exactly that."""
+        try:
+            with open('/proc/%d/stat' % pid) as handle:
+                return handle.read().split(')')[-1].split()[0] == 'Z'
+        except (IOError, OSError):
+            return True
+
     def test_it_says_how_much_room_is_left_for_clips(self):
         """The free space on the drive the clip folder is on, as a count of
         bytes -- asked of the real script, as the Pi runs it."""

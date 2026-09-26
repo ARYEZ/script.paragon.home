@@ -390,6 +390,11 @@ class MpvPlayer(object):
         except MpvError:
             # "property unavailable" is mpv for "no file loaded".
             return default
+        except OSError:
+            # mpv has gone. `systemctl stop` signals the whole service, mpv
+            # included, and mpv can go first: the tidy-up that follows asks
+            # whether it is playing, and a player that is not there is not.
+            return default
 
     # -- what a beacon does --------------------------------------------------
 
