@@ -108,6 +108,10 @@ songs now live on a USB NTFS partition: fstab mounts UUID 908C2D0B8C2CEE02
 at /mnt/songs (ntfs3, nofail), the service has --songs /mnt/songs/Songs and
 Wants/After mnt-songs.mount. sda1 on that stick is an old LibreELEC boot
 partition -- harmless while the SD card boots first.
+2.74.3: the Pi script logs through say() (print with flush); under systemd
+plain print was buffered and journalctl showed none of it. The test
+fixtures run the script via as_on_the_pi(), which drops PYTHONUNBUFFERED --
+this container sets it, and that is what hid the bug.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

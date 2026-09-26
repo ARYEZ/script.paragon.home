@@ -111,6 +111,17 @@ PLAYERS = (
 FALLBACK = ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet']
 
 
+def say(message):
+    """One line of the log, written out now.
+
+    Not plain print: under systemd the output is a pipe, and print into a
+    pipe waits in a buffer until the process ends -- so `journalctl -u
+    paragon-speaker` showed nothing of this script at all, not the song
+    count, not a single "Playing", and a kill threw the lot away.
+    """
+    print(message, flush=True)
+
+
 def stable_id():
     """Something that survives a reboot and tells two Pis apart: the MAC."""
     node = uuid.getnode()
@@ -190,7 +201,7 @@ class ShellPlayer(object):
     # would play over each other. The speaker stops first.
     replaces = False
 
-    def __init__(self, override=None, log=print):
+    def __init__(self, override=None, log=say):
         self.override = override
         self.log = log
         self._lock = threading.Lock()
@@ -277,7 +288,7 @@ class MpvPlayer(object):
     # of silence and no second command on the wire.
     replaces = True
 
-    def __init__(self, command, folder, log=print):
+    def __init__(self, command, folder, log=say):
         self.command = list(command)
         self.folder = folder
         self.log = log
@@ -477,7 +488,7 @@ def clamp_volume(value):
     return max(0, min(100, number))
 
 
-def build_player(mpv_command, folder, override=None, log=print):
+def build_player(mpv_command, folder, override=None, log=say):
     """mpv if it is there, the shell players if not. Says which."""
     if mpv_command:
         player = MpvPlayer(mpv_command, folder, log=log)
@@ -493,7 +504,7 @@ def build_player(mpv_command, folder, override=None, log=print):
 class Speaker(object):
     """The state both listeners share."""
 
-    def __init__(self, name, folder, port, device_id=None, log=print,
+    def __init__(self, name, folder, port, device_id=None, log=say,
                  player=None, songs=None):
         self.name = name
         self.folder = ClipFolder(folder)

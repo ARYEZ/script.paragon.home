@@ -5957,6 +5957,16 @@ class TestTheSpeaker(unittest.TestCase):
         self.assertIs(app.controller.driver('speaker').clips, app._clips)
 
 
+def as_on_the_pi():
+    """The environment to run the beacon script in: this one, less what a
+    Pi does not have. The container these tests were written in sets
+    PYTHONUNBUFFERED, which made every print arrive at once -- and so hid
+    that under systemd none of the script's log reached the journal."""
+    env = dict(os.environ)
+    env.pop('PYTHONUNBUFFERED', None)
+    return env
+
+
 class TestTheSongFolder(unittest.TestCase):
     """The Pi script's song folder, in-process: where it is, and that a name
     is looked up in it rather than joined onto it."""
@@ -6226,7 +6236,8 @@ class TestThePiListener(unittest.TestCase):
              # No mpv: this class is the Pi that has not had it installed,
              # and must still play and stop exactly as it always did.
              '--mpv', os.path.join(self.folder, 'no-such-mpv')],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=as_on_the_pi())
         self.addCleanup(self._stop)
         deadline = time.time() + 5
         while time.time() < deadline:
@@ -6573,7 +6584,7 @@ class TestTheBeaconPlayer(unittest.TestCase):
         self.lan = speaker_lan
 
     def start(self):
-        env = dict(os.environ, FAKE_MPV_LOG=self.log,
+        env = dict(as_on_the_pi(), FAKE_MPV_LOG=self.log,
                    FAKE_MPV_PID=self.pidfile)
         self.proc = subprocess.Popen(
             [sys.executable, os.path.join(ROOT, 'tools', 'paragon_speaker.py'),
@@ -6634,6 +6645,34 @@ class TestTheBeaconPlayer(unittest.TestCase):
 
     def status(self):
         return self.transport.status('127.0.0.1', self.port)
+
+    def test_the_log_arrives_while_it_runs_not_when_it_stops(self):
+        """On beacon1, `journalctl -u paragon-speaker` showed systemd's
+        "Started" and nothing of the script's own -- not the song count, not
+        a single "Playing". Under systemd its output is a pipe, and print()
+        into a pipe sits in a buffer until the process ends; a kill loses it
+        altogether. Read here from a pipe, while it is still running."""
+        import threading
+
+        seen = []
+        found = threading.Event()
+
+        def read():
+            for raw in iter(self.proc.stdout.readline, b''):
+                seen.append(raw.decode('utf-8', 'replace').rstrip())
+                if 'Taking commands on HTTP' in seen[-1]:
+                    found.set()
+                    return
+
+        reader = threading.Thread(target=read)
+        reader.daemon = True
+        reader.start()
+
+        self.assertTrue(found.wait(5),
+                        'nothing of the startup log reached the pipe while '
+                        'it ran: %r' % seen)
+        self.assertTrue([line for line in seen
+                         if line.startswith('Playing through')], seen)
 
     def test_a_stop_that_reaches_mpv_first_is_still_a_clean_stop(self):
         """On beacon1: `systemctl restart` logged a ConnectionResetError and
