@@ -13169,6 +13169,32 @@ class TestTheTelevisionHalf(unittest.TestCase):
         self.assertIn('script.paragontv', folder)
         self.assertNotIn('script.paragon.home', folder)
 
+    def test_with_the_tv_on_only_skin_and_reboot_may_run(self):
+        """Aryez: Maintenance vanished whenever the television was on. The
+        file and library jobs still wait for it to be off -- refused here as
+        well as dimmed on the page -- but a skin reload and a reboot touch
+        neither, and run."""
+        tv = self.install_tv()
+        xbmcgui.Window(tv.HOME_WINDOW).setProperty(tv.PROP_CHANNEL, '4')
+
+        for name, _label, _kind, _what, _origin in tv.TASKS:
+            if name in ('skin', 'reboot'):
+                continue
+            ok, message = tv.run_task(name)
+            self.assertFalse(ok, name)
+            self.assertEqual(message, 'Stop Paragon TV first', name)
+        self.assertEqual(xbmc.BUILTINS, [], 'a file job ran under the TV')
+
+        self.assertEqual(tv.run_task('skin'), (True, 'Reloading the skin'))
+        self.assertEqual(tv.run_task('reboot'), (True, 'Rebooting'))
+        self.assertEqual(xbmc.BUILTINS, ['ReloadSkin()', 'Reboot'])
+
+    def test_the_page_is_told_which_jobs_may_run_any_time(self):
+        tv = self.install_tv()
+
+        self.assertEqual([t['name'] for t in tv.task_list() if t['any_time']],
+                         ['skin', 'reboot'])
+
     def test_the_utility_scripts_come_from_paragon_tvs_folder_too(self):
         tv = self.install_tv()
         xbmcgui.Window(tv.HOME_WINDOW).setProperty(tv.PROP_CHANNEL, '')
@@ -18721,6 +18747,111 @@ class TestWebRemote(unittest.TestCase):
                          'a silent read-back blanked the card')
 
     # -- folding the Home tab's own sections -------------------------------
+
+    def test_maintenance_stays_and_dims_what_must_wait(self):
+        """Run in the stub browser: with the television on, all nine jobs
+        are there, the seven that need it off disabled and said to; with it
+        off, none are; with no Paragon TV at all, no section."""
+        import subprocess
+        import tempfile
+        import tv
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.signed_in()
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+
+        def draw(television, then=None):
+            # With `then`, the page is drawn once, the television changes
+            # under it, and it redraws -- a tablet left open all evening.
+            seed = (
+                "var THEN = %s;\n" % json.dumps(
+                    dict(snapshot, tv=then) if then else None) +
+                "var SNAPSHOT = %s;\n"
+                "global.fetch = function (path) {\n"
+                "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+                "  return Promise.resolve({status: 200, ok: true,\n"
+                "    json: function () { return Promise.resolve(body); }});\n"
+                "};\n" % json.dumps(dict(snapshot, tv=television)))
+            tail = (
+                "\nfunction settle(n) { return n ? new Promise(function (r) {\n"
+                "  setImmediate(r); }).then(function () { return settle(n - 1); })\n"
+                "  : Promise.resolve(); }\n"
+                "settle(4).then(function () {\n"
+                "  if (!THEN) { return; }\n"
+                "  SNAPSHOT = THEN;\n"
+                "  return load().then(function () { return settle(4); });\n"
+                "}).then(function () {\n"
+                "  var jobs = document.getElementById('tv_jobList').children;\n"
+                "  console.log(JSON.stringify({\n"
+                "    hidden: document.getElementById('tv_jobs').hidden,\n"
+                "    tag: document.getElementById('tv_jobsTag').textContent,\n"
+                "    wait: !document.getElementById('tv_jobsWait').hidden,\n"
+                "    jobs: jobs.map(function (b) { return [b.textContent, !!b.disabled]; })\n"
+                "  }));\n"
+                "});\n")
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script + tail)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self.assertEqual(proc.returncode, 0, said[:900])
+            return json.loads(said.strip().splitlines()[-1])
+
+        television = {'ready': True, 'installed': True, 'running': True,
+                      'channel': 5, 'channel_name': 'IKON', 'art': False,
+                      'player': {}, 'input': {}, 'channels': [], 'now': {},
+                      'tasks': tv.task_list()}
+
+        on = draw(television)
+        self.assertFalse(on['hidden'], 'Maintenance vanished with the TV on')
+        self.assertEqual(len(on['jobs']), len(tv.TASKS))
+        live = [label for label, disabled in on['jobs'] if not disabled]
+        self.assertEqual(live, ['Reload skin', 'Reboot the box'])
+        self.assertTrue(on['wait'])
+        self.assertEqual(on['tag'], 'SOME NEED THE TV OFF')
+
+        off = draw(dict(television, running=False, channel=None))
+        self.assertFalse(off['hidden'])
+        self.assertEqual([label for label, disabled in off['jobs']
+                          if disabled], [], 'a job dimmed with the TV off')
+        self.assertFalse(off['wait'])
+        self.assertEqual(off['tag'], '')
+
+        switched = draw(dict(television, running=False, channel=None),
+                        then=television)
+        # A real browser empties the list on textContent = ''; the stub keeps
+        # the old buttons ahead of the new, so the last set is the page now.
+        self.assertEqual([label for label, disabled
+                          in switched['jobs'][-len(tv.TASKS):]
+                          if not disabled],
+                         ['Reload skin', 'Reboot the box'],
+                         'switched on under an open page, and not dimmed')
+
+        # With no Paragon TV the whole tab is absent, and the section starts
+        # hidden in the markup -- which this stub browser cannot see, so it
+        # is read from the page itself.
+        self.assertIn('<section id="tv_jobs" hidden>', page)
 
     def test_quiet_and_louder_sit_under_on_now_and_are_wired(self):
         """Aryez: in place of Channel down and Channel up -- which had no

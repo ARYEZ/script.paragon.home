@@ -1201,6 +1201,13 @@ TASKS = (
 # whole machine, and a wall tablet is a thing people brush past.
 CONFIRM = ('reboot',)
 
+# Jobs that may run with the television on. The rest rewrite the files the
+# channels are built from, or make Kodi re-read the library under a channel
+# that is playing. These two touch neither: a skin reload redraws what is on
+# screen, and a reboot ends the television along with everything else, which
+# is what it is for.
+ANY_TIME = ('skin', 'reboot')
+
 TASKS_BY_NAME = dict((entry[0], entry) for entry in TASKS)
 
 
@@ -1210,24 +1217,25 @@ def task_list():
     Deliberately not the script names. The page has no business knowing what
     runs, and telling it would be handing out half of a path.
     """
-    return [{'name': name, 'label': label, 'confirm': name in CONFIRM}
+    return [{'name': name, 'label': label, 'confirm': name in CONFIRM,
+             'any_time': name in ANY_TIME}
             for name, label, _kind, _what, _origin in TASKS]
 
 
 def run_task(name):
     """Start one of TASKS. Returns (ok, message).
 
-    Refused while Paragon TV is running, and that is not only the page being
-    tidy. These rewrite the NFO files the channels are built from, make Kodi
+    Refused while Paragon TV is running -- all but ANY_TIME -- and that is
+    not only the page being tidy. These rewrite the NFO files the channels are built from, make Kodi
     re-read the library underneath them, and copy the lot to other boxes. Run
     against a television that is playing, the mildest outcome is a channel
-    losing its place. The page hides the section, and this refuses anyway --
+    losing its place. The page dims those buttons, and this refuses anyway --
     a page left open on a tablet since this morning does not know yet.
     """
     entry = TASKS_BY_NAME.get(name)
     if entry is None:
         return False, 'Unknown job'
-    if current_channel() is not None:
+    if name not in ANY_TIME and current_channel() is not None:
         return False, 'Stop Paragon TV first'
 
     _name, label, kind, what, _origin = entry

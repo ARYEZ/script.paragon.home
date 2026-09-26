@@ -93,6 +93,11 @@ steps in a row played in turn.
 that direction, Kodi mute cleared). The old Channel down/up buttons had no
 handler and did nothing. On now, Remote, Maintenance and Channels are in
 FOLDS; Type on the TV deliberately is not.
+2.74.0: Maintenance always shows where Paragon TV is installed. tv.ANY_TIME
+= ('skin', 'reboot') may run with the TV on; run_task refuses the rest
+while it runs, and task_list tells the page (`any_time`), which disables
+and dims them with a line saying why. The job list redraws when the TV goes
+on or off (it is in the signature).
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

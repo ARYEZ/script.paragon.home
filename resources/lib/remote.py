@@ -2673,6 +2673,8 @@ footer button { flex: 1 1 auto; }
 /* The one that takes the box away with it. Not shouting -- just not the same
    as the six beside it. */
 .keys.jobs button.key.grave { border-color: rgba(224, 27, 36, .55); }
+/* Dimmed while the television is on: there, and plainly not for now. */
+.keys.jobs button.key.waits { opacity: .38; cursor: not-allowed; }
 
 /* Sized for a thumb on a wall panel, not a mouse -- and no larger, because
    the whole remote has to sit under the artwork without either of them being
@@ -2989,16 +2991,19 @@ button.chan {
       </div>
     </section>
 
-    <!-- Only with the television off. These rewrite the files the channels
-         are built from and re-read the library underneath them, which is not
-         something to do to a channel that is playing. -->
+    <!-- Most of these only with the television off: they rewrite the files
+         the channels are built from and re-read the library underneath them,
+         which is not something to do to a channel that is playing. Those are
+         dimmed while it is on; Reload skin and Reboot are not. -->
     <section id="tv_jobs" hidden>
       <button class="head" id="tv_jobsHead" aria-expanded="true">
         <span class="nick"></span><h2>Maintenance</h2>
         <span class="rule"></span>
-        <span class="tag">TV OFF ONLY</span><span class="caret"></span>
+        <span class="tag" id="tv_jobsTag"></span><span class="caret"></span>
       </button>
       <div class="card pad" id="tv_jobsBody">
+        <p class="hint" id="tv_jobsWait" hidden>Stop Paragon TV to rename
+          files or update the library. Reload skin and Reboot work now.</p>
         <div class="keys jobs" id="tv_jobList"></div>
         <p class="hint">These run on the Kodi box and take a few minutes.
           Watch the television for what they are doing.</p>
@@ -3946,19 +3951,25 @@ function sendTyped() {
 
 function renderJobs() {
   var section = document.getElementById('tv_jobs');
-  // The one rule: not while the television is on. The server refuses as well
-  // -- a page left open since this morning does not know the box has been
-  // switched on since.
-  var allowed = tvState().ready && !tvState().running;
-  section.hidden = !allowed;
-  if (!allowed) { return; }
+  // Always there where Paragon TV is, so it never looks lost. With the
+  // television on, the jobs that rewrite its files or re-read the library
+  // under it are dimmed and say why; a skin reload and a reboot are not. The
+  // server refuses the dimmed ones as well -- a page left open since this
+  // morning does not know the box has been switched on since.
+  section.hidden = !tvState().ready;
+  if (section.hidden) { return; }
+  var running = !!tvState().running;
+  document.getElementById('tv_jobsTag').textContent =
+    running ? 'SOME NEED THE TV OFF' : '';
+  document.getElementById('tv_jobsWait').hidden = !running;
 
   var box = document.getElementById('tv_jobList');
   var tasks = tvState().tasks || [];
-  // Rebuilt only when the list itself changes. It never does in practice, and
-  // redrawing seven buttons under a finger every five seconds would be a way
+  // Rebuilt only when the list, or whether the television is on, changes.
+  // Redrawing nine buttons under a finger every five seconds would be a way
   // to lose a press.
-  var signature = tasks.map(function (t) { return t.name; }).join(',');
+  var signature = running + '|' + tasks.map(function (t) {
+    return t.name; }).join(',');
   if (box.dataset.signature === signature) { return; }
   box.dataset.signature = signature;
 
@@ -3966,6 +3977,10 @@ function renderJobs() {
   tasks.forEach(function (task) {
     var button = el('button', 'key', task.label);
     if (task.confirm) { button.classList.add('grave'); }
+    if (running && !task.any_time) {
+      button.disabled = true;
+      button.classList.add('waits');
+    }
     button.dataset.label = task.label;
     button.addEventListener('click', function () {
       if (task.confirm && button.dataset.armed !== '1') {
