@@ -28,7 +28,8 @@ last time, when there is another to choose.
 Two things listen:
 
     UDP  8765   discovery. Paragon Home broadcasts PARAGON_SPEAKER? and this
-                answers with who it is and what it can play.
+                answers with who it is; it then asks GET /clips for what it
+                can play.
     HTTP 8766   GET  /clips              -> {"clips": [...],
                                              "songs": [...]}
                 GET  /status             -> {"playing": name or null,
@@ -615,13 +616,17 @@ class Speaker(object):
         return self._shuffled
 
     def hello(self):
+        """Who this is, and nothing it would take more than one datagram
+        to say. The clip and song lists used to ride along; a library of
+        songs is tens of kilobytes of names, which a search either cut short
+        or, past 64 KB, could not send at all. Paragon Home asks /clips for
+        them instead, over HTTP, where there is no such limit."""
         return json.dumps({
             'paragon': 'speaker',
             'id': self.device_id,
             'name': self.name,
             'port': self.port,
-            'clips': self.all_names(),
-            'songs': self.song_names(),
+            'listing': 'http',
         }).encode('utf-8')
 
     def play(self, name):

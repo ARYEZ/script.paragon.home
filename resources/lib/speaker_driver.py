@@ -81,6 +81,7 @@ class SpeakerDriver(object):
             return [], ['Speaker search failed: %s' % exc]
 
         changed = False
+        warnings = []
         for entry in found:
             device = Device(
                 driver=self.DRIVER_ID,
@@ -92,11 +93,22 @@ class SpeakerDriver(object):
                 driver_data={'port': entry.get('port') or COMMAND_PORT},
             )
             devices.append(device)
-            changed = self._remember(device, entry.get('clips') or [],
-                                     entry.get('songs') or []) or changed
+            clips, songs = entry.get('clips') or [], entry.get('songs') or []
+            if not entry.get('listed', True):
+                # Asked for over HTTP. If that fails the beacon is still
+                # found, and keeps the lists it had rather than losing them.
+                try:
+                    listing = self.transport.listing(device.ip,
+                                                     self._port(device))
+                except SpeakerError as exc:
+                    warnings.append('%s was found but did not list its '
+                                    'clips: %s' % (device.name, exc))
+                    continue
+                clips, songs = listing['clips'], listing['songs']
+            changed = self._remember(device, clips, songs) or changed
         if changed:
             self._save_clips()
-        return devices, []
+        return devices, warnings
 
     def locate(self, devices, timeout=3.0):
         """Where the listed beacons are right now: {device_id: ip}."""

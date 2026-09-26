@@ -93,6 +93,10 @@ def parse_hello(data, ip):
         # Which of those are songs. Empty from a Pi on the older script,
         # which has no songs folder -- its clips are all there is.
         'songs': clean_clip_names(body.get('songs')),
+        # Whether the lists came with the hello. A newer script leaves them
+        # out -- hundreds of songs do not fit in one datagram -- and says to
+        # ask for them over HTTP, where there is no limit.
+        'listed': body.get('listing') != 'http',
     }
 
 
@@ -227,7 +231,12 @@ class SpeakerTransport(object):
                 for sock in sockets:
                     while True:
                         try:
-                            data, sender = sock.recvfrom(8192)
+                            # The largest a datagram can be. An older
+                            # script sends every clip name in its hello,
+                            # and a library of songs is 20 KB of names --
+                            # cut at 8 KB it is not JSON, and the beacon
+                            # vanished from the search.
+                            data, sender = sock.recvfrom(65535)
                         except socket.error:
                             break
                         entry = parse_hello(data, sender[0])

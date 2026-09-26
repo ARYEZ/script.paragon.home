@@ -4936,6 +4936,12 @@ class FakeSpeaker(object):
         self.queued = []
         # Every /queue that arrived, accepted or not.
         self.queue_requests = 0
+        # The hello: with the lists in it, as the older script sends, or
+        # saying to fetch them from /clips, as the newer one does. And a
+        # /clips that fails, for a beacon found but unable to list.
+        self.lists_in_hello = True
+        self.clips_fail = False
+        self.clips_asked = 0
 
         speaker = self
 
@@ -4950,7 +4956,11 @@ class FakeSpeaker(object):
 
             def do_GET(self):
                 if self.path == '/clips':
-                    self._send(200, speaker.listing())
+                    speaker.clips_asked += 1
+                    if speaker.clips_fail:
+                        self._send(500, {'error': 'disk trouble'})
+                    else:
+                        self._send(200, speaker.listing())
                 elif self.path == '/status':
                     playing = speaker.playing
                     self._send(200, {
@@ -5098,7 +5108,10 @@ class FakeSpeaker(object):
                 continue
             hello = {'paragon': 'speaker', 'id': self.device_id,
                      'name': self.name, 'port': self.port}
-            hello.update(self.listing())
+            if self.lists_in_hello:
+                hello.update(self.listing())
+            else:
+                hello['listing'] = 'http'
             reply = json.dumps(hello)
             try:
                 self.sock.sendto(reply.encode('utf-8'), sender)
@@ -5185,6 +5198,57 @@ class TestTheSpeaker(unittest.TestCase):
                          ['Stop', 'hardboiled complete', 'goodnight'])
 
     # -- songs -------------------------------------------------------------
+
+    def test_a_newer_beacon_is_listed_over_http(self):
+        self.pi.lists_in_hello = False
+        self.pi.songs = ['Stargazer']
+        driver = self.driver()
+
+        devices, warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.pi.clips_asked, 1)
+        self.assertEqual(driver.commands(devices[0]),
+                         ['Stop', 'Random song', 'hardboiled complete',
+                          'goodnight', 'Stargazer'])
+        self.assertEqual(driver.songs(devices[0]), ['Stargazer'])
+
+    def test_an_older_beacon_is_not_asked_again(self):
+        """Its hello already had the lists: one round trip is enough."""
+        driver = self.driver()
+        driver.discover(timeout=0.6)
+        self.assertEqual(self.pi.clips_asked, 0)
+
+    def test_a_beacon_that_cannot_list_keeps_what_it_had(self):
+        """Found, and said so; its clips not wiped because one request
+        failed -- a step naming a song must not stop working over it."""
+        self.pi.lists_in_hello = False
+        self.pi.clips_fail = True
+        known = {self.pi.device_id: ['goodnight', 'Stargazer'],
+                 '#songs': {self.pi.device_id: ['Stargazer']}}
+        driver = self.driver(clips=known)
+
+        devices, warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual([d.name for d in devices], ['Kitchen Speaker'])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('did not list its clips', warnings[0])
+        self.assertEqual(driver.commands(devices[0]),
+                         ['Stop', 'Random song', 'goodnight', 'Stargazer'])
+        self.assertEqual(self.saved, [])
+
+    def test_an_older_beacon_with_a_long_list_is_read_whole(self):
+        """The older script sends every name in its hello. Five hundred
+        songs is over 8 KB -- which the search used to cut short, and a
+        hello cut short is not JSON."""
+        self.pi.songs = ['Song number %03d with a longish name' % n
+                         for n in range(500)]
+        driver = self.driver()
+
+        devices, warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual([d.name for d in devices], ['Kitchen Speaker'])
+        self.assertEqual(len(driver.songs(devices[0])), 500)
 
     def test_a_beacon_with_songs_offers_a_random_one(self):
         """Stop, Random song, the phrases, then the songs -- and the songs
@@ -6328,9 +6392,6 @@ class TestThePiListener(unittest.TestCase):
                                             'First Flight', 'Stargazer'])
         self.assertEqual(listing['songs'], ['First Flight', 'Stargazer'])
 
-        found = self.transport.discover(
-            timeout=0.6, targets=[('127.0.0.1', self.discovery_port)])
-        self.assertEqual(found[0]['songs'], ['First Flight', 'Stargazer'])
 
     def test_a_song_plays_by_name_from_the_songs_folder(self):
         folder = self._songs('Stargazer.mp3')
@@ -6410,10 +6471,51 @@ class TestThePiListener(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]['name'], 'Kitchen Speaker')
         self.assertEqual(found[0]['port'], self.port)
-        # Named by filename, extension dropped, sorted; the .txt and the
-        # Thumbs.db are not clips.
-        self.assertEqual(found[0]['clips'],
-                         ['goodnight', 'hardboiled complete'])
+        # No lists in the hello any more -- see the next test -- and it
+        # says to ask for them.
+        self.assertFalse(found[0]['listed'])
+        self.assertEqual(found[0]['clips'], [])
+
+    def test_a_search_gets_the_clips_over_http_however_many_songs(self):
+        """beacon1 had some five hundred songs: a hello carrying every
+        name was 21 KB, cut to 8 KB by the search and no longer JSON, and
+        past 64 KB it could not be sent at all. The hello says who it is;
+        the lists come from /clips."""
+        from speaker_driver import SpeakerDriver
+
+        names = ['Song number %03d with a longish name' % n
+                 for n in range(2000)]
+        for name in names:
+            with open(os.path.join(self.clips, 'songs', name + '.mp3'),
+                      'wb') as handle:
+                handle.write(b'x')
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(2)
+        try:
+            sock.sendto(b'PARAGON_SPEAKER?', ('127.0.0.1',
+                                                self.discovery_port))
+            hello = sock.recvfrom(65535)[0]
+        finally:
+            sock.close()
+        self.assertLess(len(hello), 512, 'the hello grew with the library')
+
+        transport = self.transport
+        real = transport.discover
+        transport.discover = lambda timeout=3.0: real(
+            timeout=0.6, targets=[('127.0.0.1', self.discovery_port)])
+        saved = []
+        driver = SpeakerDriver(transport=transport, clips={},
+                               save_clips=lambda: saved.append(True))
+
+        devices, warnings = driver.discover(timeout=0.6)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(driver.songs(devices[0]), sorted(names))
+        self.assertEqual(driver.commands(devices[0])[:4],
+                         ['Stop', 'Random song', 'goodnight',
+                          'hardboiled complete'])
+        self.assertEqual(saved, [True])
 
     def test_the_real_listener_plays_the_file_the_name_points_at(self):
         self.transport.play('127.0.0.1', self.port, 'hardboiled complete')
@@ -19383,10 +19485,25 @@ class TestWebRemote(unittest.TestCase):
         self.assertEqual(card['kids'], [
             ['BUTTON', '', 'goodnight'],
             ['BUTTON', '', 'hardboiled complete'],
-            ['P', 'label songs', 'Songs'],
+            ['BUTTON', 'label songs', ''],
             ['BUTTON', 'shuffle', 'Random song'],
-            ['BUTTON', 'playing', 'Stargazer']])
+            ['DIV', 'shelf', '']])
+        self.assertEqual(card['shelf'], ['Stargazer'])
+        self.assertFalse(card['shelf_hidden'], 'one song, folded away')
         self.assertEqual(card['lit'], ['Stargazer'])
+
+        # A library -- beacon1 has hundreds -- starts folded, with Random
+        # song still out beside the heading.
+        many = ['Song %03d' % n for n in range(40)]
+        library = dict(snapshot, devices=[
+            dict(d, commands=['Stop', 'Random song', 'goodnight'] + many,
+                 songs=many, playing=None)
+            if d['id'] == 'BE:01' else d for d in snapshot['devices']])
+        said = self._draw(node, browser, script, library, 'beacons')
+        card = json.loads(said.strip().splitlines()[-1])['card']
+        self.assertEqual(len(card['shelf']), 40)
+        self.assertTrue(card['shelf_hidden'], 'forty songs laid out open')
+        self.assertIn(['BUTTON', 'shuffle', 'Random song'], card['kids'])
 
         waiting = dict(snapshot, devices=[
             dict(d, queued=['two', 'Stargazer']) if d['id'] == 'BE:01' else d
@@ -19409,6 +19526,87 @@ class TestWebRemote(unittest.TestCase):
         said = self._draw(node, browser, script, no_ip, 'beacons')
         card = json.loads(said.strip().splitlines()[-1])['card']
         self.assertTrue(card['where_hidden'], 'an empty line was left showing')
+
+    def test_the_songs_fold_on_a_tap_and_stay_as_left(self):
+        """A long list starts folded; a tap opens it and is written down
+        for that beacon; a reload with it written down comes back open."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        self.beacon()
+        client = self.signed_in()
+        client.act('beacons')
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+        many = ['Song %03d' % n for n in range(40)]
+        library = dict(snapshot, devices=[
+            dict(d, commands=['Stop', 'Random song'] + many, songs=many)
+            if d['id'] == 'BE:01' else d for d in snapshot['devices']])
+
+        def run(saved):
+            seed = (
+                "El.prototype.addEventListener = function (name, fn) {\n"
+                "  (this.on = this.on || {})[name] = fn; };\n"
+                "global.localStorage.setItem('paragon.tab', 'beacons');\n"
+                "%s"
+                "var SNAPSHOT = %s;\n"
+                "global.fetch = function (path) {\n"
+                "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+                "  return Promise.resolve({status: 200, ok: true,\n"
+                "    json: function () { return Promise.resolve(body); }});\n"
+                "};\n" % (
+                    "global.localStorage.setItem("
+                    "'paragon.section.songs.BE:01', %r);\n" % saved
+                    if saved is not None else '',
+                    json.dumps(library)))
+            tail = (
+                "\nsetImmediate(function () { setImmediate(function () {\n"
+                "  var kids = beaconCards['BE:01'].clips.children;\n"
+                "  var head = kids.filter(function (c) {\n"
+                "    return c.className === 'label songs'; })[0];\n"
+                "  var shelf = kids.filter(function (c) {\n"
+                "    return c.className === 'shelf'; })[0];\n"
+                "  var before = shelf.hidden;\n"
+                "  head.on.click();\n"
+                "  console.log(JSON.stringify({before: before,\n"
+                "    after: shelf.hidden, saved: localStorage.getItem(\n"
+                "      'paragon.section.songs.BE:01')}));\n"
+                "}); });\n")
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script + tail)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self.assertEqual(proc.returncode, 0, said[:900])
+            return json.loads(said.strip().splitlines()[-1])
+
+        first = run(None)
+        self.assertEqual(first, {'before': True, 'after': False,
+                                 'saved': '1'})
+        again = run('1')
+        self.assertFalse(again['before'], 'opened, and folded on reload')
+        self.assertEqual(again['saved'], '0')
 
     def _draw(self, node, browser, script, snapshot, tab):
         """Run the page against a snapshot in the stub browser; return what
@@ -19449,6 +19647,11 @@ class TestWebRemote(unittest.TestCase):
             "      where: parts.where.textContent, where_hidden: parts.where.hidden,\n"
             "      kids: parts.clips.children.map(function (c) {\n"
             "        return [c.tagName, c.className || '', c.textContent]; }),\n"
+            "      shelf: (parts.clips.children.filter(function (c) {\n"
+            "        return c.className === 'shelf'; })[0] || {children: []})\n"
+            "        .children.map(function (c) { return c.textContent; }),\n"
+            "      shelf_hidden: !!(parts.clips.children.filter(function (c) {\n"
+            "        return c.className === 'shelf'; })[0] || {}).hidden,\n"
             "      clips: Object.keys(parts.buttons),\n"
             "      lit: Object.keys(parts.buttons).filter(function (n) {\n"
             "        return parts.buttons[n].className === 'playing'; })};\n"

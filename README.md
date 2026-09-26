@@ -1498,11 +1498,14 @@ Two ports, both on the LAN, nothing leaving the house:
 
 | | |
 |---|---|
-| UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and clips |
+| UDP 8765 | discovery — Paragon Home broadcasts, each Pi answers with its name and port |
 | HTTP 8766 | `GET /clips` lists them and says which are songs, `GET /status` says what it is doing and how much room is left; `POST /play` starts one, stopping the last, or with `{"shuffle": true}` a song it picks; `POST /stop`, `/pause`, `/resume`, `/volume` |
 
-The clip list rides along in the discovery reply, so **one search is one
-complete answer** — which is why a refresh is what picks up a new file. The
+**A search is one complete answer**: each Pi that answers is asked for its
+clips and songs over HTTP straight after, which is why a refresh is what
+picks up a new file. The lists used to ride in the discovery reply itself;
+a library of songs is tens of kilobytes of names, which one datagram cannot
+carry, so now the reply says only who it is. The
 lists are kept in `speaker_clips.json` the way learned IR codes are kept, so
 the menus offer clips without a network call, and a satellite gets them with
 everything else.

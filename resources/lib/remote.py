@@ -2023,8 +2023,24 @@ button.wide { width: 100%; }
 .beacon .clips { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .beacon .clips button { flex: 0 1 auto; }
 /* The songs start on a line of their own under a heading, rather than
-   running on from the last phrase. */
-.beacon .clips .songs { flex-basis: 100%; margin: 8px 0 0; }
+   running on from the last phrase. The heading is a button that folds them,
+   with the same caret the section headings wear. */
+.beacon .clips .songs {
+  flex-basis: 100%; margin: 8px 0 0; padding: 0; min-height: 0;
+  background: none; border: 0; text-align: left; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+}
+.beacon .clips .songs .count { color: var(--dim); }
+.beacon .clips .songs .caret {
+  width: 7px; height: 7px; margin-top: -3px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg); transition: transform .15s ease;
+}
+.beacon .clips .songs[aria-expanded="true"] .caret {
+  transform: rotate(-135deg); margin-top: 3px;
+}
+.beacon .clips .shelf { display: flex; flex-wrap: wrap; gap: 9px;
+                        flex-basis: 100%; }
 .beacon .clips button.playing { border-color: var(--orange); color: var(--orange); }
 .beacon .where { color: var(--sub); font-size: 12px; letter-spacing: 1px;
                  margin-top: 3px; }
@@ -3060,6 +3076,8 @@ var FULLSCREEN_KEY = 'paragon.fullscreen';
    setting -- it is how this panel is arranged, not how the house is. */
 var COLLAPSE_ABOVE = 6;
 var SECTION_KEY = 'paragon.section.';
+/* A beacon with more songs than this shows them folded until opened. */
+var SONGS_OPEN_UP_TO = 12;
 
 function sectionOpen(driver) {
   try {
@@ -4304,8 +4322,35 @@ function paintBeacon(parts, device) {
     };
     phrases.forEach(function (name) { button(name, parts.clips); });
     if (tunes.length) {
-      parts.clips.appendChild(el('p', 'label songs', 'Songs'));
-      tunes.forEach(function (name) { button(name, parts.clips); });
+      // The heading folds the songs away: a library is hundreds of them,
+      // and a card of five hundred buttons buries everything under it.
+      // Random song stays out, beside the heading -- it is the one most
+      // pressed. Remembered per beacon; a long list starts folded.
+      var listed = tunes.filter(function (name) {
+        return name !== 'Random song'; });
+      var head = el('button', 'label songs');
+      head.appendChild(el('span', null, 'Songs'));
+      head.appendChild(el('span', 'count', String(listed.length)));
+      head.appendChild(el('span', 'caret'));
+      parts.clips.appendChild(head);
+      if (tunes[0] === 'Random song') { button('Random song', parts.clips); }
+      var shelf = el('div', 'shelf');
+      listed.forEach(function (name) { button(name, shelf); });
+      parts.clips.appendChild(shelf);
+      var fold = 'songs.' + device.id;
+      var open = listed.length <= SONGS_OPEN_UP_TO;
+      try {
+        var saved = localStorage.getItem(SECTION_KEY + fold);
+        if (saved !== null) { open = saved === '1'; }
+      } catch (error) { /* storage off; the default stands */ }
+      shelf.hidden = !open;
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      head.addEventListener('click', function () {
+        var opening = shelf.hidden;
+        shelf.hidden = !opening;
+        head.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        rememberSection(fold, opening);
+      });
     }
     if (!names.length) {
       parts.clips.appendChild(el('p', 'label empty',

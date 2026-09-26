@@ -112,6 +112,15 @@ partition -- harmless while the SD card boots first.
 plain print was buffered and journalctl showed none of it. The test
 fixtures run the script via as_on_the_pi(), which drops PYTHONUNBUFFERED --
 this container sets it, and that is what hid the bug.
+2.75.0: beacon1 has ~480 songs, which made the hello ~21 KB: cut at Kodi's
+old 8 KB recvfrom it was not JSON, and past 64 KB it could not be sent. The
+Pi's hello now carries id/name/port and `listing: 'http'`; the driver then
+calls transport.listing (GET /clips). A failed listing keeps the old lists
+and warns. recvfrom is 65535 for older Pis. The card folds the songs under
+a counted "Songs" heading (open up to SONGS_OPEN_UP_TO = 12), Random song
+outside the fold, remembered per beacon as paragon.section.songs.<id>.
+Seen in beacon1's /clips: nothing between "Spirits Of Europa" and "The
+Twilight Realm" -- asked Aryez to check that range on the drive.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
