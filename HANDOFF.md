@@ -143,6 +143,12 @@ preset). Used by run_sequence_by_name, sequence_for_step (dial, phrases) and
 the remote's 'sequence' action. Snapshot collapses a family into one tile
 with runs/note; the page cancels by `runs`, and says the note instead of
 sending when runs is ''. Nested sequence steps stay exact names on purpose.
+2.78.1: Bedtime only looks ahead (Aryez). reracks.family_rerack(base, ...):
+looks_ahead(base) (base == 'bedtime', any case) -> bedtime_rerack: tomorrow's
+rerack from 20:00, today's before; every other family -> evening_rerack as in
+2.78.0. app.family_rerack(base) is the one call site for picking, refusals
+and tile notes; the Bedtime tile says "Next: ...", others "Tonight: ...".
+The unused app.evening_rerack and sequence_for_today's `now` were removed.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

@@ -218,6 +218,36 @@ def evening_rerack(week, now, day_starts=None):
     return today
 
 
+# Bedtime is for the day it leads into. From this hour to midnight it is
+# tomorrow's rerack; from midnight to this hour, today's. Aryez: "Bedtime needs
+# to always look ahead to the next day if it is triggered after 8:00 p.m.".
+BEDTIME = 'bedtime'
+BEDTIME_LOOKS_AHEAD_FROM = 20
+
+
+def bedtime_rerack(week, now):
+    """The rerack a Bedtime pressed now is for: tomorrow's from 8 pm,
+    today's before. Monday 21:30 and Tuesday 00:15 are one night, heading into
+    Tuesday, and both are Tuesday's."""
+    week = clean_week(week)
+    if now.hour >= BEDTIME_LOOKS_AHEAD_FROM:
+        return week[(now.weekday() + 1) % 7]
+    return week[now.weekday()]
+
+
+def looks_ahead(base):
+    """Whether a family is picked for tomorrow from 8 pm: Bedtime only."""
+    return (base or '').strip().lower() == BEDTIME
+
+
+def family_rerack(base, week, now, day_starts=None):
+    """Whose day a family's version is picked for: Bedtime looks ahead
+    (bedtime_rerack); every other family is the evening's (evening_rerack)."""
+    if looks_ahead(base):
+        return bedtime_rerack(week, now)
+    return evening_rerack(week, now, day_starts)
+
+
 def matching_week(tv_week):
     """Paragon TV's weekly table, as ours. The preset names are the same nine,
     so a day set to Gamma there is a day set to Gamma here."""

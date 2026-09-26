@@ -4063,8 +4063,9 @@ class TestAStepForCertainDates(unittest.TestCase):
 class TestTonightsVersionOfASequence(unittest.TestCase):
     """Aryez: Bedtime Alpha, Bedtime Omega and Bedtime Delta, and one Bedtime
     to press -- the one for the day's rerack. The name is the link; the day
-    is Paragon Home's weekly table; and until the day's Initial Shutdown it is
-    still the evening before."""
+    is Paragon Home's weekly table. Bedtime looks ahead: from 8 pm it is
+    tomorrow's, before 8 pm today's. Every other family keeps the evening
+    rule -- until the day's Initial Shutdown it is still the evening before."""
 
     # Monday 28 September 2026 onwards.
     WEEK = ['Alpha', 'Delta', 'Omega', '', 'Gamma', '', '']
@@ -4082,7 +4083,7 @@ class TestTonightsVersionOfASequence(unittest.TestCase):
 
         self.seq = sequences
         self.reracks = reracks
-        self.at(2026, 9, 28, 21, 30)  # Monday evening: Alpha
+        self.at(2026, 9, 28, 21, 30)  # Monday evening: Bedtime is Tuesday's
         self.seq.now = lambda: self.when
 
     def tearDown(self):
@@ -4092,7 +4093,8 @@ class TestTonightsVersionOfASequence(unittest.TestCase):
         import datetime
         self.when = datetime.datetime(*when)
 
-    def app(self, names=('Bedtime Alpha', 'Bedtime Omega', 'Bedtime Delta')):
+    def app(self, names=('Bedtime Alpha', 'Bedtime Omega', 'Bedtime Delta',
+                         'Wind Down Alpha', 'Wind Down Delta')):
         from paragon_home import ParagonHome
 
         app = ParagonHome()
@@ -4150,24 +4152,62 @@ class TestTonightsVersionOfASequence(unittest.TestCase):
         self.at(2026, 10, 1, 4, 1)
         self.assertEqual(evening(), '')
 
+    def test_bedtime_looks_ahead_from_eight(self):
+        """Aryez's table: Monday 7:30 pm is Monday's; Monday 9:30 pm, Tuesday
+        12:15 am and Tuesday 3 pm are all Tuesday's; Tuesday 8 pm is
+        Wednesday's."""
+        bedtime = lambda: self.reracks.bedtime_rerack(self.WEEK, self.when)
+        self.at(2026, 9, 28, 19, 59)
+        self.assertEqual(bedtime(), 'Alpha')
+        self.at(2026, 9, 28, 20, 0)
+        self.assertEqual(bedtime(), 'Delta', '8:00 pm was not look-ahead')
+        self.at(2026, 9, 28, 23, 59)
+        self.assertEqual(bedtime(), 'Delta')
+        self.at(2026, 9, 29, 0, 15)
+        self.assertEqual(bedtime(), 'Delta', 'after midnight looked back')
+        self.at(2026, 9, 29, 15, 0)
+        self.assertEqual(bedtime(), 'Delta')
+        self.at(2026, 9, 29, 20, 0)
+        self.assertEqual(bedtime(), 'Omega')
+        self.at(2026, 10, 4, 21, 0)    # Sunday night is Monday's
+        self.assertEqual(bedtime(), 'Alpha', 'the week did not wrap')
+
+    def test_only_bedtime_looks_ahead(self):
+        import paragon_tv
+
+        family = lambda base: self.reracks.family_rerack(
+            base, self.WEEK, self.when, paragon_tv.SHUTDOWN_TIMES)
+        self.assertEqual(family('Bedtime'), 'Delta')
+        self.assertEqual(family(' BEDTIME '), 'Delta')
+        self.assertEqual(family('Wind Down'), 'Alpha',
+                         'another family took the 8 pm rule')
+        self.at(2026, 9, 29, 0, 15)    # before Tuesday's 03:30 shutdown
+        self.assertEqual(family('Wind Down'), 'Alpha')
+        self.assertEqual(family('Bedtime'), 'Delta')
+
     # -- picking and running -----------------------------------------------
 
-    def test_bedtime_is_tonights_version(self):
+    def test_bedtime_is_the_version_for_the_day_it_leads_into(self):
         app = self.app()
         self.assertEqual(app.sequence_for_today('Bedtime')['name'],
+                         'Bedtime Delta')
+        self.assertEqual(app.sequence_for_today('Wind Down')['name'],
+                         'Wind Down Alpha')
+        self.at(2026, 9, 28, 19, 0)
+        self.assertEqual(app.sequence_for_today('bedtime')['name'],
                          'Bedtime Alpha')
         self.at(2026, 9, 29, 21, 0)
-        self.assertEqual(app.sequence_for_today('bedtime')['name'],
-                         'Bedtime Delta')
-        self.at(2026, 9, 30, 0, 45)    # still Tuesday's evening
         self.assertEqual(app.sequence_for_today('Bedtime')['name'],
-                         'Bedtime Delta')
+                         'Bedtime Omega')
+        self.at(2026, 9, 30, 0, 45)    # Wednesday's, after midnight too
+        self.assertEqual(app.sequence_for_today('Bedtime')['name'],
+                         'Bedtime Omega')
         self.assertEqual(app.sequence_for_today('Bedtime Omega')['name'],
                          'Bedtime Omega', 'a named version stopped being '
                                           'runnable by name')
 
     def test_a_day_with_no_version_runs_the_plain_one_or_says_so(self):
-        self.at(2026, 10, 2, 21, 0)    # Friday: Gamma, no Gamma version
+        self.at(2026, 10, 1, 21, 0)    # Thursday night: Friday's Gamma
         app = self.app()
         self.assertIsNone(app.sequence_for_today('Bedtime'))
         xbmcgui.reset()
@@ -4181,20 +4221,20 @@ class TestTonightsVersionOfASequence(unittest.TestCase):
     def test_running_it_by_name_runs_tonights(self):
         app = self.app()
         self.assertTrue(app.run_sequence_by_name('Bedtime', announce=False))
-        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', True)])
-        self.assertIsNotNone(app.last_run('Bedtime Alpha'))
+        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', False)])
+        self.assertIsNotNone(app.last_run('Bedtime Delta'))
         self.assertIsNone(app.last_run('Bedtime'))
 
-        self.at(2026, 9, 29, 22, 0)
+        self.at(2026, 9, 28, 19, 0)
         del self.recorder.calls[:]
         app.run_sequence_by_name('Bedtime', announce=False)
-        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', False)])
+        self.assertEqual(self.recorder.calls, [('turn', 'AA:BB', True)])
 
-    def test_a_dial_slot_or_phrase_for_bedtime_is_tonights(self):
+    def test_a_dial_slot_or_phrase_for_bedtime_looks_ahead_too(self):
         app = self.app()
         found = app.sequence_for_step({'kind': 'sequence',
                                        'target': 'Bedtime'}, 'Dial 3')
-        self.assertEqual(found['name'], 'Bedtime Alpha')
+        self.assertEqual(found['name'], 'Bedtime Delta')
 
 
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
@@ -20358,24 +20398,28 @@ class TestWebRemote(unittest.TestCase):
             for name in names]
         self.app._week = ['Alpha', 'Delta', '', '', '', '', '']
         self.app._week_follows_tv = False
-        when = datetime.datetime(2026, 9, 28, 21, 30)  # Monday: Alpha
+        # Monday 21:30: Bedtime is Tuesday's Delta, other families Alpha.
+        when = datetime.datetime(2026, 9, 28, 21, 30)
         real = sequence_lib.now
         sequence_lib.now = lambda: when
         self.addCleanup(setattr, sequence_lib, 'now', real)
 
     def test_a_family_is_one_tile_saying_which_is_tonights(self):
         self.bedtimes('Wake Up', 'Bedtime Alpha', 'Bedtime Omega',
-                      'Project Delta', 'Bedtime Delta')
+                      'Project Delta', 'Bedtime Delta', 'Wind Down Alpha',
+                      'Wind Down Delta')
         client = self.signed_in()
 
         tiles = client.state()['data']['sequences']
 
         self.assertEqual([t['name'] for t in tiles],
-                         ['Wake Up', 'Bedtime', 'Project Delta'])
+                         ['Wake Up', 'Bedtime', 'Project Delta', 'Wind Down'])
         bedtime = tiles[1]
-        self.assertEqual(bedtime['runs'], 'Bedtime Alpha')
-        self.assertEqual(bedtime['note'], 'Tonight: Bedtime Alpha')
+        self.assertEqual(bedtime['runs'], 'Bedtime Delta')
+        self.assertEqual(bedtime['note'], 'Next: Bedtime Delta')
         self.assertEqual(tiles[2]['runs'], 'Project Delta')
+        self.assertEqual(tiles[3]['runs'], 'Wind Down Alpha')
+        self.assertEqual(tiles[3]['note'], 'Tonight: Wind Down Alpha')
 
     def test_pressing_the_family_runs_tonights(self):
         self.bedtimes('Bedtime Alpha', 'Bedtime Delta')
@@ -20386,18 +20430,18 @@ class TestWebRemote(unittest.TestCase):
         self.assertTrue(client.act('sequence', name='Bedtime')['data']['ok'])
         deadline = time.time() + 5
         while time.time() < deadline and \
-                self.app.last_run('Bedtime Alpha') is None:
+                self.app.last_run('Bedtime Delta') is None:
             time.sleep(0.05)
 
-        self.assertIsNotNone(self.app.last_run('Bedtime Alpha'))
-        self.assertIsNone(self.app.last_run('Bedtime Delta'))
+        self.assertIsNotNone(self.app.last_run('Bedtime Delta'))
+        self.assertIsNone(self.app.last_run('Bedtime Alpha'))
 
     def test_a_family_with_nothing_for_tonight_says_so(self):
-        self.bedtimes('Bedtime Omega', 'Bedtime Delta')
+        self.bedtimes('Bedtime Omega', 'Bedtime Alpha')
         client = self.signed_in()
 
         tile = client.state()['data']['sequences'][0]
-        self.assertEqual(tile['note'], 'Nothing for Alpha')
+        self.assertEqual(tile['note'], 'Nothing for Delta')
         self.assertEqual(tile['runs'], '')
         # The page says the note rather than sending a press that would be
         # answered "Started"; and one sent anyway runs nothing.
@@ -20407,15 +20451,15 @@ class TestWebRemote(unittest.TestCase):
         import remote as remote_lib
         self.assertEqual(remote_lib.perform(self.app, 'sequence',
                                             {'name': 'Bedtime'}),
-                         {'ok': False, 'message': 'No Bedtime for Alpha'})
+                         {'ok': False, 'message': 'No Bedtime for Delta'})
         self.assertIsNone(self.app.last_run('Bedtime Omega'))
-        self.assertIsNone(self.app.last_run('Bedtime Delta'))
+        self.assertIsNone(self.app.last_run('Bedtime Alpha'))
 
     def test_a_waiting_family_tile_stops_the_one_that_is_waiting(self):
-        """The tile is "Bedtime"; what is waiting is "Bedtime Alpha". Stop
+        """The tile is "Bedtime"; what is waiting is "Bedtime Delta". Stop
         has to name that, or it stops nothing."""
         self.bedtimes('Bedtime Alpha', 'Bedtime Delta')
-        self.app.defer_sequence('Bedtime Alpha', 1, 600)
+        self.app.defer_sequence('Bedtime Delta', 1, 600)
         client = self.signed_in()
 
         tile = client.state()['data']['sequences'][0]
@@ -20448,8 +20492,8 @@ class TestWebRemote(unittest.TestCase):
         script = page[page.index('<script>') + len('<script>'):
                       page.rindex('</script>')]
         tiles = [
-            {'name': 'Bedtime', 'runs': 'Bedtime Alpha',
-             'note': 'Tonight: Bedtime Alpha', 'schedule': 'Manual',
+            {'name': 'Bedtime', 'runs': 'Bedtime Delta',
+             'note': 'Next: Bedtime Delta', 'schedule': 'Manual',
              'steps': 3, 'last': '', 'failed': 0, 'waiting': 0},
             {'name': 'Wake Up', 'runs': '', 'note': 'Nothing for Alpha',
              'schedule': '', 'steps': 0, 'last': '', 'failed': 0,
@@ -20500,7 +20544,7 @@ class TestWebRemote(unittest.TestCase):
         facts = json.loads(said.strip().splitlines()[-1])
 
         self.assertEqual(facts['subs'][0],
-                         'Tonight: Bedtime Alpha - 3 step(s) - Manual')
+                         'Next: Bedtime Delta - 3 step(s) - Manual')
         self.assertEqual(facts['subs'][1], 'Nothing for Alpha')
         self.assertEqual(facts['first'], [{'action': 'sequence',
                                            'name': 'Bedtime'}])

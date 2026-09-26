@@ -1670,13 +1670,14 @@ class ParagonHome(object):
 
     # -- tonight's version of a sequence --------------------------------------
 
-    def evening_rerack(self, now=None):
-        """The rerack whose evening it is -- see reracks.evening_rerack."""
+    def family_rerack(self, base):
+        """The rerack a family's version is chosen for -- see
+        reracks.family_rerack: Bedtime looks ahead from 8 pm."""
         import paragon_tv
 
-        return rerack_lib.evening_rerack(self.effective_week(),
-                                         now or sequence_lib.now(),
-                                         paragon_tv.SHUTDOWN_TIMES)
+        return rerack_lib.family_rerack(base, self.effective_week(),
+                                        sequence_lib.now(),
+                                        paragon_tv.SHUTDOWN_TIMES)
 
     def sequence_family(self, name):
         """The family a name heads -- "Bedtime" for "Bedtime Alpha" and its
@@ -1684,13 +1685,15 @@ class ParagonHome(object):
         return rerack_lib.variant_groups(self.sequences).get(
             (name or '').strip().lower())
 
-    def sequence_for_today(self, name, now=None):
-        """The sequence a name means now: "Bedtime" is "Bedtime Alpha" on
-        an Alpha evening, the plain "Bedtime" on a day none of its versions
-        is for, and None if there is neither. Any other name is itself."""
+    def sequence_for_today(self, name):
+        """The sequence a name means now: "Bedtime" is the version for the
+        rerack family_rerack picks (tomorrow's from 8 pm), the plain
+        "Bedtime" on a day none of its versions is for, and None if there is
+        neither. Any other name is itself."""
         family = self.sequence_family(name)
         if family is not None:
-            tonight = family['variants'].get(self.evening_rerack(now))
+            tonight = family['variants'].get(
+                self.family_rerack(family['base']))
             if tonight:
                 return self.sequence_by_name(tonight)
         return self.sequence_by_name(name)
@@ -1700,7 +1703,8 @@ class ParagonHome(object):
         if sequence is None:
             family = self.sequence_family(name)
             why = ('No %s for %s' % (family['base'],
-                                     self.evening_rerack() or 'today')
+                                     self.family_rerack(family['base'])
+                                     or 'today')
                    if family else 'No sequence named "%s"' % name)
             utils.log(why)
             if announce:

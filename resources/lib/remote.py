@@ -664,7 +664,8 @@ def perform(app, action, params, sleep_func=None, on_step=None):
             family = app.sequence_family(name)
             if family is not None:
                 return {'ok': False, 'message': 'No %s for %s' % (
-                    family['base'], app.evening_rerack() or 'today')}
+                    family['base'],
+                    app.family_rerack(family['base']) or 'today')}
             return {'ok': False, 'message': 'No sequence called "%s"' % name}
         name = sequence['name']
         if app.pending_for(name) is not None:
@@ -924,7 +925,6 @@ def _sequence_tiles(app, now):
     a press sends "Bedtime", and the box picks, so a page left open since the
     afternoon still runs the right one after midnight."""
     families = rerack_lib.variant_groups(app.sequences)
-    tonight_rerack = app.evening_rerack()
     tiles, placed = [], set()
     for sequence in app.sequences:
         base, preset = rerack_lib.split_variant(sequence.get('name', ''))
@@ -941,11 +941,16 @@ def _sequence_tiles(app, now):
         if runs is None:
             tile = {'name': family['base'], 'runs': '', 'schedule': '',
                     'steps': 0, 'last': '', 'failed': 0, 'waiting': 0,
-                    'note': 'Nothing for %s' % (tonight_rerack or 'today')}
+                    'note': 'Nothing for %s' % (
+                        app.family_rerack(family['base']) or 'today')}
         else:
             tile = _sequence_tile(app, runs, now)
             tile['name'] = family['base']
-            tile['note'] = 'Tonight: %s' % runs['name']
+            # Bedtime from 8 pm is tomorrow's, and "Tonight" would read wrong
+            # beside it; "Next" is right on either side of midnight.
+            tile['note'] = '%s: %s' % ('Next' if rerack_lib.looks_ahead(
+                family['base']) else 'Tonight',
+                                       runs['name'])
         tiles.append(tile)
     return tiles
 
