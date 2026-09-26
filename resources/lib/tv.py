@@ -986,6 +986,17 @@ def at_quiet_level(percent=None):
     return abs(percent_to_db(percent) - quiet) <= LEVEL_TOLERANCE_DB
 
 
+def at_normal_level(percent=None):
+    """Whether the volume is sitting at the normal level: what lights
+    Louder, the way at_quiet_level lights Quiet."""
+    if percent is None:
+        percent = volume_percent()
+    if percent is None:
+        return False
+    _quiet, normal = levels()
+    return abs(percent_to_db(percent) - normal) <= LEVEL_TOLERANCE_DB
+
+
 def toggle_quiet():
     """The mute button: down to the quiet level, or back up to the normal one.
 
@@ -1049,7 +1060,8 @@ def player_state():
     knows it is a pause button, a mute button that knows it is muted.
     """
     state = {'playing': False, 'paused': False, 'speed': 0,
-             'volume': None, 'muted': False, 'quiet': False}
+             'volume': None, 'muted': False, 'quiet': False,
+             'normal': False}
 
     # Shape-checked, not assumed. This is one call inside the snapshot every
     # poll builds, and an answer that is not the dict it should be would
@@ -1062,6 +1074,7 @@ def player_state():
     if 'volume' in app:
         state['volume'] = app.get('volume')
         state['quiet'] = at_quiet_level(app.get('volume'))
+        state['normal'] = at_normal_level(app.get('volume'))
     state['muted'] = bool(app.get('muted'))
 
     player = active_player()

@@ -2700,8 +2700,16 @@ button.key:active { background: var(--card-2); border-color: var(--orange); }
   text-align: center;
 }
 button.key.lit { border-color: var(--orange); color: var(--orange); }
-/* Quiet under On now, while the television is at the quiet level. */
-#tv_tuneRow button.lit { border-color: var(--orange); color: var(--orange); }
+/* Quiet under On now while the television is at the quiet level, Louder
+   while it is at the normal one: lit the way the channel you are watching
+   is, the same fill and the same near-black ink on it. Its own class rather
+   than `lit`, which a press flashes on and off -- a press would otherwise
+   put the light out until the next read. */
+#tv_tuneRow button.on {
+  background: var(--hot);
+  border-color: transparent;
+  color: #1c0a04;
+}
 
 /* -- the channel list ---------------------------------------------------- */
 
@@ -3884,7 +3892,8 @@ function renderControls() {
   mute.textContent = player.quiet ? 'Louder' : 'Quiet';
   // The one-way Quiet under On now is lit the same way: it is where the
   // volume is, not what was last pressed.
-  document.getElementById('tv_quietKey').classList.toggle('lit', !!player.quiet);
+  document.getElementById('tv_quietKey').classList.toggle('on', !!player.quiet);
+  document.getElementById('tv_louderKey').classList.toggle('on', !!player.normal);
 
   var volume = document.getElementById('tv_volNow');
   volume.textContent = (player.volume === null ||

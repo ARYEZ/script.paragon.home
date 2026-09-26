@@ -18853,6 +18853,109 @@ class TestWebRemote(unittest.TestCase):
         # is read from the page itself.
         self.assertIn('<section id="tv_jobs" hidden>', page)
 
+    def test_quiet_and_louder_light_like_the_channel_you_are_watching(self):
+        """Aryez: the active one should look like the playing channel, the
+        bright red and orange fill. Compared against that card rather than a
+        colour written here -- the point is that the two agree."""
+        import re
+
+        client = self.serve()
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+
+        def rule(selector, prop):
+            # The whole property name: `color` is not `border-color`.
+            found = re.search(re.escape(selector) + r'\s*\{[^}]*?(?<![-\w])'
+                              + re.escape(prop) + r':\s*([^;]+);', page)
+            self.assertIsNotNone(found, 'no %s for %s' % (prop, selector))
+            return found.group(1).strip()
+
+        self.assertEqual(rule('#tv_tuneRow button.on', 'background'),
+                         rule('#tvPanel .card.lit', 'background-image'))
+        ink = re.search(r'((?:#tvPanel \.card\.lit[^,{]*,\s*)*'
+                        r'#tvPanel \.card\.lit[^,{]*)\{ color: ([^;]+); \}',
+                        page).group(2)
+        self.assertEqual(rule('#tv_tuneRow button.on', 'color'), ink)
+
+    def test_the_lit_one_follows_the_volume(self):
+        """Run in the stub browser, with a class list that remembers: at the
+        quiet level Quiet is lit, at the normal one Louder, between them
+        neither -- and a press's flash does not put the light out."""
+        import subprocess
+        import tempfile
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.signed_in()
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+
+        def lit(quiet, normal):
+            television = {'ready': True, 'installed': True, 'running': True,
+                          'channel': 5, 'channel_name': 'IKON', 'art': False,
+                          'player': {'quiet': quiet, 'normal': normal,
+                                     'volume': 50},
+                          'input': {}, 'channels': [], 'now': {}, 'tasks': []}
+            seed = (
+                "var SNAPSHOT = %s;\n"
+                "global.fetch = function (path) {\n"
+                "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+                "  return Promise.resolve({status: 200, ok: true,\n"
+                "    json: function () { return Promise.resolve(body); }});\n"
+                "};\n"
+                "var plain = document.getElementById;\n"
+                "document.getElementById = function (id) {\n"
+                "  var node = plain.call(document, id);\n"
+                "  if (!node.names) {\n"
+                "    node.names = {};\n"
+                "    node.classList = {\n"
+                "      add: function (c) { node.names[c] = true; },\n"
+                "      remove: function (c) { delete node.names[c]; },\n"
+                "      contains: function (c) { return !!node.names[c]; },\n"
+                "      toggle: function (c, on) {\n"
+                "        if (on === undefined) { on = !node.names[c]; }\n"
+                "        if (on) { node.names[c] = true; } else { delete node.names[c]; }\n"
+                "        return on; } };\n"
+                "  }\n"
+                "  return node;\n"
+                "};\n" % json.dumps(dict(snapshot, tv=television)))
+            tail = (
+                "\nsetImmediate(function () { setImmediate(function () {\n"
+                "  var q = document.getElementById('tv_quietKey');\n"
+                "  var l = document.getElementById('tv_louderKey');\n"
+                "  press('quiet', q); press('louder', l);\n"
+                "  console.log(JSON.stringify([!!q.names.on, !!l.names.on]));\n"
+                "}); });\n")
+            folder = tempfile.mkdtemp()
+            try:
+                path = os.path.join(folder, 'run.js')
+                out = io.open(path, 'w', encoding='utf-8')
+                try:
+                    out.write(browser + '\n' + seed + '\n' + script + tail)
+                finally:
+                    out.close()
+                proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+                said = proc.communicate()[0].decode('utf-8', 'replace')
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self.assertEqual(proc.returncode, 0, said[:900])
+            return json.loads(said.strip().splitlines()[-1])
+
+        self.assertEqual(lit(True, False), [True, False])
+        self.assertEqual(lit(False, True), [False, True])
+        self.assertEqual(lit(False, False), [False, False])
+
     def test_quiet_and_louder_sit_under_on_now_and_are_wired(self):
         """Aryez: in place of Channel down and Channel up -- which had no
         click handler, and did nothing. data-press is what wires a key, so
@@ -20569,6 +20672,25 @@ class TestTheQuietButton(unittest.TestCase):
         """Within the tolerance is still at the level."""
         self.at(self.tv.db_to_percent(-38.5))
         self.assertTrue(self.tv.player_state()['quiet'])
+
+    def test_the_state_says_when_the_television_is_at_the_normal_level(self):
+        """What lights Louder. At neither level, neither is lit."""
+        for percent, quiet, normal in ((66.67, False, True),
+                                       (34.5, True, False),
+                                       (50.0, False, False)):
+            xbmc.reset_rpc()
+            self.at(percent)
+            state = self.tv.player_state()
+            self.assertEqual((state['quiet'], state['normal']),
+                             (quiet, normal), percent)
+
+    def test_the_normal_level_comes_from_settings(self):
+        xbmcaddon.SETTINGS['tv_normal_db'] = '-10'
+        self.at(self.tv.db_to_percent(-10))
+        self.assertTrue(self.tv.player_state()['normal'])
+        xbmc.reset_rpc()
+        self.at(66.67)
+        self.assertFalse(self.tv.player_state()['normal'])
 
 class TestTuningByNumber(unittest.TestCase):
     """Tapping a channel in the list goes to that channel.

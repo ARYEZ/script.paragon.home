@@ -98,6 +98,9 @@ FOLDS; Type on the TV deliberately is not.
 while it runs, and task_list tells the page (`any_time`), which disables
 and dims them with a line saying why. The job list redraws when the TV goes
 on or off (it is in the signature).
+2.74.1: Quiet/Louder light with class `on` (not `lit`, which a press
+flashes) in the lit channel card's fill and ink; Louder at the normal level
+via player_state()['normal'] / tv.at_normal_level.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
