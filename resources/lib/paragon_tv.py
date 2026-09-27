@@ -22,6 +22,7 @@ The one detail that matters: the day settings hold an *index*, not a name.
 as a name would silently find nothing.
 """
 
+import ast
 import os
 import re
 
@@ -279,6 +280,99 @@ def setting_ids(match=''):
     return seen
 
 
+def _literal_after(text, name, open_char, close_char):
+    """The bracketed literal that follows an assignment, ast-parsed.
+
+    Finds `name`, then the first opening bracket after it, and reads to the
+    matching close so a multi-line dict or tuple comes back whole.
+    """
+    start = text.index(name)
+    start = text.index(open_char, start)
+    depth = 0
+    for end in range(start, len(text)):
+        char = text[end]
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return ast.literal_eval(text[start:end + 1])
+    raise ValueError('unbalanced %r after %r' % (open_char, name))
+
+
+def read_source_tables():
+    """Paragon TV's real timing tables, parsed from its own source.
+
+    Paragon TV runs off hardcoded anchor and offset tables in
+    ptv_preset_timer.py, deliberately NOT off its settings page -- the time
+    fields there are a disabled display copy it ignores and Kodi never purges,
+    so a box carries stale ones for years after a change. To tell whether this
+    mirror has fallen behind, read what Paragon TV actually runs on.
+
+    Returns {'offsets', 'anchors', 'shutdowns', 'satellite_phases'}, or None
+    when the file cannot be found, read, or parsed.
+    """
+    addon = _addon()
+    if addon is None:
+        return None
+    root = _translate(addon.getAddonInfo('path'))
+    if not root:
+        return None
+    try:
+        path = os.path.join(root, 'resources', 'lib', 'ptv_preset_timer.py')
+        handle = open(path, 'r')
+        try:
+            text = handle.read()
+        finally:
+            handle.close()
+    except Exception:
+        return None
+    try:
+        return {
+            'offsets': _literal_after(text, 'self.phase_offsets', '{', '}'),
+            'anchors': _literal_after(text, 'self.anchor_times', '{', '}'),
+            'shutdowns': _literal_after(text, 'self.shutdown_times', '{', '}'),
+            'satellite_phases': _literal_after(text, 'self.satellite_phases',
+                                               '(', ')'),
+        }
+    except Exception:
+        return None
+
+
+def source_phase_times(preset, tables):
+    """Paragon TV's real phase times for a preset, from its source tables.
+
+    Worked out exactly as Paragon TV works them: a master anchors at phase 1
+    with its offsets filling phases 2-9; a satellite anchors at phase 2 with
+    its offsets filling the phases named in satellite_phases (which skip the
+    push), the maintenance phase and push having no time at all.
+    """
+    if not tables:
+        return {}
+    anchor = tables['anchors'].get(preset)
+    offsets = tables['offsets'].get(preset)
+    if not anchor or not offsets:
+        return {}
+    try:
+        hour, minute = [int(part) for part in anchor.split(':')]
+    except (ValueError, AttributeError):
+        return {}
+    start = hour * 60 + minute
+
+    if preset in SATELLITE_PRESETS:
+        fills = tuple(tables['satellite_phases'])
+        times = {2: anchor}
+    else:
+        fills = tuple(range(2, PHASE_COUNT + 1))
+        times = {1: anchor}
+    for index, offset in enumerate(offsets):
+        if index >= len(fills):
+            break
+        minutes = (start + offset) % (24 * 60)
+        times[fills[index]] = '%02d:%02d' % (minutes // 60, minutes % 60)
+    return times
+
+
 def report(preset, now):
     """Everything Paragon Home can see about one preset, and why not.
 
@@ -316,6 +410,9 @@ def report(preset, now):
                  % (shutdown_time(preset) or '(none)'))
     lines.append('')
 
+    tables = read_source_tables()
+    source = source_phase_times(preset, tables) if tables else None
+
     lines.append('Times it holds for %s:' % preset)
     found = 0
     drifted = []
@@ -325,20 +422,37 @@ def report(preset, now):
             found += 1
         lines.append('  Phase %d  %s' % (phase, at_time or '(none)'))
 
-        # Paragon TV keeps disabled copies of these on its settings page. When
-        # one disagrees, Paragon TV has moved and the tables here are stale.
-        reference = (_setting('%sPhase%dTime' % (preset, phase)) or '').strip()
-        if reference and at_time and reference != at_time:
-            drifted.append('Phase %d: Paragon TV says %s, this says %s'
-                           % (phase, reference, at_time))
+        # Checked against Paragon TV's OWN source of truth -- the anchor and
+        # offset tables in ptv_preset_timer.py -- not its settings page, whose
+        # time fields are a disabled display copy Paragon TV ignores and Kodi
+        # never purges, so a box reports stale ones long after a change.
+        if source is not None:
+            real = source.get(phase, '')
+            if real != (at_time or ''):
+                drifted.append('Phase %d: Paragon TV runs %s, this says %s'
+                               % (phase, real or '(none)', at_time or '(none)'))
 
-    if drifted:
+    if source is not None:
+        real_sd = tables['shutdowns'].get(preset) or ''
+        mine_sd = shutdown_time(preset) or ''
+        if real_sd != mine_sd:
+            drifted.append('Initial shutdown: Paragon TV runs %s, this says %s'
+                           % (real_sd or '(none)', mine_sd or '(none)'))
+
+    if source is None:
+        lines.append('')
+        lines.append("(Paragon TV's own schedule could not be read from its "
+                     'source, so this could not be checked against it.)')
+    elif drifted:
         lines.append('')
         lines.append('These no longer agree with Paragon TV:')
         for line in drifted:
             lines.append('  %s' % line)
         lines.append('Paragon TV has changed its timings and Paragon Home '
                      'needs updating to match.')
+    else:
+        lines.append('')
+        lines.append("These match Paragon TV's own schedule.")
 
     if not found:
         lines.append('')
