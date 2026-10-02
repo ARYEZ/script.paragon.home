@@ -21,6 +21,7 @@ button, a keymap or a favourite:
     RunScript(script.paragon.home,action=off,target=Living Room Strip)
     RunScript(script.paragon.home,action=command,target=Hall RM,name=TV Power)
     RunScript(script.paragon.home,action=remote)
+    RunScript(script.paragon.home,action=speeddial)
 
 `target` accepts a device name or a Govee device id; leave it out to act on
 every enabled light.
@@ -174,6 +175,21 @@ def run_action(app, params, utils):
         import remote as remote_lib
         xbmcgui.Dialog().ok('%s - web remote' % utils.ADDON_NAME,
                             remote_lib.describe())
+    elif action == 'speeddial':
+        # A fire launcher for the speed dial, used by Paragon TV's sidebar
+        # (RunScript(script.paragon.home,action=speeddial)). List the filled
+        # slots and run whichever one is picked -- the "one press from the
+        # couch" path, rather than the full management menu in the panel.
+        import speeddial as dial_lib
+        filled = dial_lib.filled(app.dial)
+        if not filled:
+            utils.force_notify('Speed dial is empty')
+        else:
+            labels = [app.dial_label(slot) for _number, slot in filled]
+            choice = xbmcgui.Dialog().select(
+                '%s - speed dial' % utils.ADDON_NAME, labels)
+            if choice >= 0:
+                app.run_dial_slot(filled[choice][0])
     elif action == 'sync':
         # The "copy from the master now" button in the settings.
         import gui
