@@ -59,6 +59,11 @@ SHARED_FILES = (
     # against this before anything goes on the wire, so a satellite without
     # it would refuse every announcement the master can make.
     'speaker_clips.json',
+    # The speed dial is a shortcut to the scenes/sequences above, so the
+    # master owns it the same way (save_dial refuses to write one on a
+    # satellite). It travels down here so a satellite's dial matches the
+    # master's rather than sitting empty.
+    'speeddial.json',
 )
 
 # What a satellite never copies: the master's reracks and its record of what
@@ -130,7 +135,8 @@ def pull(master_ip, run=None, write=None, wanted=None):
             # palette.json until the colours are first edited. Neither is a
             # problem worth showing.
             if name in ('tuya_keys.json', 'palette.json',
-                        'broadlink_codes.json', 'speaker_clips.json'):
+                        'broadlink_codes.json', 'speaker_clips.json',
+                        'speeddial.json'):
                 continue
             problems.append('%s could not be read' % name)
             continue
