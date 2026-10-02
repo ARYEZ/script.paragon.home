@@ -64,6 +64,12 @@ SHARED_FILES = (
     # satellite). It travels down here so a satellite's dial matches the
     # master's rather than sitting empty.
     'speeddial.json',
+    # The master's resolved weekly table (seven presets, not the full rerack
+    # file, which stays master-only in NEVER_SHARED). A satellite needs it to
+    # pick the same nightly variant of a dial family like "Bedtime" that the
+    # master would -- without it, "Bedtime" resolves to a satellite preset
+    # that has no variant and the press fails with "no such sequence".
+    'master_week.json',
 )
 
 # What a satellite never copies: the master's reracks and its record of what
@@ -136,7 +142,7 @@ def pull(master_ip, run=None, write=None, wanted=None):
             # problem worth showing.
             if name in ('tuya_keys.json', 'palette.json',
                         'broadlink_codes.json', 'speaker_clips.json',
-                        'speeddial.json'):
+                        'speeddial.json', 'master_week.json'):
                 continue
             problems.append('%s could not be read' % name)
             continue

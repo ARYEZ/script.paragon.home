@@ -81,6 +81,7 @@ class ParagonHome(object):
         self._reracks = None
         self._week = None
         self._week_follows_tv = None
+        self._published_week = None  # last week written to MASTER_WEEK_FILE
         self._phase_state = None
         self._palette = None
         # How many known lights failed to answer the last refresh, so the
@@ -1565,8 +1566,45 @@ class ParagonHome(object):
     def effective_week(self):
         """The table actually in force, whichever it is."""
         if self.week_follows_tv:
-            return self.tv_week()
-        return self.week
+            week = self.tv_week()
+        else:
+            week = self.week
+        # The master publishes its resolved week so satellites can resolve
+        # speed-dial families (Bedtime/Ignition/Shutdown) to the same nightly
+        # variant it would. Written only on the master, and only when it
+        # changes, so this stays a cheap side effect of a table that is read
+        # far more often than it moves.
+        if self.owns_data:
+            self._publish_master_week(week)
+        return week
+
+    def _publish_master_week(self, week):
+        """Write the master's week to MASTER_WEEK_FILE when it has changed."""
+        try:
+            week = list(week or [])
+            if week == self._published_week:
+                return
+            if utils.write_json(rerack_lib.MASTER_WEEK_FILE, {'week': week}):
+                self._published_week = week
+        except Exception as exc:
+            utils.log('Could not publish master week: %s' % exc)
+
+    def _family_week(self):
+        """The week to resolve a speed-dial family against.
+
+        On the master this is its own week. On a satellite it is the master's
+        published week (copied down in the sync), so "Bedtime" picks the same
+        variant the master would -- the satellite has no schedule of its own to
+        resolve it with, and its own TV week names satellite presets for which
+        no family variant exists. Falls back to the local week if the master
+        has not published one yet.
+        """
+        if self.owns_data:
+            return self.effective_week()
+        shared = utils.read_json(rerack_lib.MASTER_WEEK_FILE, default=None)
+        if isinstance(shared, dict) and shared.get('week'):
+            return rerack_lib.clean_week(shared.get('week'))
+        return self.effective_week()
 
     def copy_week_from_tv(self):
         """Take Paragon TV's days once, as a starting point to edit.
@@ -1675,7 +1713,7 @@ class ParagonHome(object):
         reracks.family_rerack: Bedtime looks ahead from 8 pm."""
         import paragon_tv
 
-        return rerack_lib.family_rerack(base, self.effective_week(),
+        return rerack_lib.family_rerack(base, self._family_week(),
                                         sequence_lib.now(),
                                         paragon_tv.SHUTDOWN_TIMES)
 

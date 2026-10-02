@@ -39,6 +39,10 @@ import sequences as sequence_lib
 # sequences were saved in before v2.14, and are still read once to carry
 # older setups over. Reusing either name would have this file read those.
 RERACK_FILE = 'rerack_presets.json'
+# The master publishes its resolved weekly table here (just the seven presets,
+# not the full rerack file) so satellites can pick the same nightly variant of
+# a speed-dial family like "Bedtime" without running a schedule of their own.
+MASTER_WEEK_FILE = 'master_week.json'
 RERACK_STATE_FILE = 'rerack_phase_state.json'
 
 # The same nine names, in the same order, as Paragon TV. Matching by name is
