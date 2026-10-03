@@ -67,6 +67,52 @@ def resolve_targets(app, target):
     return app.resolve_targets(target)
 
 
+def _fire_dial_via_remote(number):
+    """Fire a speed-dial slot through the live web-remote service.
+
+    The web remote runs inside the background service, where the device
+    controllers and sessions are already live, so a slot fired this way behaves
+    exactly as it does from a phone. Running it here in this cold RunScript
+    process instead rebuilds the controller from cache, which some devices (IR
+    blasters, cloud sessions) do not take to as kindly -- which is why the
+    phone remote is flawless and a cold press was not always.
+
+    Sends the API token straight up in a header and skips the PIN, the path the
+    web remote's own docs reserve for another add-on. Returns True if the
+    service accepted the job, False (so the caller can fall back to a cold run)
+    when the remote server is not running or refuses it.
+    """
+    try:
+        import json
+        import addon_utils as utils
+        import remote as remote_lib
+        try:
+            from urllib.request import Request, urlopen
+        except ImportError:
+            from urllib2 import Request, urlopen
+
+        port = utils.get_int('remote_port', remote_lib.DEFAULT_PORT)
+        token = remote_lib.ensure_token()
+        if not token:
+            return False
+        body = json.dumps({'action': 'dial', 'slot': int(number)})
+        if not isinstance(body, bytes):
+            body = body.encode('utf-8')
+        req = Request('http://127.0.0.1:%d/api/action' % port, data=body)
+        req.add_header(remote_lib.TOKEN_HEADER, token)
+        req.add_header('Content-Type', 'application/json')
+        resp = urlopen(req, timeout=5)
+        return resp.getcode() in (200, 202)
+    except Exception as exc:
+        try:
+            import addon_utils as utils
+            utils.log('speed dial via web remote failed (%s); running locally'
+                      % exc)
+        except Exception:
+            pass
+        return False
+
+
 def run_action(app, params, utils):
     """Execute a single non-interactive action. Returns True if handled."""
     action = params.get('action', '').lower()
@@ -189,7 +235,12 @@ def run_action(app, params, utils):
             choice = xbmcgui.Dialog().select(
                 '%s - speed dial' % utils.ADDON_NAME, labels)
             if choice >= 0:
-                app.run_dial_slot(filled[choice][0])
+                number = filled[choice][0]
+                # Fire it through the warm web-remote service (live device
+                # controllers, exactly as the phone remote does); fall back to
+                # running it in this cold process if that server is not up.
+                if not _fire_dial_via_remote(number):
+                    app.run_dial_slot(number)
     elif action == 'sync':
         # The "copy from the master now" button in the settings.
         import gui
