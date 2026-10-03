@@ -70,6 +70,11 @@ SHARED_FILES = (
     # master would -- without it, "Bedtime" resolves to a satellite preset
     # that has no variant and the press fails with "no such sequence".
     'master_week.json',
+    # The master's web-remote PIN and API token. A satellite carries it so it
+    # can hand a speed-dial press to the master's web remote (same API token in
+    # the header, no PIN prompt) and let the master run the slot exactly as its
+    # own web remote would. Same trusted-LAN footing as tuya_keys.json above.
+    'remote.json',
 )
 
 # What a satellite never copies: the master's reracks and its record of what
@@ -142,7 +147,7 @@ def pull(master_ip, run=None, write=None, wanted=None):
             # problem worth showing.
             if name in ('tuya_keys.json', 'palette.json',
                         'broadlink_codes.json', 'speaker_clips.json',
-                        'speeddial.json', 'master_week.json'):
+                        'speeddial.json', 'master_week.json', 'remote.json'):
                 continue
             problems.append('%s could not be read' % name)
             continue

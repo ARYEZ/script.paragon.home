@@ -67,20 +67,19 @@ def resolve_targets(app, target):
     return app.resolve_targets(target)
 
 
-def _fire_dial_via_remote(number):
-    """Fire a speed-dial slot through the live web-remote service.
+def _fire_dial_via_remote(app, number):
+    """Fire a speed-dial slot through a live web-remote service.
 
-    The web remote runs inside the background service, where the device
-    controllers and sessions are already live, so a slot fired this way behaves
-    exactly as it does from a phone. Running it here in this cold RunScript
-    process instead rebuilds the controller from cache, which some devices (IR
-    blasters, cloud sessions) do not take to as kindly -- which is why the
-    phone remote is flawless and a cold press was not always.
+    On a satellite this targets the MASTER's web remote (master_ip), so the
+    master runs the slot exactly as if it were pressed on its own web remote --
+    live device controllers and all. On the master (or a standalone) it targets
+    localhost. Either way it sends the API token straight up in a header and
+    skips the PIN, the path the web remote's own docs reserve for another
+    add-on; the master's token travels down to satellites in remote.json.
 
-    Sends the API token straight up in a header and skips the PIN, the path the
-    web remote's own docs reserve for another add-on. Returns True if the
-    service accepted the job, False (so the caller can fall back to a cold run)
-    when the remote server is not running or refuses it.
+    Returns True if the service accepted the job, False (so the caller can fall
+    back to running it locally in this cold process) when the target server is
+    unreachable or refuses it.
     """
     try:
         import json
@@ -91,6 +90,12 @@ def _fire_dial_via_remote(number):
         except ImportError:
             from urllib2 import Request, urlopen
 
+        if getattr(app, 'satellite_mode', False):
+            host = (app.master_ip or '').strip()
+            if not host:
+                return False  # no master set -- fall back to a local run
+        else:
+            host = '127.0.0.1'
         port = utils.get_int('remote_port', remote_lib.DEFAULT_PORT)
         token = remote_lib.ensure_token()
         if not token:
@@ -98,7 +103,7 @@ def _fire_dial_via_remote(number):
         body = json.dumps({'action': 'dial', 'slot': int(number)})
         if not isinstance(body, bytes):
             body = body.encode('utf-8')
-        req = Request('http://127.0.0.1:%d/api/action' % port, data=body)
+        req = Request('http://%s:%d/api/action' % (host, port), data=body)
         req.add_header(remote_lib.TOKEN_HEADER, token)
         req.add_header('Content-Type', 'application/json')
         resp = urlopen(req, timeout=5)
@@ -239,7 +244,7 @@ def run_action(app, params, utils):
                 # Fire it through the warm web-remote service (live device
                 # controllers, exactly as the phone remote does); fall back to
                 # running it in this cold process if that server is not up.
-                if not _fire_dial_via_remote(number):
+                if not _fire_dial_via_remote(app, number):
                     app.run_dial_slot(number)
     elif action == 'sync':
         # The "copy from the master now" button in the settings.
