@@ -8602,15 +8602,65 @@ class TestParagonTV(unittest.TestCase):
         # Its phase times are still knowable, because they are not per-box.
         self.assertEqual(tv.phase_time('Alpha', 2), '03:40')
 
-    def test_a_disagreeing_reference_time_is_reported_as_drift(self):
-        """Paragon TV keeps disabled copies; when one differs, we are stale."""
-        tv = self.install_tv(AlphaPhase2Time='03:40')
-        self.assertNotIn('no longer agree', tv.report('Alpha', self.SATURDAY))
+    def tv_source(self, anchors=None, shutdowns=None):
+        """A Paragon TV folder whose ptv_preset_timer.py holds this mirror's
+        own tables, with any anchors or shutdowns given changed -- Paragon TV
+        having moved since the mirror was written."""
+        import paragon_tv as mirror
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        lib = os.path.join(folder, 'resources', 'lib')
+        os.makedirs(lib)
+        anchor_times = dict(mirror.ANCHOR_TIMES, **(anchors or {}))
+        shutdown_times = dict(mirror.SHUTDOWN_TIMES, **(shutdowns or {}))
+        handle = open(os.path.join(lib, 'ptv_preset_timer.py'), 'w')
+        try:
+            handle.write('class PresetTimer(object):\n'
+                         '    def __init__(self):\n'
+                         '        self.satellite_phases = %r\n'
+                         '        self.phase_offsets = %r\n'
+                         '        self.anchor_times = %r\n'
+                         '        self.shutdown_times = %r\n'
+                         % (mirror.SATELLITE_PHASES, mirror.PHASE_OFFSETS,
+                            anchor_times, shutdown_times))
+        finally:
+            handle.close()
+        return folder
+
+    def test_drift_is_checked_against_paragon_tvs_source(self):
+        """Paragon TV runs off the tables in its source. The time fields on
+        its settings page are a disabled copy it ignores and Kodi never
+        purges, so a stale one there is not drift; a source that moved is."""
+        tv = self.install_tv()
+        xbmcaddon.install('script.paragontv', xbmcaddon.FOREIGN[
+            'script.paragontv'], path=self.tv_source())
+        self.assertIn("These match Paragon TV's own schedule",
+                      tv.report('Alpha', self.SATURDAY))
 
         tv = self.install_tv(AlphaPhase2Time='06:00')
+        xbmcaddon.install('script.paragontv', xbmcaddon.FOREIGN[
+            'script.paragontv'], path=self.tv_source())
+        text = tv.report('Alpha', self.SATURDAY)
+        self.assertNotIn('no longer agree', text,
+                         'a stale settings copy was taken for drift')
+
+        xbmcaddon.install('script.paragontv', xbmcaddon.FOREIGN[
+            'script.paragontv'], path=self.tv_source(
+                anchors={'Alpha': '04:00'}, shutdowns={'Alpha': '00:45'}))
         text = tv.report('Alpha', self.SATURDAY)
         self.assertIn('no longer agree', text)
-        self.assertIn('Paragon TV says 06:00, this says 03:40', text)
+        self.assertIn('Phase 1: Paragon TV runs 04:00, this says 03:00', text)
+        self.assertIn('Initial shutdown: Paragon TV runs 00:45, '
+                      'this says 00:30', text)
+
+    def test_an_unreadable_source_says_it_could_not_be_checked(self):
+        tv = self.install_tv()
+        xbmcaddon.install('script.paragontv', xbmcaddon.FOREIGN[
+            'script.paragontv'], path=tempfile.mkdtemp())
+        text = tv.report('Alpha', self.SATURDAY)
+        self.assertIn('could not be read from its source', text)
+        self.assertNotIn('no longer agree', text)
 
     def test_a_phase_number_out_of_range_has_no_time(self):
         tv = self.install_tv()
