@@ -85,10 +85,7 @@ def _fire_dial_via_remote(app, number):
         import json
         import addon_utils as utils
         import remote as remote_lib
-        try:
-            from urllib.request import Request, urlopen
-        except ImportError:
-            from urllib2 import Request, urlopen
+        from compat import Request, urlopen
 
         if getattr(app, 'satellite_mode', False):
             host = (app.master_ip or '').strip()
