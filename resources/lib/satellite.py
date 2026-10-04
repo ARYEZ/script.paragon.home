@@ -87,6 +87,7 @@ NEVER_SHARED = (
     'sequence_state.json',
     'rerack_state.json',
     'cycle.json',
+    'run_skips.json',
 )
 
 SSH_TIMEOUT = 5

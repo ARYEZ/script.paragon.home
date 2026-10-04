@@ -115,7 +115,8 @@ COOKIE_NAME = 'paragon_remote'
 # and every caller in the add-on arrives at the same one.
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
              'command', 'position', 'states', 'cancel_sequence', 'lock',
-             'unlock', 'pause', 'resume', 'volume', 'beacons')
+             'unlock', 'pause', 'resume', 'volume', 'beacons',
+             'skip_run', 'unskip_run')
 # A dial press can be anything a step can be, including a sequence with an hour
 # of pauses in it, so it waits like one rather than being answered inline.
 # A satellite copying from its master reads five files over SSH, each with its
@@ -529,7 +530,8 @@ def describe_job(action, params, app=None):
         if device is not None:
             target = device.name
     quoted = '"%s"' % name if name else ''
-    if action in ('sequence', 'scene', 'cancel_sequence'):
+    if action in ('sequence', 'scene', 'cancel_sequence', 'skip_run',
+                  'unskip_run'):
         return '%s %s' % (action.replace('_', ' '), quoted)
     if action == 'dial':
         return 'speed dial %s' % to_text(params.get('slot') or '?')
@@ -777,6 +779,30 @@ def perform(app, action, params, sleep_func=None, on_step=None):
             return {'ok': True, 'message': '%s stopped' % name}
         return {'ok': False, 'message': '%s is not waiting' % name}
 
+    if action in ('skip_run', 'unskip_run'):
+        # The key, not the name: "Rising" can run twice in a day, and the one
+        # skipped has to be the one the phone was showing.
+        key = to_text(params.get('key') or '')
+        if app.satellite_mode:
+            return {'ok': False,
+                    'message': 'Runs are skipped on the master box, which '
+                               'keeps the schedule'}
+        today = sequence_lib.now().date()
+        if action == 'skip_run':
+            run = app.skip_run(key)
+            if run is None:
+                return {'ok': False,
+                        'message': 'That run has already happened or moved '
+                                   '- pull to refresh'}
+            return {'ok': True, 'message': '%s will not run at %s' % (
+                run['sequence'], _clock_day(run['at'], run['when'].date(),
+                                            today))}
+        entry = app.unskip_run(key)
+        if entry is None:
+            return {'ok': False, 'message': 'That run was not being skipped'}
+        return {'ok': True, 'message': '%s will run at %s after all' % (
+            entry['sequence'], _clock(entry['at']))}
+
     if action == 'refresh':
         found, warnings = app.refresh_devices()
         if warnings and not found:
@@ -898,14 +924,73 @@ def _driver_label(app, driver_id):
         or DRIVER_LABELS.get(driver_id) or driver_id.title()
 
 
-def _sequence_tile(app, sequence, now):
+def _clock(at_time):
+    """'07:00' as it is said: 7:00 am. Only ever handed a time this add-on
+    wrote, in that shape."""
+    hour, minute = [int(part) for part in at_time.split(':')]
+    return '%d:%02d %s' % ((hour % 12) or 12, minute,
+                           'am' if hour < 12 else 'pm')
+
+
+def _clock_day(at_time, day, today):
+    return '%s %s' % (_clock(at_time),
+                      'today' if day == today else 'tomorrow')
+
+
+def _next_run(upcoming, names, today):
+    """The first of these sequences' upcoming runs, said for the tile, or
+    None if the schedule has nothing for them before the end of tomorrow."""
+    wanted = set(name.strip().lower() for name in names if name)
+    for run in upcoming:
+        if run['sequence'].strip().lower() not in wanted:
+            continue
+        when = _clock_day(run['at'], run['when'].date(), today)
+        where = ' (%s)' % run['rerack'] if run['rerack'] else ''
+        if run['skipped']:
+            text = 'Skipping %s%s' % (when, where)
+            offer = "Don't skip - run at %s" % when
+            ask = 'Run %s at %s after all?' % (run['sequence'], when)
+        else:
+            text = 'Runs %s%s' % (when, where)
+            offer = 'Skip next run - %s' % when
+            ask = 'Skip %s at %s? %s' % (
+                run['sequence'], when,
+                'The rest of the %s rerack still runs.' % run['rerack']
+                if run['rerack'] else 'Its later runs still happen.')
+        return {'key': run['key'], 'sequence': run['sequence'],
+                'skipped': bool(run['skipped']), 'text': text,
+                'offer': offer, 'ask': ask}
+    return None
+
+
+def _upcoming(app):
+    """The schedule's next two days, or nothing if it cannot be read -- a
+    tile without its next run is better than a phone with no tiles."""
+    try:
+        moment = sequence_lib.now()
+        return app.upcoming_runs(moment), moment.date()
+    except Exception as exc:
+        utils.log('Could not work out the upcoming runs: %s' % exc)
+        return [], None
+
+
+def _sequence_tile(app, sequence, now, upcoming=None, today=None):
     name = sequence.get('name', '')
+    next_run = _next_run(upcoming or [], [name], today)
+    schedule = sequence_lib.describe_schedule(sequence)
+    # "Only when you run it" was true of the sequence's own clock and wrong
+    # beside a rerack that runs it at seven.
+    if not sequence_lib.scheduled(sequence) and upcoming:
+        reracks = [run['rerack'] for run in upcoming
+                   if run['sequence'] == name and run['rerack']]
+        if reracks:
+            schedule = 'in the %s rerack' % reracks[0]
     return {'name': name,
             # The one a press runs, which is the tile's own name unless the
             # tile stands for a family -- see _sequence_tiles.
             'runs': name,
             'note': '',
-            'schedule': sequence_lib.describe_schedule(sequence),
+            'schedule': schedule,
             'steps': len(sequence_lib.filled_steps(sequence)),
             # What became of it last time. The phone is usually the only
             # place a scheduled run is ever seen from.
@@ -915,7 +1000,10 @@ def _sequence_tile(app, sequence, now):
             # 0 if it is not. The page shows the wait and offers to stop it,
             # because a sequence waiting is a sequence that has done half of
             # what it was asked and left a plug on.
-            'waiting': _waiting_for(app, name, now)}
+            'waiting': _waiting_for(app, name, now),
+            # When the schedule next runs it by itself, and whether that run
+            # is to be skipped. Held, the tile offers to skip it.
+            'next': next_run}
 
 
 def _sequence_tiles(app, now):
@@ -925,6 +1013,7 @@ def _sequence_tiles(app, now):
     a press sends "Bedtime", and the box picks, so a page left open since the
     afternoon still runs the right one after midnight."""
     families = rerack_lib.variant_groups(app.sequences)
+    upcoming, today = _upcoming(app)
     tiles, placed = [], set()
     for sequence in app.sequences:
         base, preset = rerack_lib.split_variant(sequence.get('name', ''))
@@ -932,7 +1021,7 @@ def _sequence_tiles(app, now):
             (sequence.get('name', '').strip().lower())
         family = families.get(key)
         if family is None:
-            tiles.append(_sequence_tile(app, sequence, now))
+            tiles.append(_sequence_tile(app, sequence, now, upcoming, today))
             continue
         if key in placed:
             continue
@@ -951,6 +1040,11 @@ def _sequence_tiles(app, now):
             tile['note'] = '%s: %s' % ('Next' if rerack_lib.looks_ahead(
                 family['base']) else 'Tonight',
                                        runs['name'])
+        # Any version the schedule runs, not only the one a press would: a
+        # rerack phase names "Rising Delta" itself, whatever tonight is.
+        tile['next'] = _next_run(
+            upcoming, list(family['variants'].values()) + [family['plain']],
+            today)
         tiles.append(tile)
     return tiles
 
@@ -1388,7 +1482,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_json(400, {'ok': False,
                                          'message': 'Unknown action "%s"'
                                                     % action})
-        if (action in ('sequence', 'cancel_sequence')
+        if (action in ('sequence', 'cancel_sequence', 'skip_run',
+                       'unskip_run')
                 and not remote.allow_sequences):
             return self._send_json(403, {
                 'ok': False,
@@ -2203,6 +2298,49 @@ button.tile .sub {
    button you press, not an error message. */
 button.tile.lastfailed::before { background: #ff5f5f; opacity: 1; }
 button.tile.lastfailed .sub { color: #ff5f5f; }
+
+/* When the schedule next runs a sequence by itself, under what it did last.
+   Struck through while that run is to be skipped, so a glance says it will
+   not happen without reading the word. */
+button.tile .next {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 1.3px;
+  color: var(--orange-lit);
+  margin-top: 3px;
+}
+button.tile .next.skipping { color: var(--sub); text-decoration: line-through; }
+/* Held for its menu, a tile must not select its text or open the phone's own
+   long-press menu instead. */
+button.tile { -webkit-user-select: none; user-select: none;
+              -webkit-touch-callout: none; }
+
+/* The menu a held tile opens: one offer and a way out, over a dimmed page. */
+.veil {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(10, 10, 11, .72);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+}
+.sheet {
+  width: 100%;
+  max-width: 440px;
+  background-color: var(--card);
+  background-image: var(--wash);
+  border: 1px solid var(--line-lit);
+  border-radius: 14px;
+  padding: 18px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sheet .sub { color: var(--sub); font-size: 12px; margin: 0 0 4px; }
+.sheet button { width: 100%; }
 
 button.tile.waiting { background-image: var(--hot); }
 button.tile.waiting::before { display: none; }
@@ -3424,6 +3562,8 @@ function renderSequences() {
          ? sequence.note + (sequence.runs ? ' - ' + said : '')
          : said);
     var node = tile(sequence.name, sub, function () {
+      // The lift after a hold that opened the menu is not also a press.
+      if (node.held) { node.held = false; return; }
       // A family with no version for tonight: say so here. Sent, it would
       // be answered "Started" and then quietly do nothing.
       if (!waiting && !sequence.runs) { say(sequence.note, 'bad'); return; }
@@ -3432,11 +3572,93 @@ function renderSequences() {
       act(waiting ? 'cancel_sequence' : 'sequence',
           {name: waiting ? (sequence.runs || sequence.name) : sequence.name});
     });
+    if (sequence.next) {
+      node.appendChild(el('span', sequence.next.skipped ? 'next skipping'
+                                                       : 'next',
+                          sequence.next.text));
+      wireHold(node, function () { offerRun(sequence); });
+    }
     if (waiting) { node.classList.add('waiting'); }
     if (sequence.failed) { node.classList.add('lastfailed'); }
     box.appendChild(node);
   });
   document.getElementById('sequencesBlock').hidden = !list.length;
+}
+
+/* Held for HOLD_FOR, a sequence tile opens a menu instead of running. A tap
+   is still a press; a finger that moves off, or starts a scroll, is neither.
+   The click that follows the hold is marked on the tile for its own handler
+   to drop, rather than stopped here, so there is one click listener and no
+   question of which of two runs first. */
+var HOLD_FOR = 600;
+var sheet = null;
+
+function wireHold(node, onHold) {
+  var timer = null;
+  function drop() { clearTimeout(timer); timer = null; }
+  holding.push(drop);
+  node.addEventListener('pointerdown', function (event) {
+    if (event.button) { return; }
+    drop();
+    node.held = false;
+    timer = setTimeout(function () {
+      timer = null;
+      node.held = true;
+      onHold();
+    }, HOLD_FOR);
+  });
+  node.addEventListener('pointerup', drop);
+  node.addEventListener('pointerleave', drop);
+  node.addEventListener('pointercancel', drop);
+  node.addEventListener('contextmenu', function (event) {
+    event.preventDefault();
+  });
+}
+
+/* The one thing a held sequence offers: skip its next scheduled run, or, if
+   that is already to be skipped, run it after all. Then asked again, because
+   a skipped 7 am is found out at 7 am. */
+function offerRun(sequence) {
+  var next = sequence.next;
+  if (!next) { return; }
+  closeSheet();
+  var veil = el('div', 'veil');
+  var card = el('div', 'sheet');
+  card.appendChild(el('h2', null, sequence.name));
+  card.appendChild(el('p', 'sub', next.text));
+  /* The finger that held the tile is still down when this opens, and on a
+     touchscreen its lift is a click on whatever is under it now: the veil,
+     which would close this at once, or the offer itself. So nothing here
+     answers until a press has started on it. A click from the keyboard has
+     no press before it and says so with a detail of 0. */
+  var armed = false;
+  function meant(event) { return armed || (event && event.detail === 0); }
+  veil.addEventListener('pointerdown', function () { armed = true; });
+  var offer = el('button', 'tile', next.offer);
+  offer.addEventListener('click', function (event) {
+    if (!meant(event)) { return; }
+    closeSheet();
+    if (!window.confirm(next.ask)) { return; }
+    act(next.skipped ? 'unskip_run' : 'skip_run',
+        {name: next.sequence, key: next.key});
+  });
+  var cancel = el('button', 'tile', 'Cancel');
+  cancel.addEventListener('click', function (event) {
+    if (meant(event)) { closeSheet(); }
+  });
+  card.appendChild(offer);
+  card.appendChild(cancel);
+  veil.appendChild(card);
+  veil.addEventListener('click', function (event) {
+    if (meant(event) && event.target === veil) { closeSheet(); }
+  });
+  document.body.appendChild(veil);
+  sheet = veil;
+}
+
+function closeSheet() {
+  if (sheet && sheet.parentNode) { sheet.parentNode.removeChild(sheet); }
+  sheet = null;
 }
 
 function renderPalette() {

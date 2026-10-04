@@ -1033,6 +1033,26 @@ rules govern when:
 Moving a schedule later in the same day lets it run again — the record holds
 the time as well as the date.
 
+### Skipping one run
+
+Up before the alarm? Skip the one run and keep the rest of the day. On the web
+remote, every sequence the schedule runs by itself says when it next will,
+under its name — *Runs 7:00 am today (Delta)* for a rerack phase, *Runs 6:50
+am today* for its own time — looking as far as the end of tomorrow.
+
+**Hold the tile** and it offers **Skip next run - 7:00 am today**. Choose it,
+say yes to *Skip Rising at 7:00 am today? The rest of the Delta rerack still
+runs.*, and the tile says *Skipping 7:00 am today*, struck through. When seven
+comes, that run is passed over and counted as done; everything else happens as
+usual, including Rising itself if the rerack runs it again at six in the
+evening. Hold it again before seven to **run it after all**.
+
+A tap is still a press. The skip is for that run only, kept on the master box
+— which is the one keeping the schedule — and survives a restart. A run that
+has already happened, or that the schedule has moved since the phone last
+looked, cannot be skipped; the phone says so. **Allow sequences from the
+remote** governs skipping too.
+
 ### Following Paragon TV
 
 Paragon TV has a Rerack of its own — a nine-phase preset macro system, one

@@ -4237,6 +4237,310 @@ class TestTonightsVersionOfASequence(unittest.TestCase):
         self.assertEqual(found['name'], 'Bedtime Delta')
 
 
+
+class TestSkippingOneRun(unittest.TestCase):
+    """Aryez: Rising is due at seven as part of the Delta rerack, I wake up on
+    my own at a quarter to, and I want to skip that one run and keep the rest
+    of the day. One run: the same sequence later in the day, and everything
+    else, still happen."""
+
+    MONDAY = (2026, 10, 5)      # Delta; Tuesday is Alpha
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'paragon_tv', 'reracks',
+                     'sequences', 'remote', 'gui', 'speeddial'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import reracks
+        import remote
+        import sequences
+
+        self.reracks = reracks
+        self.remote = remote
+        self.seq = sequences
+        self.at(6, 45)
+        self.seq.now = lambda: self.when
+
+    def tearDown(self):
+        clean_profile()
+
+    def at(self, hour, minute, day=0):
+        self.when = datetime.datetime(*self.MONDAY) + datetime.timedelta(
+            days=day, hours=hour, minutes=minute)
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        app.controller = self.recorder
+        app._devices = [Device('LAMP', name='Lamp', lan=True),
+                        Device('FAN', name='Fan', lan=True),
+                        Device('POT', name='Pot', lan=True)]
+        app._scenes = []
+        switch = lambda device: [{'kind': 'power', 'target': device,
+                                  'action': 'on'}]
+        app._sequences = [
+            self.seq.make_sequence('Rising', switch('LAMP')),
+            self.seq.make_sequence('Lunch', switch('FAN')),
+            self.seq.make_sequence('Coffee', switch('POT'), time='06:50',
+                                   days=list(range(7))),
+            self.seq.make_sequence('Movie', switch('FAN')),
+        ]
+        app._reracks = self.reracks.normalise_all([
+            self.reracks.make_rerack('Delta', [
+                {}, {'sequence': 'Rising', 'time': '07:00'}, {}, {},
+                {'sequence': 'Lunch', 'time': '12:00'}, {},
+                {'sequence': 'Rising', 'time': '18:00'}]),
+            self.reracks.make_rerack('Alpha', [
+                {}, {'sequence': 'Rising', 'time': '06:30'}]),
+        ])
+        app._week = ['Delta', 'Alpha', '', '', '', '', '']
+        app._week_follows_tv = False
+        return app
+
+    def upcoming(self, app):
+        return [(run['sequence'], run['at'], run['rerack'],
+                 run['when'].weekday()) for run in app.upcoming_runs()]
+
+    def key(self, app, sequence, at_time):
+        for run in app.upcoming_runs():
+            if (run['sequence'], run['at']) == (sequence, at_time):
+                return run['key']
+        self.fail('%s at %s is not upcoming' % (sequence, at_time))
+
+    def switched(self):
+        return [call[1] for call in self.recorder.calls]
+
+    def run_phases(self, app, hour, minute, day=0):
+        self.at(hour, minute, day)
+        return app.run_due_phases(now=self.when)
+
+    # -- what is coming ------------------------------------------------------
+
+    def test_the_upcoming_runs_are_the_ones_the_schedule_would_make(self):
+        """Today's rerack and tomorrow's, which differ, and own times, in the
+        order they will happen."""
+        app = self.app()
+        self.assertEqual(self.upcoming(app), [
+            ('Coffee', '06:50', '', 0), ('Rising', '07:00', 'Delta', 0),
+            ('Lunch', '12:00', 'Delta', 0), ('Rising', '18:00', 'Delta', 0),
+            ('Rising', '06:30', 'Alpha', 1), ('Coffee', '06:50', '', 1)])
+
+        self.run_phases(app, 7, 0)
+        self.at(7, 0)
+        self.assertNotIn(('Rising', '07:00', 'Delta', 0), self.upcoming(app),
+                         'a run that has happened was still offered')
+        self.at(12, 30)
+        self.assertEqual(self.upcoming(app)[0], ('Rising', '18:00', 'Delta', 0))
+
+    def test_a_sequence_with_days_of_its_own_runs_on_those_days_only(self):
+        app = self.app()
+        app._sequences.append(self.seq.make_sequence(
+            'Bins', [{'kind': 'power', 'target': 'POT', 'action': 'on'}],
+            time='07:30', days=[1]))
+        self.assertEqual([(sequence, day) for sequence, at, _r, day
+                          in self.upcoming(app) if sequence == 'Bins'],
+                         [('Bins', 1)])
+
+    def test_a_satellite_has_nothing_to_skip(self):
+        """It runs no schedule; the master does."""
+        app = self.app()
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        self.assertEqual(app.upcoming_runs(), [])
+
+    # -- skipping ------------------------------------------------------------
+
+    def test_a_skipped_phase_is_passed_over_and_the_rest_of_the_day_runs(self):
+        app = self.app()
+        self.assertEqual(app.skip_run(self.key(app, 'Rising', '07:00'))
+                         ['sequence'], 'Rising')
+
+        self.assertEqual(self.run_phases(app, 7, 0), [])
+        self.assertEqual(self.switched(), [])
+        self.assertEqual(self.run_phases(app, 7, 1), [],
+                         'the skipped run came due again a minute later')
+        self.assertEqual(app.run_skips, {}, 'the skip was not used up')
+
+        self.run_phases(app, 12, 0)
+        self.assertEqual(self.switched(), ['FAN'])
+        self.run_phases(app, 18, 0)
+        self.assertEqual(self.switched(), ['FAN', 'LAMP'],
+                         "Rising's evening run was skipped with the morning's")
+
+    def test_a_sequences_own_time_can_be_skipped_too(self):
+        app = self.app()
+        app.skip_run(self.key(app, 'Coffee', '06:50'))
+
+        self.at(6, 50)
+        self.assertEqual(app.run_due_sequences(now=self.when), [])
+        self.at(6, 51)
+        self.assertEqual(app.run_due_sequences(now=self.when), [])
+        self.assertEqual(self.switched(), [])
+
+        self.at(6, 50, day=1)
+        self.assertEqual(app.run_due_sequences(now=self.when), ['Coffee'])
+        self.assertEqual(self.switched(), ['POT'])
+
+    def test_only_a_run_still_to_come_can_be_skipped(self):
+        """The key is the run the phone was shown. One that has happened, or
+        that the schedule has since moved, is not quietly applied elsewhere."""
+        app = self.app()
+        key = self.key(app, 'Rising', '07:00')
+        self.at(7, 5)
+        self.assertIsNone(app.skip_run(key))
+        self.assertIsNone(app.skip_run('phase|Delta#2 2026-10-05 07:30'))
+        self.assertEqual(app.run_skips, {})
+
+    def test_a_skip_can_be_taken_back(self):
+        app = self.app()
+        key = self.key(app, 'Rising', '07:00')
+        app.skip_run(key)
+        self.assertEqual(app.unskip_run(key)['sequence'], 'Rising')
+        self.assertIsNone(app.unskip_run(key))
+
+        self.run_phases(app, 7, 0)
+        self.assertEqual(self.switched(), ['LAMP'])
+
+    def test_a_skip_outlives_a_restart(self):
+        app = self.app()
+        app.skip_run(self.key(app, 'Rising', '07:00'))
+
+        app = self.app()
+        self.assertTrue([run for run in app.upcoming_runs()
+                         if run['at'] == '07:00'][0]['skipped'])
+        self.run_phases(app, 7, 0)
+        self.assertEqual(self.switched(), [])
+
+    def test_a_skip_for_a_day_gone_is_cleared(self):
+        app = self.app()
+        app.run_skips['phase|Delta#2 2026-10-04 07:00'] = {
+            'sequence': 'Rising', 'date': '2026-10-04', 'at': '07:00'}
+        app.skip_run(self.key(app, 'Rising', '07:00'))
+        self.assertEqual(sorted(entry['date']
+                                for entry in app.run_skips.values()),
+                         ['2026-10-05'])
+
+    # -- the phone ------------------------------------------------------------
+
+    def tiles(self, app):
+        return dict((tile['name'], tile)
+                    for tile in self.remote._sequence_tiles(app, time.time()))
+
+    def test_a_tile_says_when_it_next_runs_by_itself(self):
+        app = self.app()
+        tiles = self.tiles(app)
+        self.assertEqual(tiles['Rising']['next']['text'],
+                         'Runs 7:00 am today (Delta)')
+        self.assertEqual(tiles['Rising']['next']['offer'],
+                         'Skip next run - 7:00 am today')
+        self.assertEqual(tiles['Coffee']['next']['text'], 'Runs 6:50 am today')
+        self.assertEqual(tiles['Lunch']['next']['text'],
+                         'Runs 12:00 pm today (Delta)')
+        self.assertIsNone(tiles['Movie']['next'], 'an unscheduled sequence '
+                                                  'claimed a next run')
+        # Run by a rerack, not by a clock of its own -- so not "only when you
+        # run it", which is still true of Movie.
+        self.assertEqual(tiles['Rising']['schedule'], 'in the Delta rerack')
+        self.assertEqual(tiles['Coffee']['schedule'], 'every day at 06:50')
+        self.assertEqual(tiles['Movie']['schedule'], 'only when you run it')
+
+        # One with a clock of its own keeps saying so, rerack or not.
+        app._reracks[[r['name'] for r in app._reracks].index('Delta')][
+            'phases'][3] = {'sequence': 'Coffee', 'time': '09:00'}
+        self.assertEqual(self.tiles(app)['Coffee']['schedule'],
+                         'every day at 06:50')
+
+        self.at(19, 0)
+        self.assertEqual(self.tiles(app)['Rising']['next']['text'],
+                         'Runs 6:30 am tomorrow (Alpha)')
+
+    def test_a_skipped_run_says_so_and_offers_it_back(self):
+        app = self.app()
+        app.skip_run(self.key(app, 'Rising', '07:00'))
+        rising = self.tiles(app)['Rising']['next']
+        self.assertTrue(rising['skipped'])
+        self.assertEqual(rising['text'], 'Skipping 7:00 am today (Delta)')
+        self.assertEqual(rising['offer'], "Don't skip - run at 7:00 am today")
+        self.assertEqual(rising['ask'], 'Run Rising at 7:00 am today after all?')
+
+    def test_the_phone_skips_the_run_it_was_shown(self):
+        app = self.app()
+        shown = self.tiles(app)['Rising']['next']
+        self.assertEqual(shown['ask'], 'Skip Rising at 7:00 am today? The '
+                                       'rest of the Delta rerack still runs.')
+
+        said = self.remote.perform(app, 'skip_run', {'name': 'Rising',
+                                                     'key': shown['key']})
+        self.assertEqual(said, {'ok': True, 'message':
+                                'Rising will not run at 7:00 am today'})
+        self.assertTrue(self.tiles(app)['Rising']['next']['skipped'])
+
+        said = self.remote.perform(app, 'unskip_run', {'name': 'Rising',
+                                                       'key': shown['key']})
+        self.assertEqual(said, {'ok': True, 'message':
+                                'Rising will run at 7:00 am after all'})
+        self.assertFalse(self.tiles(app)['Rising']['next']['skipped'])
+        said = self.remote.perform(app, 'unskip_run', {'name': 'Rising',
+                                                       'key': shown['key']})
+        self.assertEqual(said, {'ok': False,
+                                'message': 'That run was not being skipped'})
+
+        self.at(7, 5)
+        said = self.remote.perform(app, 'skip_run', {'name': 'Rising',
+                                                     'key': shown['key']})
+        self.assertFalse(said['ok'])
+        self.assertIn('already happened or moved', said['message'])
+
+    def test_a_satellite_phone_is_sent_to_the_master(self):
+        app = self.app()
+        key = self.key(app, 'Rising', '07:00')
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        said = self.remote.perform(app, 'skip_run', {'key': key})
+        self.assertFalse(said['ok'])
+        self.assertIn('master box', said['message'])
+        self.assertEqual(app.run_skips, {})
+
+    def test_a_family_tile_offers_whichever_version_runs_next(self):
+        """A phase names "Rising Delta" itself; the tile is "Rising"."""
+        app = self.app()
+        app._sequences[0] = self.seq.make_sequence('Rising Delta')
+        app._sequences.append(self.seq.make_sequence('Rising Alpha'))
+        app._reracks[[r['name'] for r in app._reracks].index('Delta')][
+            'phases'][1]['sequence'] = 'Rising Delta'
+        app._reracks[[r['name'] for r in app._reracks].index('Alpha')][
+            'phases'][1]['sequence'] = 'Rising Alpha'
+        rising = self.tiles(app)['Rising']['next']
+        self.assertEqual(rising['sequence'], 'Rising Delta')
+        self.assertEqual(rising['text'], 'Runs 7:00 am today (Delta)')
+        # Monday evening: a press is still Delta's, but what runs next is
+        # Tuesday's Alpha phase, which names the other version.
+        self.at(19, 0)
+        rising = self.tiles(app)['Rising']['next']
+        self.assertEqual(rising['sequence'], 'Rising Alpha')
+        self.assertEqual(rising['text'], 'Runs 6:30 am tomorrow (Alpha)')
+
+    def test_a_schedule_that_cannot_be_read_leaves_the_tiles_standing(self):
+        """Without their next run, but there to be pressed."""
+        app = self.app()
+
+        def broken(now=None):
+            raise ValueError('no')
+        app.upcoming_runs = broken
+        tiles = self.tiles(app)
+        self.assertEqual(sorted(tiles), ['Coffee', 'Lunch', 'Movie', 'Rising'])
+        self.assertIsNone(tiles['Rising']['next'])
+
+    def test_times_are_said_the_way_a_clock_says_them(self):
+        clock = self.remote._clock
+        self.assertEqual([clock(t) for t in ('00:30', '07:00', '12:00',
+                                             '13:05', '23:59')],
+                         ['12:30 am', '7:00 am', '12:00 pm', '1:05 pm',
+                          '11:59 pm'])
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 
@@ -20675,6 +20979,176 @@ class TestWebRemote(unittest.TestCase):
 
         self.assertEqual(answer['status'], 403)
         self.assertFalse(client.state()['data']['allow_sequences'])
+
+    def test_skipping_a_run_is_switched_off_with_sequences(self):
+        """A pocket that cannot start the morning run cannot cancel it
+        either."""
+        client = self.signed_in(allow_sequences=False)
+        for action in ('skip_run', 'unskip_run'):
+            answer = client.act(action, name='Rising', key='phase|x')
+            self.assertEqual(answer['status'], 403, action)
+            self.assertIn('switched off', answer['data']['message'])
+
+    def test_a_held_sequence_offers_to_skip_its_next_run(self):
+        """Run, not read: a held tile opens the offer instead of running, the
+        offer asks before it sends, a No sends nothing, and a tap is still a
+        press."""
+        facts = self.run_sequence_page(
+            [{'name': 'Rising', 'runs': 'Rising', 'note': '', 'schedule': '',
+              'steps': 1, 'last': '', 'failed': 0, 'waiting': 0,
+              'next': {'key': 'phase|Delta#2 2026-10-05 07:00',
+                       'sequence': 'Rising', 'skipped': False,
+                       'text': 'Runs 7:00 am today (Delta)',
+                       'offer': 'Skip next run - 7:00 am today',
+                       'ask': 'Skip Rising at 7:00 am today?'}},
+             {'name': 'Coffee', 'runs': 'Coffee', 'note': '', 'schedule': '',
+              'steps': 1, 'last': '', 'failed': 0, 'waiting': 0,
+              'next': {'key': 'own|Coffee|2026-10-05 06:50',
+                       'sequence': 'Coffee', 'skipped': True,
+                       'text': 'Skipping 6:50 am today',
+                       'offer': "Don't skip - run at 6:50 am today",
+                       'ask': 'Run Coffee at 6:50 am today after all?'}},
+             {'name': 'Movie', 'runs': 'Movie', 'note': '', 'schedule': '',
+              'steps': 1, 'last': '', 'failed': 0, 'waiting': 0,
+              'next': None}],
+            "function hold(i) {\n"
+            "  var mark = TIMERS.length;\n"
+            "  box[i].on.pointerdown({button: 0});\n"
+            "  TIMERS.slice(mark).forEach(function (fn) { fn(); });\n"
+            "  var veil = document.body.children[document.body.children.length - 1];\n"
+            "  var card = veil.children[0];\n"
+            "  card.veil = veil;\n"
+            "  return card;\n"
+            "}\n"
+            "function choose(card) {\n"
+            "  card.veil.on.pointerdown({button: 0});\n"
+            "  card.children[2].on.click({detail: 1});\n"
+            "}\n"
+            "out.lines = box.map(function (b) {\n"
+            "  return b.children[2] ? [b.children[2].className, b.children[2].textContent] : null; });\n"
+            "var card = hold(0);\n"
+            "out.offer = card.children[2].textContent;\n"
+            "card.veil.on.click({target: card.veil, detail: 1});\n"
+            "card.children[2].on.click({detail: 1});\n"
+            "out.liftKeptOpen = sheet === card.veil;\n"
+            "out.liftSent = SENT.slice(); out.liftAsked = ASKED.length;\n"
+            "choose(card); out.skip = SENT.slice(); SENT.length = 0;\n"
+            "out.asked = ASKED.slice();\n"
+            "busy = false;\n"
+            "box[0].on.click(); out.liftAfterHold = SENT.slice(); SENT.length = 0;\n"
+            "busy = false;\n"
+            "var mark = TIMERS.length;\n"
+            "box[0].on.pointerdown({button: 0}); box[0].on.pointerup({});\n"
+            "box[0].on.click(); out.tap = SENT.slice(); SENT.length = 0;\n"
+            "TIMERS.slice(mark).forEach(function (fn) { fn(); });\n"
+            "out.tapOpened = sheet !== null; SENT.length = 0;\n"
+            "busy = false; mark = TIMERS.length;\n"
+            "box[0].on.pointerdown({button: 0}); box[0].on.pointercancel({});\n"
+            "TIMERS.slice(mark).forEach(function (fn) { fn(); });\n"
+            "out.scrollOpened = sheet !== null; SENT.length = 0;\n"
+            "busy = false;\n"
+            "busy = false;\n"
+            "ANSWER = false; card = hold(1);\n"
+            "out.undoOffer = card.children[2].textContent;\n"
+            "choose(card); out.saidNo = SENT.slice(); SENT.length = 0;\n"
+            "busy = false; ANSWER = true; choose(hold(1));\n"
+            "out.undo = SENT.slice(); SENT.length = 0;\n"
+            "busy = false; card = hold(1); card.children[2].on.click({detail: 0});\n"
+            "out.keyboard = SENT.slice(); SENT.length = 0;\n"
+            "out.movieHolds = !!box[2].on.pointerdown;\n")
+
+        self.assertEqual(facts['lines'][0], ['next', 'Runs 7:00 am today (Delta)'])
+        self.assertEqual(facts['lines'][1], ['next skipping',
+                                             'Skipping 6:50 am today'])
+        self.assertIsNone(facts['lines'][2])
+        self.assertEqual(facts['offer'], 'Skip next run - 7:00 am today')
+        # The lift of the finger that held the tile lands on the menu.
+        self.assertTrue(facts['liftKeptOpen'], 'the lift closed the menu')
+        self.assertEqual((facts['liftSent'], facts['liftAsked']), ([], 0),
+                         'the lift chose the offer')
+        self.assertEqual(facts['asked'][0], 'Skip Rising at 7:00 am today?')
+        self.assertEqual(facts['skip'], [{
+            'action': 'skip_run', 'name': 'Rising',
+            'key': 'phase|Delta#2 2026-10-05 07:00'}])
+        self.assertEqual(facts['liftAfterHold'], [],
+                         'letting go of a hold also ran the sequence')
+        self.assertEqual(facts['tap'], [{'action': 'sequence',
+                                         'name': 'Rising'}])
+        self.assertFalse(facts['tapOpened'], 'a tap opened the menu late')
+        self.assertFalse(facts['scrollOpened'],
+                         'a finger that began a scroll opened the menu')
+        self.assertEqual(facts['undoOffer'], "Don't skip - run at 6:50 am today")
+        self.assertEqual(facts['saidNo'], [], 'a No still sent the skip')
+        self.assertEqual(facts['undo'], [{
+            'action': 'unskip_run', 'name': 'Coffee',
+            'key': 'own|Coffee|2026-10-05 06:50'}])
+        self.assertEqual(facts['keyboard'], facts['undo'],
+                         'a keyboard could not choose the offer')
+        self.assertFalse(facts['movieHolds'],
+                         'a tile with nothing scheduled offered a menu')
+
+    def run_sequence_page(self, tiles, body):
+        """The page's script, run in the stub browser on these tiles, then
+        `body` with `box` (the tiles), `out`, SENT, TIMERS, ASKED and ANSWER
+        to hand. Returns what `body` put in `out`."""
+        import subprocess
+
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is not installed, so the page cannot be run')
+        here = os.path.dirname(os.path.abspath(__file__))
+        handle = io.open(os.path.join(here, 'js', 'browser.js'),
+                         encoding='utf-8')
+        try:
+            browser = handle.read()
+        finally:
+            handle.close()
+
+        client = self.signed_in()
+        snapshot = client.state()['data']
+        page = client.call('GET', '/', guard=False)['body'].decode('utf-8')
+        script = page[page.index('<script>') + len('<script>'):
+                      page.rindex('</script>')]
+        seed = (
+            "var SENT = [], TIMERS = [], ASKED = [], ANSWER = true;\n"
+            "El.prototype.addEventListener = function (name, fn) {\n"
+            "  (this.on = this.on || {})[name] = fn; };\n"
+            "global.setTimeout = function (fn) { TIMERS.push(fn); "
+            "return TIMERS.length; };\n"
+            "global.clearTimeout = function (id) {\n"
+            "  if (id) { TIMERS[id - 1] = function () {}; } };\n"
+            "global.confirm = function (text) { ASKED.push(text); "
+            "return ANSWER; };\n"
+            "var SNAPSHOT = %s;\n"
+            "global.fetch = function (path, init) {\n"
+            "  if (init && init.body) { SENT.push(JSON.parse(init.body)); }\n"
+            "  var body = path.indexOf('/api/state') >= 0 ? SNAPSHOT : {ok: true};\n"
+            "  return Promise.resolve({status: 200, ok: true,\n"
+            "    json: function () { return Promise.resolve(body); }});\n"
+            "};\n" % json.dumps(dict(snapshot, allow_sequences=True,
+                                      sequences=tiles)))
+        tail = (
+            "\nsetImmediate(function () { setImmediate(function () {\n"
+            "  var box = document.getElementById('sequences').children;\n"
+            "  var out = {};\n"
+            "  SENT.length = 0;\n" + body +
+            "  console.log(JSON.stringify(out));\n"
+            "}); });\n")
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, 'run.js')
+            out = io.open(path, 'w', encoding='utf-8')
+            try:
+                out.write(browser + '\n' + seed + '\n' + script + tail)
+            finally:
+                out.close()
+            proc = subprocess.Popen([node, path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+            said = proc.communicate()[0].decode('utf-8', 'replace')
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.assertEqual(proc.returncode, 0, said[:900])
+        return json.loads(said.strip().splitlines()[-1])
 
     def test_a_second_sequence_cannot_start_inside_the_first(self):
         """The rule the scheduler already follows, kept when a phone can ask."""

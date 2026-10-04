@@ -149,6 +149,23 @@ rerack from 20:00, today's before; every other family -> evening_rerack as in
 2.78.0. app.family_rerack(base) is the one call site for picking, refusals
 and tile notes; the Bedtime tile says "Next: ...", others "Tonight: ...".
 The unused app.evening_rerack and sequence_for_today's `now` were removed.
+2.79.0: skip one scheduled run (Aryez: up at 6:45, skip Rising's 07:00, keep
+the day). app.upcoming_runs(now) lists today's and tomorrow's runs the two
+runners would make -- rerack phases (todays_rerack per day, tv_phase_times)
+and own/TV schedules (resolved_schedule) -- keyed by their "already ran" mark:
+phase_run_key(rerack stamp) / own_run_key(name, sequence stamp). A skip is
+run_skips.json {key: {sequence, date, at}} (never synced; pruned before
+today); run_due_phases / run_due_sequences mark the run as run, then
+_take_skip(key) passes over it. skip_run(key) only accepts a key still in
+upcoming_runs. Remote: tile 'next' {key, sequence, skipped, text, offer,
+ask}; actions skip_run / unskip_run (allow_sequences gate, refused on a
+satellite). Page: wireHold (600 ms) marks node.held so the lift's click is
+dropped; the offer sheet ignores clicks until a pointerdown lands on it
+(touch lift lands on the veil) or a keyboard click (detail 0). Checked in
+real Chromium with mouse and CDP touch. Also: default.py imports
+Request/urlopen from compat (py2 gate), and the drift test now builds a
+ptv_preset_timer.py instead of asserting the settings-copy behaviour bcf2ee7
+removed.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

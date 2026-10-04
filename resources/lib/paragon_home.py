@@ -13,6 +13,7 @@ one of these. Nothing here draws UI, so the same object serves a dialog-driven
 menu and a silent playback callback.
 """
 
+import datetime
 import os
 import time
 
@@ -29,6 +30,17 @@ from devices import (CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
 
 # Order must match the `values` list on the transport_mode setting.
 _TRANSPORT_MODES = [TRANSPORT_AUTO, TRANSPORT_LAN, TRANSPORT_CLOUD]
+
+
+def phase_run_key(stamp):
+    """A rerack phase's run, as a skip names it: its "already ran" mark."""
+    return 'phase|' + stamp
+
+
+def own_run_key(name, stamp):
+    """A sequence's own scheduled run, as a skip names it. The sequence's
+    "already ran" mark is only a date and time, so the name goes with it."""
+    return 'own|%s|%s' % (name, stamp)
 
 
 class ParagonHome(object):
@@ -83,6 +95,7 @@ class ParagonHome(object):
         self._week_follows_tv = None
         self._published_week = None  # last week written to MASTER_WEEK_FILE
         self._phase_state = None
+        self._run_skips = None
         self._palette = None
         # How many known lights failed to answer the last refresh, so the
         # control panel can say so rather than silently showing a short list.
@@ -1504,6 +1517,11 @@ class ParagonHome(object):
             self.sequence_state[sequence['name']] = sequence_lib.stamp(
                 sequence, moment, at_time)
             self.save_sequence_state()
+            # Marked as run first, so a skipped run is as finished as a run
+            # one and does not come due again on the next tick.
+            if self._take_skip(own_run_key(
+                    sequence['name'], self.sequence_state[sequence['name']])):
+                continue
             utils.log('Sequence "%s" is due (%s)'
                       % (sequence['name'], sequence_lib.describe_schedule(sequence)))
             self.run_sequence(sequence, announce=True, sleep_func=sleep_func,
@@ -1693,6 +1711,8 @@ class ParagonHome(object):
             # phase that fails half way must not be due again on every tick.
             self.phase_state.add(key)
             self.save_phase_state()
+            if self._take_skip(phase_run_key(key)):
+                continue
 
             sequence = self.sequence_by_name(name)
             if sequence is None:
@@ -1705,6 +1725,114 @@ class ParagonHome(object):
                               on_step=on_step, defer=True)
             ran.append('%s phase %d' % (rerack['name'], number))
         return ran
+
+    # -- skipping one run -----------------------------------------------------
+
+    @property
+    def run_skips(self):
+        """Scheduled runs to pass over when they come round, by run key --
+        see upcoming_runs. One run each: the rest of the day, and the same
+        sequence at another time, are untouched."""
+        if self._run_skips is None:
+            raw = utils.read_json(sequence_lib.SKIP_FILE, default={})
+            self._run_skips = raw if isinstance(raw, dict) else {}
+        return self._run_skips
+
+    def save_run_skips(self):
+        # A skip names its own date, so one whose day has gone can never be
+        # used and would only sit in the file: a run is marked with the date
+        # it runs on, so yesterday's skip cannot match anything today.
+        cutoff = sequence_lib.now().strftime('%Y-%m-%d')
+        for key in [key for key, entry in self.run_skips.items()
+                    if (entry or {}).get('date', '') < cutoff]:
+            del self.run_skips[key]
+        utils.write_json(sequence_lib.SKIP_FILE, self.run_skips)
+
+    def upcoming_runs(self, now=None):
+        """Every run the schedule will make by itself from now to the end of
+        tomorrow, earliest first: a phase of the day's rerack, or a sequence's
+        own time (its clock or its Paragon TV phase).
+
+        Worked out the same way the two runners decide what is due -- the same
+        rerack for the day, the same times -- so the run a phone offers to
+        skip is the run that would have happened. Only runs still ahead: one
+        is marked as run no earlier than its own time, so nothing ahead of now
+        can have run yet. Nothing on a satellite, which runs no schedule.
+        """
+        if self.satellite_mode:
+            return []
+        moment = now or sequence_lib.now()
+        runs = []
+        for offset in (0, 1):
+            day = moment + datetime.timedelta(days=offset)
+            rerack = self.todays_rerack(day)
+            if rerack is not None:
+                tv_times = self.tv_phase_times(rerack, day)
+                for number, phase in rerack_lib.filled_phases(rerack):
+                    at_time = rerack_lib.phase_time(
+                        rerack, number, tv_times.get(number, ''))
+                    if not at_time:
+                        continue
+                    stamp = rerack_lib.stamp(rerack, number, day, at_time)
+                    runs.append(self._run(phase['sequence'], day, at_time,
+                                          phase_run_key(stamp),
+                                          rerack['name']))
+            for sequence in self.sequences:
+                at_time, days = self.resolved_schedule(sequence, day)
+                if not at_time or day.weekday() not in days:
+                    continue
+                stamp = sequence_lib.stamp(sequence, day, at_time)
+                runs.append(self._run(sequence['name'], day, at_time,
+                                      own_run_key(sequence['name'], stamp),
+                                      ''))
+        runs = [run for run in runs if run['when'] > moment]
+        runs.sort(key=lambda run: run['when'])
+        return runs
+
+    def _run(self, name, day, at_time, key, rerack):
+        # Read the way sequences.due reads it, so a time it could not run at
+        # fails there first rather than being guessed at here.
+        hour, minute = [int(part) for part in at_time.split(':')]
+        when = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return {'key': key, 'sequence': name, 'at': at_time, 'when': when,
+                'rerack': rerack, 'skipped': key in self.run_skips}
+
+    def skip_run(self, key, now=None):
+        """Pass over one upcoming run. Returns the run, or None when the key
+        is not a run still to come -- it has happened, or the schedule moved
+        since the phone was drawn -- so nothing is skipped that was not the
+        run somebody was shown."""
+        for run in self.upcoming_runs(now):
+            if run['key'] == key:
+                self.run_skips[key] = {'sequence': run['sequence'],
+                                       'date': run['when'].strftime('%Y-%m-%d'),
+                                       'at': run['at']}
+                self.save_run_skips()
+                utils.log('Will skip "%s" at %s %s'
+                          % (run['sequence'], self.run_skips[key]['date'],
+                             run['at']))
+                return run
+        return None
+
+    def unskip_run(self, key):
+        """Run it after all. Returns what was being skipped, or None."""
+        entry = self.run_skips.pop(key, None)
+        if entry is not None:
+            self.save_run_skips()
+            utils.log('No longer skipping "%s" at %s %s'
+                      % (entry.get('sequence'), entry.get('date'),
+                         entry.get('at')))
+        return entry
+
+    def _take_skip(self, key):
+        """Whether this run was to be skipped, using the skip up if so."""
+        entry = self.run_skips.pop(key, None)
+        if entry is None:
+            return False
+        self.save_run_skips()
+        utils.log('Skipped "%s" at %s, as asked'
+                  % (entry.get('sequence'), entry.get('at')))
+        return True
 
     # -- tonight's version of a sequence --------------------------------------
 

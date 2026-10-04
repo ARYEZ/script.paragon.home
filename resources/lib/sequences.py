@@ -40,6 +40,11 @@ import time as time_module
 
 SEQUENCE_FILE = 'sequences.json'
 
+# Scheduled runs somebody asked to have passed over once -- "I am already up,
+# do not run Rising at seven". Kept on the box that keeps the schedule, and
+# never copied to a satellite, which runs no schedule to skip.
+SKIP_FILE = 'run_skips.json'
+
 # What sequences were called before, and the file they were saved in. Read
 # once when there is no sequences.json, so a rename does not cost anyone the
 # ones they had already built.
