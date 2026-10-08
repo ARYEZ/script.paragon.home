@@ -25,7 +25,8 @@ import sequences as sequence_lib
 import speeddial as dial_lib
 import voice as voice_lib
 import scenes as scene_lib
-from devices import (CAP_LOCK, CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
+from devices import (CAP_LOCK, CAP_PLAYBACK, CAP_POWER, DEVICE_CACHE, Device,
+                     TRANSPORT_AUTO,
                      TRANSPORT_CLOUD, TRANSPORT_LAN, build_hub)
 
 # Order must match the `values` list on the transport_mode setting.
@@ -96,6 +97,9 @@ class ParagonHome(object):
         self._published_week = None  # last week written to MASTER_WEEK_FILE
         self._phase_state = None
         self._run_skips = None
+        # Counted up by the emergency stop. A sequence running when it changes
+        # stops before its next step -- see run_sequence.
+        self.stops = 0
         self._palette = None
         # How many known lights failed to answer the last refresh, so the
         # control panel can say so rather than silently showing a short list.
@@ -958,8 +962,19 @@ class ParagonHome(object):
                 'why': why,
             })
 
+        # The emergency stop reaches a sequence already running here, whoever
+        # started it: the next step is not taken once it has been pressed.
+        stops = self.stops
+
+        def _carry_on(index, step):
+            if self.stops != stops:
+                return False
+            if on_step is not None:
+                return on_step(index, step)
+            return None
+
         done, errors = sequence_lib.run(self, flat, log_func=utils.log,
-                                      sleep_func=sleep_func, on_step=on_step,
+                                      sleep_func=sleep_func, on_step=_carry_on,
                                       start=start,
                                       defer=_defer if defer else None,
                                       states=states, on_outcome=_outcome)
@@ -1522,6 +1537,10 @@ class ParagonHome(object):
             if self._take_skip(own_run_key(
                     sequence['name'], self.sequence_state[sequence['name']])):
                 continue
+            if self.held(moment):
+                utils.log('Sequence "%s" was due, but everything is stopped'
+                          % sequence['name'])
+                continue
             utils.log('Sequence "%s" is due (%s)'
                       % (sequence['name'], sequence_lib.describe_schedule(sequence)))
             self.run_sequence(sequence, announce=True, sleep_func=sleep_func,
@@ -1716,6 +1735,10 @@ class ParagonHome(object):
             self.save_phase_state(moment)
             if self._take_skip(phase_run_key(key)):
                 continue
+            if self.held(moment):
+                utils.log('%s phase %d (%s) was due, but everything is stopped'
+                          % (rerack['name'], number, at_time))
+                continue
 
             sequence = self.sequence_by_name(name)
             if sequence is None:
@@ -1788,7 +1811,11 @@ class ParagonHome(object):
                 runs.append(self._run(sequence['name'], day, at_time,
                                       own_run_key(sequence['name'], stamp),
                                       ''))
-        runs = [run for run in runs if run['when'] > moment]
+        # The emergency stop passes over whatever falls due while it holds,
+        # so those are not runs that will happen.
+        start = max(moment, self.held_until(moment) or moment)
+        runs = [run for run in runs
+                if run['when'] > moment and run['when'] >= start]
         runs.sort(key=lambda run: run['when'])
         return runs
 
@@ -1836,6 +1863,70 @@ class ParagonHome(object):
         utils.log('Skipped "%s" at %s, as asked'
                   % (entry.get('sequence'), entry.get('at')))
         return True
+
+    # -- the emergency stop ----------------------------------------------------
+
+    def held_until(self, now=None):
+        """When things may run by themselves again, as a datetime, or None
+        if they may now."""
+        raw = (utils.read_json(sequence_lib.HOLD_FILE, default={}) or {})
+        try:
+            until = datetime.datetime.strptime(raw.get('until') or '',
+                                               '%Y-%m-%d %H:%M:%S')
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if until <= (now or sequence_lib.now()):
+            return None
+        return until
+
+    def held(self, now=None):
+        return self.held_until(now) is not None
+
+    def emergency_stop(self, now=None, minutes=sequence_lib.HOLD_MINUTES):
+        """Stop everything Paragon Home is doing by itself, now.
+
+        What is running stops before its next step; what is waiting out a
+        long pause is dropped; every beacon stops playing; and nothing runs by
+        itself -- schedule, rerack, door -- until `minutes` have passed or it
+        is let go. Anything that comes due meanwhile is passed over rather
+        than run late. Running one by hand still works: that is somebody
+        choosing to.
+
+        Aryez, 05:01: Rising running back to back, and the phone could stop
+        only the run in front of it, not the next one.
+        """
+        moment = now or sequence_lib.now()
+        until = moment + datetime.timedelta(minutes=minutes)
+        utils.write_json(sequence_lib.HOLD_FILE,
+                         {'until': until.strftime('%Y-%m-%d %H:%M:%S')})
+        self.stops += 1
+        dropped = [entry['name'] for entry in self.pending_sequences]
+        self._write_pending([])
+        from speaker_driver import STOP
+
+        quietened = 0
+        for device in self.enabled_devices:
+            if CAP_PLAYBACK not in self.controller.capabilities(device):
+                continue
+            try:
+                self.controller.send_command(device, STOP)
+                quietened += 1
+            except Exception as exc:
+                utils.log('Emergency stop: %s did not stop: %s'
+                          % (device.name, exc))
+        utils.log('Emergency stop until %s: %d waiting dropped (%s), %d '
+                  'beacon(s) stopped' % (until.strftime('%H:%M'), len(dropped),
+                                         ', '.join(dropped) or 'none',
+                                         quietened))
+        return until
+
+    def let_go(self):
+        """Let things run by themselves again. True if they were held."""
+        was = self.held()
+        utils.write_json(sequence_lib.HOLD_FILE, {})
+        if was:
+            utils.log('Emergency stop let go: running by itself again')
+        return was
 
     # -- a door that runs a sequence ----------------------------------------
 
@@ -1891,6 +1982,9 @@ class ParagonHome(object):
         waiting = [sequence for sequence, lock, on in self.door_sequences()
                    if lock == device_id and on == event]
         if not waiting:
+            return []
+        if self.held(now):
+            utils.log('%s %s, but everything is stopped' % (name, event))
             return []
         if event == sequence_lib.DOOR_UNLOCKED and self.door_quiet(now):
             utils.log('%s unlocked in quiet hours: not running %s'

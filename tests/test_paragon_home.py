@@ -4822,6 +4822,234 @@ class TestTheDoorWatch(unittest.TestCase):
         self.assertEqual(tiles['Goodnight']['schedule'],
                          'only when you run it')
 
+
+class TestTheEmergencyStop(unittest.TestCase):
+    """Aryez, 05:01: Rising running back to back, and the phone could stop
+    only the run in front of it. One button that stops everything Paragon
+    Home is doing by itself, and keeps it stopped long enough to matter."""
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'reracks',
+                     'remote', 'service', 'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import reracks
+        import remote
+        import sequences
+
+        self.seq = sequences
+        self.reracks = reracks
+        self.remote = remote
+        self.when = datetime.datetime(2026, 10, 9, 6, 59, 30)  # a Friday
+        self.seq.now = lambda: self.when
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        caps = {'LAMP': {CAP_POWER, CAP_STATE}, 'FAN': {CAP_POWER, CAP_STATE},
+                'BEACON': {CAP_COMMANDS, CAP_STATE, 'playback'},
+                'LK1': {CAP_LOCK, CAP_STATE}}
+        self.recorder.capabilities = lambda d: caps[d.device_id]
+        app.controller = self.recorder
+        app._devices = [Device('LAMP', name='Lamp', lan=True),
+                        Device('FAN', name='Fan', lan=True),
+                        Device('BEACON', name='Bedroom', driver='speaker'),
+                        Device('LK1', name='Front Door', driver='switchbot',
+                               cloud=True)]
+        app._scenes = []
+        on = lambda device: {'kind': 'power', 'target': device,
+                             'action': 'on'}
+        app._sequences = [
+            self.seq.make_sequence('Rising', [on('LAMP'), on('FAN'),
+                                              on('LAMP')]),
+            self.seq.make_sequence('Coffee', [on('FAN')], time='07:00',
+                                   days=list(range(7))),
+            self.seq.make_sequence('Welcome', [on('LAMP')],
+                                   door={'device': 'LK1', 'on': 'unlocked'}),
+        ]
+        app._reracks = self.reracks.normalise_all([
+            self.reracks.make_rerack('Alpha', [
+                {}, {'sequence': 'Rising', 'time': '07:00'}])])
+        app._week = ['Alpha'] * 7
+        app._week_follows_tv = False
+        app._phase_state = set()
+        return app
+
+    def at(self, hour, minute, second=0):
+        self.when = datetime.datetime(2026, 10, 9, hour, minute, second)
+        return self.when
+
+    def turned(self):
+        return [call[1] for call in self.recorder.calls if call[0] == 'turn']
+
+    # -- what it stops --------------------------------------------------------
+
+    def test_a_running_sequence_stops_before_its_next_step(self):
+        app = self.app()
+        real = self.recorder.turn
+
+        def pressed_during_the_first_step(device, on):
+            real(device, on)
+            if len(self.recorder.calls) == 1:
+                app.emergency_stop()
+        self.recorder.turn = pressed_during_the_first_step
+        app.run_sequence(app.sequence_by_name('Rising'), announce=False)
+        self.assertEqual(self.turned(), ['LAMP'])
+
+    def test_a_stop_pressed_during_a_pause_takes_the_next_step_away(self):
+        app = self.app()
+        app._sequences[0]['steps'][0]['pause'] = 5
+        app.run_sequence(app.sequence_by_name('Rising'), announce=False,
+                         sleep_func=lambda seconds: app.emergency_stop())
+        self.assertEqual(self.turned(), ['LAMP'])
+
+    def test_kodi_closing_still_stops_a_sequence_part_way(self):
+        """The stop is checked before each step alongside the caller's own
+        check -- the service's "is Kodi closing" -- not instead of it."""
+        app = self.app()
+        app.run_sequence(app.sequence_by_name('Rising'), announce=False,
+                         on_step=lambda index, step: index == 0)
+        self.assertEqual(self.turned(), ['LAMP'])
+
+    def test_a_beacon_that_cannot_be_reached_does_not_stop_the_stop(self):
+        app = self.app()
+        app._devices.insert(0, Device('BEACON2', name='Kitchen',
+                                      driver='speaker'))
+        caps = self.recorder.capabilities
+        self.recorder.capabilities = lambda d: (
+            {CAP_COMMANDS, 'playback'} if d.device_id == 'BEACON2' else caps(d))
+        real = self.recorder.send_command
+
+        def unplugged(device, name):
+            if device.device_id == 'BEACON2':
+                raise ControlError('Kitchen is not answering')
+            return real(device, name)
+        self.recorder.send_command = unplugged
+        app.emergency_stop()
+        self.assertTrue(app.held())
+        self.assertEqual(self.recorder.calls, [('command', 'BEACON', 'Stop')])
+
+    def test_a_sequence_started_after_the_stop_runs_whole(self):
+        """The stop is for what was going, not a switch that stays thrown."""
+        app = self.app()
+        app.emergency_stop()
+        app.run_sequence(app.sequence_by_name('Rising'), announce=False)
+        self.assertEqual(self.turned(), ['LAMP', 'FAN', 'LAMP'])
+
+    def test_waiting_sequences_are_dropped_and_beacons_go_quiet(self):
+        app = self.app()
+        app.defer_sequence('Rising', 1, 600)
+        app.defer_sequence('Coffee', 1, 900)
+        app.emergency_stop()
+        self.assertEqual(app.pending_sequences, [])
+        self.assertEqual(self.recorder.calls, [('command', 'BEACON', 'Stop')],
+                         'only beacons are told to stop, and nothing else is '
+                         'touched')
+
+    # -- and keeps it stopped -------------------------------------------------
+
+    def test_nothing_runs_by_itself_for_fifteen_minutes(self):
+        app = self.app()
+        until = app.emergency_stop()
+        self.assertEqual(until, datetime.datetime(2026, 10, 9, 7, 14, 30))
+        self.at(7, 0)
+        self.assertEqual(app.run_due_phases(now=self.when), [])
+        self.assertEqual(app.run_due_sequences(now=self.when), [])
+        self.assertEqual(app.door_event('LK1', 'unlocked'), [])
+        self.assertEqual(self.recorder.calls,
+                         [('command', 'BEACON', 'Stop')])
+        self.at(7, 14, 29)
+        self.assertTrue(app.held())
+        self.at(7, 14, 30)
+        self.assertFalse(app.held(), 'still held at the minute it let go')
+
+    def test_what_came_due_while_stopped_is_not_run_late(self):
+        app = self.app()
+        app.emergency_stop(minutes=1)
+        self.at(7, 0)
+        app.run_due_phases(now=self.when)
+        app.run_due_sequences(now=self.when)
+        self.at(7, 2)
+        self.assertFalse(app.held())
+        self.assertEqual(app.run_due_phases(now=self.when), [])
+        self.assertEqual(app.run_due_sequences(now=self.when), [])
+        self.assertEqual(self.turned(), [])
+
+    def test_the_phone_does_not_promise_a_run_the_stop_will_pass_over(self):
+        app = self.app()
+        self.at(6, 50)
+        app.emergency_stop(minutes=5)          # until 06:55
+        self.assertEqual([(r['sequence'], r['at']) for r in
+                          app.upcoming_runs()][:2],
+                         [('Rising', '07:00'), ('Coffee', '07:00')])
+        app.emergency_stop(minutes=30)         # until 07:20
+        self.assertEqual([(r['sequence'], r['at'], r['when'].day) for r in
+                          app.upcoming_runs()][:1], [('Rising', '07:00', 10)],
+                         "a run inside the stop was still offered")
+
+    def test_running_one_by_hand_still_works(self):
+        app = self.app()
+        app.emergency_stop()
+        self.assertTrue(app.run_sequence_by_name('Coffee', announce=False))
+        self.assertEqual(self.turned(), ['FAN'])
+
+    def test_it_can_be_let_go_early_and_outlives_a_restart(self):
+        app = self.app()
+        app.emergency_stop()
+        self.assertTrue(self.app().held(), 'a restart let it go')
+        self.assertTrue(app.let_go())
+        self.assertFalse(app.held())
+        self.assertFalse(app.let_go())
+        self.at(7, 0)
+        self.assertEqual(app.run_due_phases(now=self.when), ['Alpha phase 2'])
+
+    def test_the_service_stops_waiting_out_a_pause(self):
+        import service
+
+        app = self.app()
+        svc = service.GoveeService()
+        svc._app = app
+        ticks = []
+
+        def tick():
+            ticks.append(1)
+            if len(ticks) == 2:
+                app.emergency_stop()
+        svc._tick = tick
+        self.assertFalse(svc._pause(30))
+        self.assertEqual(len(ticks), 2, 'the pause was sat out after a stop')
+
+    # -- the phone ------------------------------------------------------------
+
+    def test_the_phone_stops_everything_and_lets_go(self):
+        app = self.app()
+        said = self.remote.perform(app, 'stop_all', {})
+        self.assertEqual(said, {'ok': True, 'message':
+                                'Stopped. Nothing runs by itself until '
+                                '7:14 am'})
+        self.assertEqual(self.remote._held_until(app), '7:14 am')
+        self.assertEqual(self.remote.perform(app, 'let_go', {}),
+                         {'ok': True, 'message': 'Running by itself again'})
+        self.assertEqual(self.remote._held_until(app), '')
+        self.assertEqual(self.remote.perform(app, 'let_go', {}),
+                         {'ok': True, 'message': 'Nothing was stopped'})
+
+    def test_a_satellite_phone_is_sent_to_the_master(self):
+        app = self.app()
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        said = self.remote.perform(app, 'stop_all', {})
+        self.assertFalse(said['ok'])
+        self.assertIn('master box', said['message'])
+        self.assertFalse(app.held())
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 
@@ -21310,6 +21538,43 @@ class TestWebRemote(unittest.TestCase):
             self.assertEqual(answer['status'], 403, action)
             self.assertIn('switched off', answer['data']['message'])
 
+    def test_the_stop_button_is_never_switched_off(self):
+        """Turning sequences off for the remote keeps a pocket from
+        starting things. Stopping them must still work."""
+        client = self.signed_in(allow_sequences=False)
+        answer = client.act('stop_all')
+        self.assertEqual(answer['status'], 200)
+        self.assertTrue(answer['data']['ok'])
+        self.assertTrue(self.app.held())
+        self.assertTrue(client.state()['data']['held_until'])
+
+    def test_the_stop_button_asks_then_stops_and_then_offers_to_let_go(self):
+        """Run, not read."""
+        def bar(held, answer):
+            facts = self.run_sequence_page([], (
+                "ANSWER = %s;\n"
+                "var bar = document.getElementById('stopAll');\n"
+                "out.text = bar.textContent; out.cls = bar.className;\n"
+                "out.hidden = bar.hidden;\n"
+                "bar.onclick(); out.sent = SENT.slice();\n"
+                "out.asked = ASKED.slice();\n" % answer),
+                extra={'held_until': held})
+            return facts
+
+        facts = bar('', 'true')
+        self.assertFalse(facts['hidden'])
+        self.assertEqual(facts['text'], 'Stop all sequences')
+        self.assertIn('nothing runs by itself for 15 minutes',
+                      facts['asked'][0])
+        self.assertEqual(facts['sent'], [{'action': 'stop_all'}])
+
+        self.assertEqual(bar('', 'false')['sent'], [], 'a No still stopped')
+
+        facts = bar('7:14 am', 'true')
+        self.assertEqual(facts['text'], 'Stopped until 7:14 am - tap to resume')
+        self.assertEqual(facts['cls'], 'stopall held')
+        self.assertEqual(facts['sent'], [{'action': 'let_go'}])
+
     def test_a_held_sequence_offers_to_skip_its_next_run(self):
         """Run, not read: a held tile opens the offer instead of running, the
         offer asks before it sends, a No sends nothing, and a tap is still a
@@ -21408,7 +21673,7 @@ class TestWebRemote(unittest.TestCase):
         self.assertFalse(facts['movieHolds'],
                          'a tile with nothing scheduled offered a menu')
 
-    def run_sequence_page(self, tiles, body):
+    def run_sequence_page(self, tiles, body, extra=None):
         """The page's script, run in the stub browser on these tiles, then
         `body` with `box` (the tiles), `out`, SENT, TIMERS, ASKED and ANSWER
         to hand. Returns what `body` put in `out`."""
@@ -21447,7 +21712,7 @@ class TestWebRemote(unittest.TestCase):
             "  return Promise.resolve({status: 200, ok: true,\n"
             "    json: function () { return Promise.resolve(body); }});\n"
             "};\n" % json.dumps(dict(snapshot, allow_sequences=True,
-                                      sequences=tiles)))
+                                      sequences=tiles, **(extra or {}))))
         tail = (
             "\nsetImmediate(function () { setImmediate(function () {\n"
             "  var box = document.getElementById('sequences').children;\n"

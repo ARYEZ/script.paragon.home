@@ -444,6 +444,7 @@ class GoveeService(xbmc.Monitor):
         """
         started = time.time()
         remaining = float(seconds or 0)
+        stops = self.app.stops
         try:
             while remaining > 0:
                 slice_length = min(PAUSE_SLICE_SECONDS, remaining)
@@ -451,6 +452,11 @@ class GoveeService(xbmc.Monitor):
                     return True
                 remaining -= slice_length
                 self._tick()
+                # The emergency stop, pressed on the phone during this pause
+                # (the tick above is what heard it): no need to sit out the
+                # rest, as the next step will not be taken.
+                if self.app.stops != stops:
+                    break
             return False
         finally:
             self._blocked_for += time.time() - started

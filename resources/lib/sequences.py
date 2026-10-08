@@ -45,6 +45,11 @@ SEQUENCE_FILE = 'sequences.json'
 # never copied to a satellite, which runs no schedule to skip.
 SKIP_FILE = 'run_skips.json'
 
+# Until when nothing runs by itself, after the emergency stop on the phone.
+# Kept on the box that keeps the schedule.
+HOLD_FILE = 'automation_hold.json'
+HOLD_MINUTES = 15
+
 # What sequences were called before, and the file they were saved in. Read
 # once when there is no sequences.json, so a rename does not cost anyone the
 # ones they had already built.

@@ -116,7 +116,7 @@ COOKIE_NAME = 'paragon_remote'
 IMMEDIATE = ('on', 'off', 'toggle', 'brightness', 'color', 'temp', 'scene',
              'command', 'position', 'states', 'cancel_sequence', 'lock',
              'unlock', 'pause', 'resume', 'volume', 'beacons',
-             'skip_run', 'unskip_run')
+             'skip_run', 'unskip_run', 'stop_all', 'let_go')
 # A dial press can be anything a step can be, including a sequence with an hour
 # of pauses in it, so it waits like one rather than being answered inline.
 # A satellite copying from its master reads five files over SSH, each with its
@@ -779,6 +779,22 @@ def perform(app, action, params, sleep_func=None, on_step=None):
             return {'ok': True, 'message': '%s stopped' % name}
         return {'ok': False, 'message': '%s is not waiting' % name}
 
+    if action in ('stop_all', 'let_go'):
+        # Not behind "Allow sequences from the remote": that keeps a pocket
+        # from starting things, and this only ever stops them.
+        if app.satellite_mode:
+            return {'ok': False,
+                    'message': 'Stop it on the master box, which runs the '
+                               'schedule'}
+        if action == 'stop_all':
+            until = app.emergency_stop()
+            return {'ok': True, 'message': 'Stopped. Nothing runs by itself '
+                                           'until %s' % _clock(
+                                               until.strftime('%H:%M'))}
+        if app.let_go():
+            return {'ok': True, 'message': 'Running by itself again'}
+        return {'ok': True, 'message': 'Nothing was stopped'}
+
     if action in ('skip_run', 'unskip_run'):
         # The key, not the name: "Rising" can run twice in a day, and the one
         # skipped has to be the one the phone was showing.
@@ -963,6 +979,13 @@ def _next_run(upcoming, names, today):
     return None
 
 
+def _held_until(app):
+    if app.satellite_mode:
+        return ''
+    until = app.held_until()
+    return _clock(until.strftime('%H:%M')) if until is not None else ''
+
+
 def _upcoming(app):
     """The schedule's next two days, or nothing if it cannot be read -- a
     tile without its next run is better than a phone with no tiles."""
@@ -1094,6 +1117,9 @@ def snapshot(app, states=None, allow_sequences=True):
             'master': app.master_ip if app.satellite_mode else '',
         },
         'allow_sequences': bool(allow_sequences),
+        # When the emergency stop lets go, as it is said, or '' if it is not
+        # holding anything. Never on a satellite, which has nothing to stop.
+        'held_until': _held_until(app),
         # So the page can leave the button off rather than show one that always
         # answers with a refusal.
         'allow_unlock': bool(getattr(app.controller, 'allow_unlock', False)),
@@ -2321,6 +2347,23 @@ button.tile .next.skipping { color: var(--sub); text-decoration: line-through; }
 button.tile { -webkit-user-select: none; user-select: none;
               -webkit-touch-callout: none; }
 
+/* The emergency stop. Red and full width, above everything on the Home tab
+   and outside the sections, so folding one can never hide it. Held, it goes
+   amber and says until when, and a tap lets go. */
+button.stopall {
+  display: block;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 13px 14px;
+  background: #b3121b;
+  color: #fff;
+  border: 1px solid #e01b24;
+  border-radius: 10px;
+  letter-spacing: 2px;
+}
+button.stopall.held { background: #3a2a0c; border-color: #f0a020;
+                      color: #f6c35a; }
+
 /* The menu a held tile opens: one offer and a way out, over a dimmed page. */
 .veil {
   position: fixed;
@@ -3037,6 +3080,7 @@ button.chan {
 
   <div class="wrap">
    <div id="homePanel">
+   <button id="stopAll" class="stopall" hidden>Stop all sequences</button>
    <div class="deck">
 
     <div class="pane">
@@ -3588,6 +3632,31 @@ function renderSequences() {
     box.appendChild(node);
   });
   document.getElementById('sequencesBlock').hidden = !list.length;
+}
+
+/* The emergency stop. Asked first, because it drops waiting sequences and a
+   tap meant for a tile next to it should not cost a coffee half made. */
+function renderStop() {
+  var button = document.getElementById('stopAll');
+  var held = state.held_until || '';
+  var master = !(state.satellite && state.satellite.mode);
+  button.hidden = !master;
+  button.className = held ? 'stopall held' : 'stopall';
+  button.textContent = held ? 'Stopped until ' + held + ' - tap to resume'
+                            : 'Stop all sequences';
+  button.onclick = function () {
+    if (held) {
+      if (window.confirm('Let sequences run by themselves again now?')) {
+        act('let_go', {});
+      }
+      return;
+    }
+    if (window.confirm('Stop everything? Running sequences stop, waiting '
+                       + 'ones are dropped, beacons go quiet, and nothing '
+                       + 'runs by itself for 15 minutes.')) {
+      act('stop_all', {});
+    }
+  };
 }
 
 /* Held for HOLD_FOR, a sequence tile opens a menu instead of running. A tap
@@ -4850,6 +4919,7 @@ function render() {
   } else {
     badge.hidden = true;
   }
+  renderStop();
   renderScenes();
   renderSequences();
   renderPalette();

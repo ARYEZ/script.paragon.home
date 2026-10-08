@@ -1053,6 +1053,24 @@ has already happened, or that the schedule has moved since the phone last
 looked, cannot be skipped; the phone says so. **Allow sequences from the
 remote** governs skipping too.
 
+### The emergency stop
+
+At the top of the web remote's Home tab, **Stop all sequences**. Asked first,
+then it stops everything Paragon Home is doing by itself:
+
+* a sequence that is running stops before its next step;
+* a sequence waiting out a long pause is dropped;
+* every beacon stops playing;
+* and nothing runs **by itself** — schedule, rerack phase or door — for
+  **15 minutes**. Anything that comes due meanwhile is passed over, not run
+  late, and the tiles show the first run after the stop instead.
+
+The bar then reads *Stopped until 7:14 am - tap to resume*; tap it to let go
+early. Running a sequence by hand still works while it holds — that is
+somebody choosing to. The stop is never switched off by **Allow sequences from
+the remote**, which keeps a pocket from starting things, not stopping them. It
+is kept on the master and outlives a restart.
+
 ### Run by a door
 
 A sequence can run when a SwitchBot lock is **unlocked** — by its key, the

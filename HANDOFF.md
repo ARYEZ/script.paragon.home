@@ -185,6 +185,15 @@ dropped first -- including the one just written -- and the phase re-ran on
 every check for its 5-minute catch-up window (Aryez, Rising at 05:00).
 reracks.recent_marks keeps marks by the date inside them, relative to the
 runner's moment (save_phase_state(now)), so today's mark is always kept.
+2.81.0: emergency stop (Aryez, after the 05:00 loop). app.emergency_stop():
+automation_hold.json {until} (+15 min, never synced), app.stops += 1 (run_
+sequence wraps on_step so a running sequence stops before its next step,
+whoever started it; service._pause breaks early), pending dropped, Stop sent
+to every CAP_PLAYBACK device. While held(), run_due_sequences/_phases mark
+due runs as run and pass over them, door_event returns [], upcoming_runs
+omits runs inside the hold. Manual runs are not held. Remote: stop_all /
+let_go, not behind allow_sequences; snapshot held_until; red #stopAll bar
+above the Home sections (renderStop). Checked in real Chromium.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
