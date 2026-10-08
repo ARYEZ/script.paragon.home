@@ -1667,10 +1667,13 @@ class ParagonHome(object):
             self._phase_state = set(raw if isinstance(raw, list) else [])
         return self._phase_state
 
-    def save_phase_state(self):
+    def save_phase_state(self, now=None):
         # Kept to a few days' worth: a phase key names its own date, so an old
-        # one can never match again and would only grow the file forever.
-        keys = sorted(self.phase_state)[-200:]
+        # one can never match again and would only grow the file forever. By
+        # date, and against the moment the runner was asked about -- see
+        # reracks.recent_marks for what keeping "the last 200" did.
+        keys = rerack_lib.recent_marks(
+            self.phase_state, (now or sequence_lib.now()).date())
         self._phase_state = set(keys)
         utils.write_json(rerack_lib.RERACK_STATE_FILE, keys)
 
@@ -1710,7 +1713,7 @@ class ParagonHome(object):
             # Marked before running, for the same reason a sequence is: a
             # phase that fails half way must not be due again on every tick.
             self.phase_state.add(key)
-            self.save_phase_state()
+            self.save_phase_state(moment)
             if self._take_skip(phase_run_key(key)):
                 continue
 

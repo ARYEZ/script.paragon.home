@@ -33,6 +33,9 @@ take its word for everything else.
 A weekly table says which rerack a day gets, exactly as Paragon TV's does.
 """
 
+import datetime
+import re
+
 import sequences as sequence_lib
 
 # Deliberately not reracks.json or rerack_state.json: those were what
@@ -319,6 +322,32 @@ def stamp(rerack, number, now, at_time):
     """The key that says this phase has already run today."""
     return '%s#%d %04d-%02d-%02d %s' % (rerack.get('name'), number,
                                         now.year, now.month, now.day, at_time)
+
+
+# The date in a phase's "already ran" mark: 'Alpha#5 2026-10-09 05:00'.
+_MARK_DATE = re.compile(r' (\d{4}-\d{2}-\d{2}) \d{2}:\d{2}$')
+MARK_DAYS = 3
+
+
+def recent_marks(marks, today, days=MARK_DAYS):
+    """The "already ran" marks worth keeping: today's and the last few
+    days', judged by the date in each.
+
+    Never by sorting them and keeping the last so many. A mark begins with
+    the rerack's name, so sorted they run Alpha, Delta, Omega -- and keeping
+    the last two hundred threw away Alpha's first, including the one just
+    written for the phase that had just started. On an Alpha day, once three
+    weeks of marks had built up, Rising at 05:00 ran every few seconds until
+    its catch-up window closed. The mark for today has today's date and so is
+    always kept, however many there are.
+    """
+    cutoff = (today - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+    kept = []
+    for mark in marks:
+        found = _MARK_DATE.search(mark)
+        if found and found.group(1) >= cutoff:
+            kept.append(mark)
+    return kept
 
 
 def due_phases(rerack, now, state, tv_times=None, grace=0):

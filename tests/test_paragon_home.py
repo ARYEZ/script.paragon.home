@@ -8552,6 +8552,46 @@ class TestReracks(unittest.TestCase):
                          list(paragon_tv.PRESET_NAMES))
         self.assertIn('Zeta', self.reracks.PRESET_NAMES)
 
+    def test_a_phase_runs_once_however_long_the_history(self):
+        """Aryez, 05:00: Rising ran five times back to back until the box was
+        rebooted. Three weeks of "already ran" marks had built up, the save
+        kept the last two hundred sorted -- Alpha's sort first -- and threw
+        away the mark it had just written. Every look inside the catch-up
+        window ran the phase again."""
+        import datetime as dt
+
+        app = self.with_alpha()
+        first = dt.date(2026, 7, 25)
+        for day in range(28):
+            date = (first + dt.timedelta(days=day)).strftime('%Y-%m-%d')
+            for rerack in ('Delta', 'Omega'):
+                for phase in range(1, 6):
+                    app.phase_state.add('%s#%d %s 05:00' % (rerack, phase, date))
+        self.assertGreater(len(app.phase_state), 200)
+
+        runs = [app.run_due_phases(
+            now=self.SATURDAY + dt.timedelta(seconds=seconds))
+            for seconds in (0, 5, 10, 60, 240)]
+        self.assertEqual(runs, [['Alpha phase 2'], [], [], [], []])
+        self.assertEqual(len(self.recorder.calls), 1)
+
+        # And after a restart, from the file alone.
+        again = self.with_alpha()
+        again._phase_state = None
+        self.assertEqual(again.run_due_phases(
+            now=self.SATURDAY + dt.timedelta(seconds=30)), [])
+
+    def test_old_marks_are_cleared_by_their_date(self):
+        import datetime as dt
+
+        today = dt.date(2026, 10, 9)
+        marks = ['Alpha#5 2026-10-09 05:00', 'Zeta#2 2026-10-06 06:40',
+                 'Alpha#1 2026-10-05 03:00', 'Omega#9 2026-09-30 21:00',
+                 'not a mark']
+        self.assertEqual(self.reracks.recent_marks(marks, today),
+                         ['Alpha#5 2026-10-09 05:00',
+                          'Zeta#2 2026-10-06 06:40'])
+
     def test_a_rerack_always_has_nine_phases(self):
         rerack = self.reracks.make_rerack('Alpha')
 

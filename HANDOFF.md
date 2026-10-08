@@ -179,6 +179,12 @@ only. Next, agreed in outline: read the lock's own Bluetooth broadcast from a
 beacon Pi instead of SwitchBot's cloud (pySwitchbot's adv_parser decodes lock
 state without a key on the original Lock; needs Aryez's model and a capture),
 feeding the same DoorWatch.
+2.80.1: rerack phase marks were trimmed with sorted(state)[-200:]. Marks
+start with the rerack name, so past 200 (about three weeks) Alpha's were
+dropped first -- including the one just written -- and the phase re-ran on
+every check for its 5-minute catch-up window (Aryez, Rising at 05:00).
+reracks.recent_marks keeps marks by the date inside them, relative to the
+runner's moment (save_phase_state(now)), so today's mark is always kept.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
