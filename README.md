@@ -1053,6 +1053,32 @@ has already happened, or that the schedule has moved since the phone last
 looked, cannot be skipped; the phone says so. **Allow sequences from the
 remote** governs skipping too.
 
+### Run by a door
+
+A sequence can run when a SwitchBot lock is **unlocked** — by its key, the
+keypad, the SwitchBot app or anything else; Paragon Home only reads the lock —
+or when it **jams**. In the sequence's *when it runs* menu, **When a door**
+offers *When Front Door unlocks* and *When Front Door jams* for every lock it
+knows. Put a beacon step in that sequence and the door speaks: *Welcome home*
+from the hall beacon, or *the front door has not locked* from the bedroom one.
+A door is as well as a clock, not instead of one.
+
+It is the change that runs it, once: a door left unlocked all afternoon is
+announced when it was unlocked, not again until it has been locked in between.
+Kodi starting while the door is already unlocked announces nothing, and a
+reading that fails — the internet blinking — is not taken for the door moving.
+
+**Quiet hours** (Settings → SwitchBot) hold back the unlock announcements
+between two times — 00:00 to 06:00, say, or 22:00 round to 07:00. A jam is not
+held back: a bolt that did not throw at two in the morning is the one most
+worth hearing about, and Kodi also shows *Front Door is JAMMED*.
+
+The lock is read through SwitchBot's servers, every fifteen seconds and only
+while some sequence is waiting on it, so the announcement comes **5 to 20
+seconds** after the door is unlocked and needs the internet. That is about
+5,800 of SwitchBot's 10,000 requests a day for one lock. Only the master box
+watches the door; a satellite never announces it a second time.
+
 ### Following Paragon TV
 
 Paragon TV has a Rerack of its own — a nine-phase preset macro system, one

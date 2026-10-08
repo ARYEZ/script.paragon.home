@@ -14,6 +14,7 @@ the callbacks only record what happened and the service loop does the talking.
 
 import os
 import sys
+import threading
 import time
 
 import xbmc
@@ -48,6 +49,12 @@ SATELLITE_CHECK_SECONDS = 30
 # what notices before somebody does. The first check is on startup, because
 # a box rebooting alongside the router is the case that matters most.
 ADDRESS_CHECK_SECONDS = 600
+
+# How often a lock some sequence is waiting on is asked whether it has moved.
+# SwitchBot allows 10,000 requests a day per account, shared with the blinds;
+# every fifteen seconds is about 5,800 for one lock, and a phrase within twenty
+# seconds of the door being unlocked.
+DOOR_POLL_SECONDS = 15
 
 EVENT_PLAY = 'play'
 EVENT_PAUSE = 'pause'
@@ -107,6 +114,59 @@ class GoveePlayer(xbmc.Player):
         self._notify(EVENT_STOP)
 
 
+class DoorPoller(object):
+    """Reads the watched locks every DOOR_POLL_SECONDS, on its own thread,
+    and keeps what changed for the service loop to act on -- see
+    GoveeService._check_door and doorwatch.DoorWatch."""
+
+    def __init__(self, service):
+        import doorwatch
+
+        self.service = service
+        self.watch = doorwatch.DoorWatch()
+        self._found = []
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name='door watch')
+        # Never what keeps Kodi from closing: a read in flight when it does is
+        # abandoned, not waited for.
+        self._thread.daemon = True
+        self._thread.start()
+
+    def stop(self):
+        self._stopping.set()
+
+    def _run(self):
+        while not self._stopping.wait(DOOR_POLL_SECONDS):
+            try:
+                self.poll()
+            except Exception as exc:
+                utils.log('Door watch: %s' % exc)
+
+    def poll(self):
+        """One look. Asks nothing at all while no sequence waits on a lock,
+        which is most houses -- SwitchBot counts every request."""
+        app = self.service.app
+        devices = app.watched_locks()
+        self.watch.forget(keep=[device.device_id for device in devices])
+        found = self.watch.readings(app.read_locks(devices))
+        if found:
+            with self._lock:
+                self._found.extend(found)
+        return found
+
+    def take(self):
+        """What changed since the last take, oldest first."""
+        with self._lock:
+            taken, self._found = self._found, []
+        return taken
+
+
 class GoveeService(xbmc.Monitor):
     """Applies scenes in response to playback, on its own thread."""
 
@@ -131,6 +191,7 @@ class GoveeService(xbmc.Monitor):
         # What the remote was last built from, so an unrelated settings change
         # does not rebuild it. See _apply_remote_settings.
         self._remote_signature = None
+        self._door = DoorPoller(self)
         self.player = GoveePlayer().attach(self)
 
     # -- lifecycle ---------------------------------------------------------
@@ -480,6 +541,29 @@ class GoveeService(xbmc.Monitor):
             self._mark_sequence(False)
         return ran
 
+    def _check_door(self):
+        """Run whatever the door watch has seen since the last look.
+
+        The watch reads the locks on a thread of its own -- one read can take
+        ten seconds when the internet is slow, and this loop is what keeps
+        cycles stepping and playback lighting up -- but what it finds is run
+        here, on the loop, like every other sequence.
+        """
+        events = self._door.take()
+        if not events:
+            return []
+        alive = lambda index, step: not self.abortRequested()
+        ran = []
+        self._mark_sequence(True)
+        try:
+            for device_id, event in events:
+                ran.extend(self.app.door_event(device_id, event,
+                                               sleep_func=self._pause,
+                                               on_step=alive))
+        finally:
+            self._mark_sequence(False)
+        return ran
+
     def run(self):
         utils.log('Service started')
 
@@ -518,6 +602,8 @@ class GoveeService(xbmc.Monitor):
             except Exception as exc:
                 utils.log('Startup discovery failed: %s' % exc, xbmc.LOGERROR)
 
+        self._door.start()
+
         while not self.abortRequested():
             # Cycling scenes are stepped here rather than on a timer of their
             # own, and playback events are handled here rather than in the
@@ -534,6 +620,11 @@ class GoveeService(xbmc.Monitor):
             except Exception as exc:
                 utils.log('Sequence schedule check failed: %s' % exc,
                           xbmc.LOGERROR)
+
+            try:
+                self._check_door()
+            except Exception as exc:
+                utils.log('Door watch failed: %s' % exc, xbmc.LOGERROR)
 
             try:
                 self._check_satellite()
@@ -554,6 +645,8 @@ class GoveeService(xbmc.Monitor):
 
             if self.waitForAbort(0.5):
                 break
+
+        self._door.stop()
 
         # Before the log line: a phone waiting on a command should be told the
         # service has gone rather than sit there until its own timeout.

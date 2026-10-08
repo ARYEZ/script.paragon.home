@@ -166,6 +166,19 @@ real Chromium with mouse and CDP touch. Also: default.py imports
 Request/urlopen from compat (py2 gate), and the drift test now builds a
 ptv_preset_timer.py instead of asserting the settings-copy behaviour bcf2ee7
 removed.
+2.80.0: a door runs a sequence (Aryez: beacon phrase on every unlock, quiet
+hours for unlocks, jammed alert). sequence['door'] = {device, on:
+unlocked|jammed} (sequences.clean_door), set in gui's "when it runs" ->
+When a door. service.DoorPoller reads app.watched_locks() every 15 s on its
+own thread via app.read_locks (Hub.get_state per lock only -- never
+get_states, which can rewrite the device list), doorwatch.DoorWatch turns
+readings into changes (first reading and missed readings are silent), and
+GoveeService._check_door runs app.door_event on the loop. Quiet hours
+(door_quiet/_from/_to, Kodi time settings) hold back unlocks only. Master
+only. Next, agreed in outline: read the lock's own Bluetooth broadcast from a
+beacon Pi instead of SwitchBot's cloud (pySwitchbot's adv_parser decodes lock
+state without a key on the original Lock; needs Aryez's model and a capture),
+feeding the same DoorWatch.
 
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book

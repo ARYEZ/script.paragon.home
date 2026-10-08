@@ -298,11 +298,52 @@ def empty_step():
 
 
 def make_sequence(name, steps=None, time=None, days=None, phase=None,
-                  skip_done=False):
+                  skip_done=False, door=None):
     """A sequence with its full complement of slots, however few are filled."""
     return normalise({'name': name, 'steps': list(steps or []),
                       'time': time, 'days': days, 'phase': phase,
-                      'skip_done': skip_done})
+                      'skip_done': skip_done, 'door': door})
+
+
+# What a lock can do that a sequence can be run on. The change, not the state:
+# a door left unlocked all afternoon announces itself once, when it was
+# unlocked, not every time somebody looks.
+DOOR_UNLOCKED = 'unlocked'
+DOOR_JAMMED = 'jammed'
+DOOR_EVENTS = (DOOR_UNLOCKED, DOOR_JAMMED)
+
+
+def clean_door(raw):
+    """{'device': lock id, 'on': an event} for a sequence a lock runs, or
+    None. Half of one -- a lock with no event, an event with no lock -- is
+    none at all, like a time with no days."""
+    if not isinstance(raw, dict):
+        return None
+    device = (raw.get('device') or '').strip()
+    event = (raw.get('on') or '').strip().lower()
+    if not device or event not in DOOR_EVENTS:
+        return None
+    return {'device': device, 'on': event}
+
+
+def describe_door(door, lock_name):
+    """'when Front Door unlocks', the way the schedule is said."""
+    return 'when %s %s' % (lock_name, 'unlocks' if door['on'] == DOOR_UNLOCKED
+                           else 'jams')
+
+
+def in_quiet_hours(now, start, end):
+    """Whether `now` falls between two 'HH:MM' times, the way quiet hours
+    are meant: midnight to 06:00, or 22:00 round to 07:00. The start is in,
+    the end is out. The same time twice, or either missing, is no quiet
+    hours at all rather than all day."""
+    start, end = parse_time(start), parse_time(end)
+    if not start or not end or start == end:
+        return False
+    at = '%02d:%02d' % (now.hour, now.minute)
+    if start < end:
+        return start <= at < end
+    return at >= start or at < end
 
 
 def one_step(step, name):
@@ -557,6 +598,7 @@ def normalise(raw):
             'days': clean_days(raw.get('days')),
             'phase': clean_phase(raw.get('phase')),
             'skip_done': bool(raw.get('skip_done')),
+            'door': clean_door(raw.get('door')),
             'steps': steps}
 
 

@@ -979,8 +979,13 @@ def _sequence_tile(app, sequence, now, upcoming=None, today=None):
     next_run = _next_run(upcoming or [], [name], today)
     schedule = sequence_lib.describe_schedule(sequence)
     # "Only when you run it" was true of the sequence's own clock and wrong
-    # beside a rerack that runs it at seven.
-    if not sequence_lib.scheduled(sequence) and upcoming:
+    # beside a rerack that runs it at seven, or a door that runs it.
+    door = sequence.get('door')
+    if not sequence_lib.scheduled(sequence) and door:
+        lock = app.device_by_id(door['device'])
+        schedule = sequence_lib.describe_door(
+            door, lock.name if lock is not None else 'a missing lock')
+    elif not sequence_lib.scheduled(sequence) and upcoming:
         reracks = [run['rerack'] for run in upcoming
                    if run['sequence'] == name and run['rerack']]
         if reracks:

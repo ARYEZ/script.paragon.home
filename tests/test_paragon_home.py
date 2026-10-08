@@ -4541,6 +4541,287 @@ class TestSkippingOneRun(unittest.TestCase):
                          ['12:30 am', '7:00 am', '12:00 pm', '1:05 pm',
                           '11:59 pm'])
 
+
+class TestTheDoorWatch(unittest.TestCase):
+    """Aryez: every time the door is unlocked -- by key, keypad or app, not by
+    Paragon Home -- a beacon says something, except in quiet hours; and a
+    jammed bolt says so too. The lock is read, never driven."""
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'doorwatch',
+                     'remote', 'gui', 'service'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import doorwatch
+        import sequences
+
+        self.doorwatch = doorwatch
+        self.seq = sequences
+        self.when = datetime.datetime(2026, 10, 8, 18, 30)
+        self.seq.now = lambda: self.when
+
+    def tearDown(self):
+        clean_profile()
+
+    def app(self):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        caps = {'LK1': {CAP_LOCK, CAP_STATE}, 'LK2': {CAP_LOCK, CAP_STATE},
+                'LAMP': {CAP_POWER, CAP_STATE}}
+        self.recorder.capabilities = lambda d: caps[d.device_id]
+        app.controller = self.recorder
+        app._devices = [
+            Device('LK1', name='Front Door', driver='switchbot',
+                   model='Smart Lock Pro', cloud=True),
+            Device('LK2', name='Back Door', driver='switchbot',
+                   model='Smart Lock Pro', cloud=True),
+            Device('LAMP', name='Hall Lamp', lan=True)]
+        app._scenes = []
+        lamp = lambda action: [{'kind': 'power', 'target': 'LAMP',
+                                'action': action}]
+        app._sequences = [
+            self.seq.make_sequence('Welcome Home', lamp('on'),
+                                   door={'device': 'LK1', 'on': 'unlocked'}),
+            self.seq.make_sequence('Door Jammed', lamp('toggle'),
+                                   door={'device': 'LK1', 'on': 'jammed'}),
+            self.seq.make_sequence('Goodnight', lamp('off')),
+        ]
+        return app
+
+    def quiet(self, start='00:00', end='06:00'):
+        xbmcaddon.SETTINGS['door_quiet'] = 'true'
+        xbmcaddon.SETTINGS['door_quiet_from'] = start
+        xbmcaddon.SETTINGS['door_quiet_to'] = end
+
+    # -- the change, not the state -----------------------------------------
+
+    def test_a_door_is_announced_when_it_becomes_unlocked(self):
+        watch = self.doorwatch.DoorWatch()
+        read = lambda lock: watch.readings({'LK1': {'lock': lock}})
+        self.assertEqual(read('unlocked'), [],
+                         'Kodi starting with the door unlocked announced it')
+        self.assertEqual(read('locked'), [])
+        self.assertEqual(read('unlocked'), [('LK1', 'unlocked')])
+        self.assertEqual(read('unlocked'), [], 'announced again while it '
+                                               'stayed unlocked')
+        self.assertEqual(read('jammed'), [('LK1', 'jammed')])
+        self.assertEqual(read('unlocked'), [('LK1', 'unlocked')])
+        self.assertEqual(read('locked'), [])
+
+    def test_a_missed_reading_is_not_a_door_that_moved(self):
+        """The internet blinking must not announce the door."""
+        watch = self.doorwatch.DoorWatch()
+        watch.readings({'LK1': {'lock': 'unlocked'}})
+        self.assertEqual(watch.readings({'LK1': None}), [])
+        self.assertEqual(watch.readings({'LK1': {'battery': 80}}), [])
+        self.assertEqual(watch.readings({'LK1': {'lock': 'unlocked'}}), [])
+        # And the reading after a missed one is compared with the last real
+        # one, so an unlock either side of a blink is still an unlock.
+        watch.readings({'LK1': {'lock': 'locked'}})
+        watch.readings({'LK1': None})
+        self.assertEqual(watch.readings({'LK1': {'lock': 'unlocked'}}),
+                         [('LK1', 'unlocked')])
+
+    def test_a_lock_watched_again_starts_from_a_fresh_reading(self):
+        watch = self.doorwatch.DoorWatch()
+        watch.readings({'LK1': {'lock': 'locked'}, 'LK2': {'lock': 'locked'}})
+        watch.forget(keep=['LK2'])
+        self.assertEqual(watch.readings({'LK1': {'lock': 'unlocked'},
+                                         'LK2': {'lock': 'unlocked'}}),
+                         [('LK2', 'unlocked')])
+
+    # -- a sequence a door runs ----------------------------------------------
+
+    def test_a_door_is_half_a_trigger_or_none(self):
+        clean = self.seq.clean_door
+        self.assertEqual(clean({'device': ' LK1 ', 'on': 'Unlocked'}),
+                         {'device': 'LK1', 'on': 'unlocked'})
+        self.assertIsNone(clean({'device': 'LK1'}))
+        self.assertIsNone(clean({'on': 'jammed'}))
+        self.assertIsNone(clean({'device': 'LK1', 'on': 'opened'}))
+        self.assertIsNone(self.seq.make_sequence('Plain')['door'])
+        self.assertEqual(self.seq.normalise(
+            {'name': 'X', 'door': {'device': 'LK1', 'on': 'jammed'}})['door'],
+            {'device': 'LK1', 'on': 'jammed'})
+
+    def test_quiet_hours_take_in_the_start_and_not_the_end(self):
+        quiet = self.seq.in_quiet_hours
+        at = lambda h, m: datetime.datetime(2026, 10, 8, h, m)
+        self.assertEqual([quiet(at(h, m), '00:00', '06:00') for h, m in
+                          ((0, 0), (5, 59), (6, 0), (23, 59), (12, 0))],
+                         [True, True, False, False, False])
+        # Round midnight.
+        self.assertEqual([quiet(at(h, m), '22:00', '07:00') for h, m in
+                          ((22, 0), (23, 30), (3, 0), (6, 59), (7, 0),
+                           (21, 59))],
+                         [True, True, True, True, False, False])
+        self.assertFalse(quiet(at(3, 0), '06:00', '06:00'),
+                         'the same time twice silenced the whole day')
+        self.assertFalse(quiet(at(3, 0), '', '06:00'))
+
+    def test_only_the_locks_a_sequence_waits_on_are_watched(self):
+        app = self.app()
+        self.assertEqual([d.device_id for d in app.watched_locks()], ['LK1'])
+        app._sequences = [app._sequences[2]]
+        self.assertEqual(app.watched_locks(), [],
+                         'a lock nothing waits on would cost requests')
+
+    def test_a_satellite_does_not_watch_the_door(self):
+        """The master does, so an unlock is announced once, not per box."""
+        app = self.app()
+        xbmcaddon.SETTINGS['satellite_mode'] = 'true'
+        self.assertEqual(app.watched_locks(), [])
+
+    def test_something_that_is_not_a_lock_is_not_watched(self):
+        app = self.app()
+        app._sequences[0]['door'] = {'device': 'LAMP', 'on': 'unlocked'}
+        self.assertEqual([d.device_id for d in app.watched_locks()], ['LK1'])
+
+    def test_an_unlocked_door_runs_its_sequence(self):
+        app = self.app()
+        self.assertEqual(app.door_event('LK1', 'unlocked'), ['Welcome Home'])
+        self.assertEqual(self.recorder.calls, [('turn', 'LAMP', True)])
+        self.assertEqual(app.door_event('LK2', 'unlocked'), [],
+                         'the back door ran the front door\'s sequence')
+
+    def test_a_jam_runs_its_sequence_and_says_so_on_the_television(self):
+        app = self.app()
+        self.assertEqual(app.door_event('LK1', 'jammed'), ['Door Jammed'])
+        said = ' '.join(str(note) for note in xbmcgui.NOTIFICATIONS)
+        self.assertIn('Front Door is JAMMED', said)
+
+    def test_quiet_hours_hold_back_an_unlock(self):
+        app = self.app()
+        self.quiet()
+        self.when = datetime.datetime(2026, 10, 9, 3, 0)
+        self.assertEqual(app.door_event('LK1', 'unlocked'), [])
+        self.assertEqual(self.recorder.calls, [])
+
+        self.when = datetime.datetime(2026, 10, 9, 6, 0)
+        self.assertEqual(app.door_event('LK1', 'unlocked'), ['Welcome Home'])
+
+    def test_quiet_hours_switched_off_hold_back_nothing(self):
+        app = self.app()
+        self.quiet()
+        xbmcaddon.SETTINGS['door_quiet'] = 'false'
+        self.when = datetime.datetime(2026, 10, 9, 3, 0)
+        self.assertEqual(app.door_event('LK1', 'unlocked'), ['Welcome Home'])
+
+    def test_a_jam_is_not_held_back_by_quiet_hours(self):
+        """A bolt that did not throw at two in the morning is the one most
+        worth hearing about."""
+        app = self.app()
+        self.quiet()
+        self.when = datetime.datetime(2026, 10, 9, 2, 0)
+        self.assertEqual(app.door_event('LK1', 'jammed'), ['Door Jammed'])
+
+    def test_a_lock_that_cannot_be_read_reads_as_nothing(self):
+        app = self.app()
+        self.recorder.states['LK1'] = {'lock': 'locked'}
+
+        def broken(device):
+            if device.device_id == 'LK2':
+                raise IOError('no route to SwitchBot')
+            return self.recorder.states.get(device.device_id)
+        self.recorder.get_state = broken
+        locks = [app.device_by_id('LK1'), app.device_by_id('LK2')]
+        self.assertEqual(app.read_locks(locks),
+                         {'LK1': {'lock': 'locked'}, 'LK2': None})
+
+    # -- the service ---------------------------------------------------------
+
+    def service(self, app):
+        import service
+
+        svc = service.GoveeService()
+        svc._app = app
+        return svc
+
+    def test_the_watch_reads_the_door_and_the_loop_runs_what_changed(self):
+        app = self.app()
+        svc = self.service(app)
+        self.recorder.states['LK1'] = {'lock': 'locked'}
+        self.assertEqual(svc._door.poll(), [])
+        self.recorder.states['LK1'] = {'lock': 'unlocked'}
+        self.assertEqual(svc._door.poll(), [('LK1', 'unlocked')])
+        self.assertEqual(self.recorder.calls, [],
+                         'the watch ran the sequence off the loop')
+
+        self.assertEqual(svc._check_door(), ['Welcome Home'])
+        self.assertEqual(self.recorder.calls, [('turn', 'LAMP', True)])
+        self.assertEqual(svc._check_door(), [], 'run twice for one unlock')
+
+    def test_a_door_watched_again_does_not_announce_what_it_missed(self):
+        """Take the door off Welcome Home, unlock it, put the door back: an
+        unlock nobody was watching for is not announced hours later."""
+        app = self.app()
+        svc = self.service(app)
+        door = app._sequences[0]['door']
+        jam = app._sequences[1]['door']
+        self.recorder.states['LK1'] = {'lock': 'locked'}
+        svc._door.poll()
+
+        app._sequences[0]['door'] = app._sequences[1]['door'] = None
+        svc._door.poll()
+        self.recorder.states['LK1'] = {'lock': 'unlocked'}
+        app._sequences[0]['door'], app._sequences[1]['door'] = door, jam
+        self.assertEqual(svc._door.poll(), [])
+
+    def test_the_watch_stops_with_the_service(self):
+        """Kodi closing must not leave a thread asking SwitchBot."""
+        svc = self.service(self.app())
+        svc._door.start()
+        thread = svc._door._thread
+        self.assertTrue(thread.is_alive())
+        svc._door.stop()
+        thread.join(2)
+        self.assertFalse(thread.is_alive(), 'still watching after stop')
+
+    def test_the_watch_asks_nothing_when_nothing_waits_on_a_door(self):
+        """SwitchBot counts every request."""
+        app = self.app()
+        app._sequences = [app._sequences[2]]
+        asked = []
+        self.recorder.get_state = lambda device: asked.append(device) or None
+        self.assertEqual(self.service(app)._door.poll(), [])
+        self.assertEqual(asked, [])
+
+    # -- where it is set and seen -------------------------------------------
+
+    def test_the_menu_sets_and_clears_a_door(self):
+        import gui
+
+        app = self.app()
+        panel = gui.ControlPanel(app)
+        sequence = app._sequences[2]
+        # Not on a door, Front Door unlocks, Front Door jams, Back Door ...
+        xbmcgui.SELECT_QUEUE.append(4)
+        panel._edit_sequence_door(sequence)
+        self.assertEqual(sequence['door'], {'device': 'LK2', 'on': 'jammed'})
+        self.assertEqual(panel._door_label(sequence), 'when Back Door jams')
+        xbmcgui.SELECT_QUEUE.append(0)
+        panel._edit_sequence_door(sequence)
+        self.assertIsNone(sequence['door'])
+        self.assertEqual(panel._door_label(sequence), 'no')
+
+    def test_the_phone_says_which_door_runs_a_sequence(self):
+        import remote
+
+        app = self.app()
+        tiles = dict((tile['name'], tile)
+                     for tile in remote._sequence_tiles(app, time.time()))
+        self.assertEqual(tiles['Welcome Home']['schedule'],
+                         'when Front Door unlocks')
+        self.assertEqual(tiles['Door Jammed']['schedule'],
+                         'when Front Door jams')
+        self.assertEqual(tiles['Goodnight']['schedule'],
+                         'only when you run it')
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 

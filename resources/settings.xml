@@ -46,7 +46,7 @@ the add-on ships a single locale.
     </category>
 
     <category label="SwitchBot">
-        <setting type="lsep" label="For blinds and shades, via a SwitchBot hub"/>
+        <setting type="lsep" label="For blinds, shades and locks, via a SwitchBot hub"/>
         <setting type="lsep" label="App: Profile - Preferences - About,"/>
         <setting type="lsep" label="tap the version ten times for Developer Options"/>
         <setting id="switchbot_token" type="text" option="hidden"
@@ -57,6 +57,14 @@ the add-on ships a single locale.
                  label="Let this box unlock doors" default="false"/>
         <setting id="confirm_unlock" type="bool" enable="eq(-1,true)"
                  label="Ask before unlocking" default="false"/>
+        <setting type="lsep" label="Door watch: a sequence run when a lock is unlocked"/>
+        <setting id="door_quiet" type="bool"
+                 label="Quiet hours (unlocks only - a jam still alerts)"
+                 default="false"/>
+        <setting id="door_quiet_from" type="time" enable="eq(-1,true)"
+                 label="From" default="00:00"/>
+        <setting id="door_quiet_to" type="time" enable="eq(-2,true)"
+                 label="Until" default="06:00"/>
     </category>
 
     <category label="Playback lighting">

@@ -2962,6 +2962,12 @@ class ControlPanel(object):
                 rows.append(('Stop running it on a schedule',
                              lambda: self._clear_schedule(sequence)))
 
+            # A door as well as a clock, not instead: a sequence can say
+            # goodnight at eleven and also when the bolt jams.
+            if self._locks() or sequence.get('door'):
+                rows.append(('When a door: %s' % self._door_label(sequence),
+                             lambda: self._edit_sequence_door(sequence)))
+
             choice = _select('%s - when it runs' % sequence['name'],
                              [label for label, _h in rows])
             if choice == BACK:
@@ -3047,6 +3053,39 @@ class ControlPanel(object):
 
         _dialog().ok('%s - Paragon TV' % utils.ADDON_NAME,
                      paragon_tv.status(sequence_lib.now()))
+
+    def _locks(self):
+        from devices import CAP_LOCK
+
+        return [device for device in self.app.enabled_devices
+                if CAP_LOCK in self.app.controller.capabilities(device)]
+
+    def _door_label(self, sequence):
+        door = sequence.get('door')
+        if not door:
+            return 'no'
+        device = self.app.device_by_id(door['device'])
+        return sequence_lib.describe_door(
+            door, device.name if device is not None else 'a missing lock')
+
+    def _edit_sequence_door(self, sequence):
+        """Run this sequence when a lock is unlocked, or jams.
+
+        The lock is read, never driven: this watches a door opened by a key,
+        a keypad or the SwitchBot app just the same.
+        """
+        locks = self._locks()
+        options = ['Not on a door']
+        events = []
+        for device in locks:
+            for event, said in ((sequence_lib.DOOR_UNLOCKED, 'unlocks'),
+                                (sequence_lib.DOOR_JAMMED, 'jams')):
+                options.append('When %s %s' % (device.name, said))
+                events.append({'device': device.device_id, 'on': event})
+        choice = _select('Run %s' % sequence['name'], options)
+        if choice == BACK:
+            return
+        sequence['door'] = None if choice == 0 else events[choice - 1]
 
     def _clear_schedule(self, sequence):
         sequence['time'] = ''

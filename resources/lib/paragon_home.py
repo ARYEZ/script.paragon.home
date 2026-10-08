@@ -25,7 +25,7 @@ import sequences as sequence_lib
 import speeddial as dial_lib
 import voice as voice_lib
 import scenes as scene_lib
-from devices import (CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
+from devices import (CAP_LOCK, CAP_POWER, DEVICE_CACHE, Device, TRANSPORT_AUTO,
                      TRANSPORT_CLOUD, TRANSPORT_LAN, build_hub)
 
 # Order must match the `values` list on the transport_mode setting.
@@ -1833,6 +1833,75 @@ class ParagonHome(object):
         utils.log('Skipped "%s" at %s, as asked'
                   % (entry.get('sequence'), entry.get('at')))
         return True
+
+    # -- a door that runs a sequence ----------------------------------------
+
+    def door_sequences(self):
+        """Every sequence a lock runs, as (sequence, lock id, event)."""
+        return [(sequence, sequence['door']['device'], sequence['door']['on'])
+                for sequence in self.sequences if sequence.get('door')]
+
+    def watched_locks(self):
+        """The locks some sequence is waiting on. Nothing on a satellite: the
+        master watches the door, as it keeps the schedule, so one unlocking is
+        announced once and not once per box."""
+        if self.satellite_mode:
+            return []
+        wanted = set(device_id for _s, device_id, _e in self.door_sequences())
+        return [device for device in self.enabled_devices
+                if device.device_id in wanted
+                and CAP_LOCK in self.controller.capabilities(device)]
+
+    def read_locks(self, devices):
+        """{lock id: its state, or None}. One device at a time through the
+        driver, and nothing else: this is called away from the service's own
+        thread, so it must not be the read that goes looking for devices that
+        have moved and rewrites the device list."""
+        states = {}
+        for device in devices:
+            try:
+                states[device.device_id] = self.controller.get_state(device)
+            except Exception as exc:
+                utils.log('Could not read %s: %s' % (device.name, exc))
+                states[device.device_id] = None
+        return states
+
+    def door_quiet(self, now=None):
+        """Whether it is quiet hours for the door -- Settings, SwitchBot."""
+        if not utils.get_bool('door_quiet', False):
+            return False
+        return sequence_lib.in_quiet_hours(
+            now or sequence_lib.now(), utils.get_setting('door_quiet_from'),
+            utils.get_setting('door_quiet_to'))
+
+    def door_event(self, device_id, event, now=None, sleep_func=None,
+                   on_step=None):
+        """Run the sequences waiting on this lock doing this. Returns their
+        names.
+
+        Quiet hours hold back an unlock, which is somebody coming home. Not a
+        jam: a bolt that did not throw at two in the morning is the one most
+        worth hearing about, and the reason it is watched at all.
+        """
+        device = self.device_by_id(device_id)
+        name = device.name if device is not None else device_id
+        waiting = [sequence for sequence, lock, on in self.door_sequences()
+                   if lock == device_id and on == event]
+        if not waiting:
+            return []
+        if event == sequence_lib.DOOR_UNLOCKED and self.door_quiet(now):
+            utils.log('%s unlocked in quiet hours: not running %s'
+                      % (name, ', '.join(s['name'] for s in waiting)))
+            return []
+        if event == sequence_lib.DOOR_JAMMED:
+            utils.force_notify('%s is JAMMED' % name)
+        ran = []
+        for sequence in waiting:
+            utils.log('%s %s: running "%s"' % (name, event, sequence['name']))
+            self.run_sequence(sequence, announce=False, sleep_func=sleep_func,
+                              on_step=on_step, defer=True)
+            ran.append(sequence['name'])
+        return ran
 
     # -- tonight's version of a sequence --------------------------------------
 
