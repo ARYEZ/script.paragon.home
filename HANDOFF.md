@@ -195,6 +195,18 @@ omits runs inside the hold. Manual runs are not held. Remote: stop_all /
 let_go, not behind allow_sequences; snapshot held_until; red #stopAll bar
 above the Home sections (renderStop). Checked in real Chromium.
 
+2.82.0: hourly schedules (Aryez: AJAX time checks on beacon3, 9am-midnight).
+sequence['hourly'] = {'from','to'} (clean_hourly; both or None), mutually
+exclusive with 'time' in the menu. hourly_times is inclusive and wraps
+midnight; own_times() feeds scheduled(), app.resolved_times(), due_sequences
+(checks newest-first and breaks, so a long grace runs the later hour once) and
+upcoming_runs (each hour its own run key, so skips are per hour). A command
+step whose action holds '{hour}' is resolved at run time in _clip_now against
+the beacon's clip list (hour_words: 0 -> MIDNIGHT/12AM, 12 -> 12PM/NOON;
+match ignores space and case); a missing hour raises ControlError naming it.
+hour_clip_sets offers 'PREFIX (the clip for the hour)' for any prefix with two
+or more hour-named clips.
+
 Future, agreed in outline: a mic Pi (Pi 4) with wake word "Aurora" sending
 text to a `say` endpoint on the web remote, matched by the phrase book
 (`voice.py`, exact match after normalisation, aliases per action).

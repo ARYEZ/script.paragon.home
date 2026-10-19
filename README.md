@@ -1033,6 +1033,27 @@ rules govern when:
 Moving a schedule later in the same day lets it run again — the record holds
 the time as well as the date.
 
+### Every hour
+
+A sequence can run **every hour** between two times instead of at one: in its
+*when it runs* menu, **Every hour** asks *from* and *until*, both included.
+*09:00* until *00:00* is sixteen runs, nine in the morning to midnight; one
+that ends before it starts goes round midnight. Setting it clears the one
+time, and setting a time clears it. Days work as they always have.
+
+It is made for a set of recorded time checks. Name the clips on a beacon by
+the hour — *AJAX 9AM*, *AJAX 10AM* ... *AJAX 11PM*, *AJAX MIDNIGHT* (or
+*12AM*; *12PM* or *NOON* for midday) — and the step picker offers **AJAX (the
+clip for the hour)** above the clips themselves. That step plays whichever of
+the set is for the hour it runs at, so one sequence does the work of sixteen.
+Spacing and case in the names do not matter; *5PM V1* is not part of the set.
+An hour with no clip fails that step, and Last run says which: *beacon3 has no
+AJAX 4AM*.
+
+Each hour is a run of its own: the phone shows the next one, and **Skip next
+run** passes over that hour only. If the box was busy through two of them, it
+plays the later one once rather than both.
+
 ### Skipping one run
 
 Up before the alarm? Skip the one run and keep the rest of the day. On the web

@@ -5050,6 +5050,226 @@ class TestTheEmergencyStop(unittest.TestCase):
         self.assertIn('master box', said['message'])
         self.assertFalse(app.held())
 
+
+class TestHourlyTimeChecks(unittest.TestCase):
+    """Aryez: recorded time checks -- AJAX 9AM, AJAX 10AM ... AJAX MIDNIGHT --
+    every hour on the hour from nine in the morning to midnight, on beacon3.
+    One sequence, run every hour, playing the clip for the hour it runs at;
+    not sixteen sequences."""
+
+    CLIPS = ['Stop', 'AJAX 1AM', 'AJAX 9AM', 'AJAX 10AM', 'AJAX 12PM',
+             'AJAX 3PM', 'AJAX 9PM', 'AJAX MIDNIGHT', 'AJAX WELCOME HOME',
+             '5PM V1', '12AM V2']
+
+    def setUp(self):
+        clean_profile()
+        xbmcaddon.reset()
+        xbmcgui.reset()
+        for name in ('addon_utils', 'paragon_home', 'sequences', 'remote',
+                     'gui'):
+            if name in sys.modules:
+                del sys.modules[name]
+        import remote
+        import sequences
+
+        self.seq = sequences
+        self.remote = remote
+        self.at(8, 45)
+        self.seq.now = lambda: self.when
+
+    def tearDown(self):
+        clean_profile()
+
+    def at(self, hour, minute, day=0):
+        self.when = datetime.datetime(2026, 10, 19, hour, minute) + \
+            datetime.timedelta(days=day)
+        return self.when
+
+    def app(self, **step):
+        from paragon_home import ParagonHome
+
+        app = ParagonHome()
+        self.recorder = RecordingController()
+        self.recorder.capabilities = lambda d: {CAP_COMMANDS, CAP_STATE,
+                                                'playback'}
+        self.recorder.command_map = {'BE:03': list(self.CLIPS)}
+        app.controller = self.recorder
+        app._devices = [Device('BE:03', name='beacon3', driver='speaker',
+                               lan=True, ip='10.0.0.189')]
+        app._scenes = []
+        clip = {'kind': 'command', 'driver': 'speaker', 'target': 'BE:03',
+                'action': 'AJAX {hour}'}
+        clip.update(step)
+        app._sequences = [self.seq.make_sequence(
+            'Time Check', [clip], days=list(range(7)),
+            hourly={'from': '09:00', 'to': '00:00'})]
+        app._reracks = []
+        return app
+
+    def played(self):
+        return [call[2] for call in self.recorder.calls
+                if call[0] in ('command', 'queue')]
+
+    def run_at(self, app, hour, minute, day=0):
+        return app.run_due_sequences(now=self.at(hour, minute, day))
+
+    # -- every hour --------------------------------------------------------
+
+    def test_nine_until_midnight_is_sixteen_times(self):
+        times = self.seq.hourly_times({'from': '09:00', 'to': '00:00'})
+        self.assertEqual(len(times), 16)
+        self.assertEqual((times[0], times[3], times[-1]),
+                         ('09:00', '12:00', '00:00'))
+        self.assertEqual(self.seq.hourly_times(
+            {'from': '22:00', 'to': '01:00'}),
+            ['22:00', '23:00', '00:00', '01:00'])
+        self.assertEqual(self.seq.hourly_times(
+            {'from': '09:30', 'to': '11:30'}), ['09:30', '10:30', '11:30'])
+        self.assertEqual(self.seq.hourly_times(
+            {'from': '07:00', 'to': '07:00'}), ['07:00'])
+
+    def test_an_hourly_window_is_kept_said_and_needs_both_ends(self):
+        made = self.app()._sequences[0]
+        self.assertEqual(made['hourly'], {'from': '09:00', 'to': '00:00'})
+        self.assertTrue(self.seq.scheduled(made))
+        self.assertEqual(self.seq.describe_schedule(made),
+                         'every day, every hour 09:00 to 00:00')
+        self.assertIsNone(self.seq.normalise(
+            {'name': 'X', 'hourly': {'from': '9am'}})['hourly'])
+        self.assertEqual(self.seq.normalise(
+            {'name': 'X', 'hourly': {'from': '9am', 'to': 'midnight?'}}
+        )['hourly'], None)
+        self.assertIsNone(self.seq.normalise(
+            {'name': 'X', 'hourly': '09:00'})['hourly'],
+            'a hand-edited window that is not a pair was not dropped')
+        no_days = self.seq.make_sequence('Y', hourly={'from': '09:00',
+                                                      'to': '10:00'})
+        self.assertFalse(self.seq.scheduled(no_days))
+
+    def test_it_runs_on_every_hour_of_the_window_and_only_then(self):
+        app = self.app()
+        self.assertEqual(self.run_at(app, 8, 59), [])
+        self.assertEqual(self.run_at(app, 9, 0), ['Time Check'])
+        self.assertEqual(self.run_at(app, 9, 1), [],
+                         'nine o\'clock ran twice')
+        self.assertEqual(self.run_at(app, 10, 0), ['Time Check'],
+                         'nine o\'clock having run stopped ten')
+        self.assertEqual(self.run_at(app, 0, 0, day=1), ['Time Check'])
+        self.assertEqual(self.run_at(app, 1, 0, day=1), [],
+                         'it ran past the end of the window')
+
+    def test_after_a_long_pause_it_runs_once_for_the_later_hour(self):
+        # Busy with another sequence from before nine until after ten: both
+        # hours are inside the allowance, and only ten o'clock is worth saying.
+        app = self.app()
+        self.recorder.command_map['BE:03'].append('AJAX 10AM')
+        self.assertEqual(app.run_due_sequences(now=self.at(10, 2),
+                                               grace=2 * 3600),
+                         ['Time Check'])
+        self.assertEqual(self.run_at(app, 10, 3), [],
+                         'ten o\'clock was still owed after the catch-up')
+        self.assertEqual(self.played(), ['AJAX 10AM'])
+
+    # -- the clip for the hour ------------------------------------------------
+
+    def test_it_plays_the_clip_for_the_hour_it_runs_at(self):
+        app = self.app()
+        for hour, day in ((9, 0), (12, 0), (21, 0), (0, 1)):
+            self.run_at(app, hour, 0, day)
+        self.assertEqual(self.played(), ['AJAX 9AM', 'AJAX 12PM',
+                                         'AJAX 9PM', 'AJAX MIDNIGHT'])
+
+    def test_queued_and_with_a_volume_it_is_still_the_hours_clip(self):
+        app = self.app(after=True, volume=60)
+        self.run_at(app, 15, 0)
+        self.assertEqual(self.recorder.calls,
+                         [('queue', 'BE:03', 'AJAX 3PM', 60)])
+
+    def test_an_hour_with_no_clip_says_which_is_missing(self):
+        app = self.app()
+        app._sequences[0]['hourly'] = {'from': '09:00', 'to': '11:00'}
+        self.run_at(app, 11, 0)
+        record = app.last_run('Time Check')
+        self.assertEqual(self.played(), [])
+        self.assertEqual(record['steps'][0]['outcome'], self.seq.FAILED)
+        self.assertIn('beacon3 has no AJAX 11AM', record['steps'][0]['why'])
+
+    def test_a_set_is_found_by_its_names(self):
+        sets = self.seq.hour_clip_sets
+        self.assertEqual(sets(self.CLIPS), [('AJAX', 'AJAX {hour}')])
+        self.assertEqual(sets(['AJAX 9AM', 'Chime 10PM']), [],
+                         'one clip with an hour in it was taken for a set')
+        self.assertEqual(sets(['9AM', '10AM']), [('', '{hour}')])
+
+    def test_an_hour_is_matched_however_it_is_spelt(self):
+        clip = self.seq.clip_for_hour
+        self.assertEqual(clip('AJAX {hour}', ['ajax 9 am'], 9), 'ajax 9 am')
+        self.assertEqual(clip('AJAX {hour}', ['AJAX 12AM'], 0), 'AJAX 12AM')
+        self.assertEqual(clip('AJAX {hour}', ['AJAX NOON'], 12), 'AJAX NOON')
+        self.assertEqual(clip('AJAX {hour}', ['AJAX 1PM'], 1), None,
+                         'one in the morning played one in the afternoon')
+        self.assertEqual(clip('AJAX {hour}', ['AJAX 11PM', 'AJAX 1PM'], 13),
+                         'AJAX 1PM')
+
+    def test_the_step_reads_as_the_hour(self):
+        step = self.app()._sequences[0]['steps'][0]
+        self.assertEqual(self.seq.describe_step(step, 'beacon3'),
+                         'beacon3: AJAX (the hour)')
+
+    # -- skipping, the phone, the menu ------------------------------------------
+
+    def test_one_hour_can_be_skipped_and_the_next_still_runs(self):
+        app = self.app()
+        self.at(14, 30)
+        key = [run['key'] for run in app.upcoming_runs()
+               if run['at'] == '15:00'][0]
+        app.skip_run(key)
+        self.run_at(app, 15, 0)
+        self.run_at(app, 16, 0)
+        self.assertEqual(self.played(), [], 'the skipped hour played')
+        self.assertEqual(self.recorder.calls, [])
+        self.recorder.command_map['BE:03'].append('AJAX 4PM')
+        self.run_at(app, 16, 0, day=1)
+        self.assertEqual(self.played(), ['AJAX 4PM'])
+
+    def test_the_phone_shows_the_next_hour(self):
+        app = self.app()
+        self.at(14, 30)
+        tile = self.remote._sequence_tiles(app, time.time())[0]
+        self.assertEqual(tile['next']['text'], 'Runs 3:00 pm today')
+        self.assertEqual(tile['schedule'],
+                         'every day, every hour 09:00 to 00:00')
+
+    def test_the_menu_offers_the_set_first(self):
+        import gui
+
+        panel = gui.ControlPanel(self.app())
+        # beacon3, the set, leave the volume, straight away.
+        xbmcgui.SELECT_QUEUE.extend([1, 0, 0, 0])
+        step = panel._step_device('speaker')
+        offered = [options for heading, options in xbmcgui.SELECT_CALLS
+                   if heading == 'What should it do'][0]
+        self.assertEqual(offered[0], 'AJAX (the clip for the hour)')
+        self.assertEqual(step['action'], 'AJAX {hour}')
+
+    def test_the_menu_sets_and_clears_an_hourly_window(self):
+        import gui
+
+        app = self.app()
+        panel = gui.ControlPanel(app)
+        sequence = self.seq.make_sequence('Chime', time='07:00')
+        xbmcgui.INPUT_QUEUE.extend(['9am', 'midnight'])
+        panel._edit_sequence_hourly(sequence)
+        self.assertIsNone(sequence['hourly'], 'an unreadable end was kept')
+        xbmcgui.INPUT_QUEUE.extend(['9am', '00:00'])
+        panel._edit_sequence_hourly(sequence)
+        self.assertEqual(sequence['hourly'], {'from': '09:00', 'to': '00:00'})
+        self.assertEqual(sequence['time'], '', 'one time and every hour both')
+        xbmcgui.INPUT_QUEUE.append('6pm')
+        panel._edit_sequence_time(sequence)
+        self.assertIsNone(sequence['hourly'])
+        self.assertEqual(sequence['time'], '18:00')
+
 class TestWhatHappenedOnTheLastRun(unittest.TestCase):
     """Knowing the difference between "already done" and "did not happen".
 

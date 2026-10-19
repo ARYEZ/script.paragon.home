@@ -220,7 +220,7 @@ def scheduled(sequence):
     """
     if follows_tv(sequence):
         return True
-    return bool(sequence.get('time') and sequence.get('days'))
+    return bool(own_times(sequence) and sequence.get('days'))
 
 
 def describe_schedule(sequence):
@@ -239,6 +239,9 @@ def describe_schedule(sequence):
         when = 'weekends'
     else:
         when = ', '.join(DAYS[day][:3] for day in days)
+    hourly = sequence.get('hourly')
+    if hourly:
+        return '%s, every hour %s to %s' % (when, hourly['from'], hourly['to'])
     return '%s at %s' % (when, sequence['time'])
 
 
@@ -258,6 +261,91 @@ def stamp(sequence, now, at_time=None):
 def own_schedule(sequence):
     """The (time, days) a sequence keeps for itself."""
     return sequence.get('time') or '', list(sequence.get('days') or [])
+
+
+def clean_hourly(raw):
+    """{'from', 'to'} as 'HH:MM' for a sequence run every hour, or None.
+    Half of one is none, like a time with no days."""
+    if not isinstance(raw, dict):
+        return None
+    start, end = parse_time(raw.get('from')), parse_time(raw.get('to'))
+    if not start or not end:
+        return None
+    return {'from': start, 'to': end}
+
+
+def hourly_times(hourly):
+    """Every 'HH:MM' an hourly window runs at, both ends included. One that
+    ends before it starts goes round midnight: 09:00 to 00:00 is sixteen
+    times, the last of them at midnight."""
+    if not hourly:
+        return []
+    def minutes(at_time):
+        hour, minute = [int(part) for part in at_time.split(':')]
+        return hour * 60 + minute
+    start, end = minutes(hourly['from']), minutes(hourly['to'])
+    if end < start:
+        end += 24 * 60
+    return ['%02d:%02d' % ((at // 60) % 24, at % 60)
+            for at in range(start, end + 1, 60)]
+
+
+def own_times(sequence):
+    """Every time of day a sequence runs at by its own clock: each hour of
+    its hourly window, or its one time, or none."""
+    if sequence.get('hourly'):
+        return hourly_times(sequence['hourly'])
+    return [sequence['time']] if sequence.get('time') else []
+
+
+# A beacon step's clip can stand for whichever of a set is for the hour it
+# runs at: "AJAX {hour}" plays AJAX 9AM at nine and AJAX MIDNIGHT at midnight.
+HOUR = '{hour}'
+_HOUR_CLIP = re.compile(
+    r'^(?P<prefix>.*?)(?P<hour>(?:1[0-2]|[1-9])\s*(?:AM|PM)|MIDNIGHT|NOON)$',
+    re.IGNORECASE)
+
+
+def hour_words(hour):
+    """How a clip may name an hour of the day (0-23), likeliest first."""
+    if hour == 0:
+        return ['MIDNIGHT', '12AM']
+    if hour == 12:
+        return ['12PM', 'NOON']
+    return ['%d%s' % (hour % 12, 'AM' if hour < 12 else 'PM')]
+
+
+def _squash(text):
+    return re.sub(r'\s+', '', text or '').lower()
+
+
+def hour_clip_sets(names):
+    """[(prefix, template)] for every set of clips named by the hour --
+    "AJAX 9AM", "AJAX 10AM" -> ('AJAX', 'AJAX {hour}'). Two at least: one clip
+    with an hour in its name is a clip, not a set. "5PM V1" is neither."""
+    found = {}
+    for name in names or []:
+        match = _HOUR_CLIP.match((name or '').strip())
+        if match is None:
+            continue
+        prefix = match.group('prefix')
+        entry = found.setdefault(_squash(prefix), [prefix, 0])
+        entry[1] += 1
+    return sorted((prefix.strip(), prefix + HOUR)
+                  for prefix, count in found.values() if count >= 2)
+
+
+def clip_for_hour(template, names, hour):
+    """The clip a template means at this hour, as the beacon spells it, or
+    None if the beacon has none for it. Spacing and case are not held
+    against a name: "ajax 9 am" is AJAX 9AM."""
+    wanted = [_squash(template.replace(HOUR, word))
+              for word in hour_words(hour)]
+    by_squash = dict((_squash(name), name) for name in names or [])
+    for key in wanted:
+        if key in by_squash:
+            return by_squash[key]
+    return None
 
 
 def due(sequence, now, last='', schedule=None, grace=0):
@@ -303,11 +391,12 @@ def empty_step():
 
 
 def make_sequence(name, steps=None, time=None, days=None, phase=None,
-                  skip_done=False, door=None):
+                  skip_done=False, door=None, hourly=None):
     """A sequence with its full complement of slots, however few are filled."""
     return normalise({'name': name, 'steps': list(steps or []),
                       'time': time, 'days': days, 'phase': phase,
-                      'skip_done': skip_done, 'door': door})
+                      'skip_done': skip_done, 'door': door,
+                      'hourly': hourly})
 
 
 # What a lock can do that a sequence can be run on. The change, not the state:
@@ -600,6 +689,7 @@ def normalise(raw):
     return {'name': name,
             'description': (raw.get('description') or '').strip(),
             'time': parse_time(raw.get('time')),
+            'hourly': clean_hourly(raw.get('hourly')),
             'days': clean_days(raw.get('days')),
             'phase': clean_phase(raw.get('phase')),
             'skip_done': bool(raw.get('skip_done')),
@@ -666,7 +756,8 @@ def describe_step(step, device_name=None):
             target = 'all %s devices' % (step.get('driver') or 'listed')
         text = '%s: %s' % (target, step.get('action', '').title())
     elif kind == KIND_COMMAND:
-        text = '%s: %s' % (target, step.get('action'))
+        text = '%s: %s' % (target, (step.get('action') or '').replace(
+            HOUR, '(the hour)'))
         if step.get('volume') is not None:
             text += ' at %d%%' % step['volume']
         if step.get('after'):
@@ -1117,6 +1208,22 @@ def run(app, sequence, log_func=None, sleep_func=None, on_step=None,
     return done, errors
 
 
+def _clip_now(app, step, device):
+    """The clip a command step sends to this device now: its own, or for a
+    clip-for-the-hour step, the one for this hour on this beacon."""
+    from devices import ControlError
+
+    action = step['action']
+    if HOUR not in action:
+        return action
+    hour = now().hour
+    clip = clip_for_hour(action, app.controller.commands(device), hour)
+    if clip is None:
+        raise ControlError('%s has no %s' % (
+            device.name, action.replace(HOUR, hour_words(hour)[0]).strip()))
+    return clip
+
+
 def _run_step(app, step, states=None):
     """Carry out one step. False if there was nothing left to do.
 
@@ -1168,7 +1275,7 @@ def _run_step(app, step, states=None):
         # Handed to the beacon to play when what it is playing ends, volume
         # and all -- the sequence carries on, and the beacon keeps the order.
         for device in targets:
-            app.controller.queue_command(device, step['action'],
+            app.controller.queue_command(device, _clip_now(app, step, device),
                                          step.get('volume'))
         return
 
@@ -1186,7 +1293,7 @@ def _run_step(app, step, states=None):
                     app.controller.set_volume(device, volume)
                 except ControlError as exc:
                     missed.append('%s: %s' % (device.name, exc))
-            app.controller.send_command(device, step['action'])
+            app.controller.send_command(device, _clip_now(app, step, device))
         if missed:
             raise ControlError('Played, but the volume was not set (%s)'
                                % '; '.join(missed))

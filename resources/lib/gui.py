@@ -2463,6 +2463,7 @@ class ControlPanel(object):
         made = copy.deepcopy(sequence)
         made['name'] = name
         made['time'] = ''
+        made['hourly'] = None
         made['days'] = []
         made['phase'] = 0
 
@@ -2946,6 +2947,11 @@ class ControlPanel(object):
             if not following:
                 rows.append(('Time: %s' % (sequence['time'] or 'not set'),
                              lambda: self._edit_sequence_time(sequence)))
+                hourly = sequence.get('hourly')
+                rows.append(('Every hour: %s' % (
+                    '%s to %s' % (hourly['from'], hourly['to']) if hourly
+                    else 'no'),
+                    lambda: self._edit_sequence_hourly(sequence)))
                 rows.append(('Days: %s' % (self._days_label(sequence) or 'none'),
                              lambda: self._edit_sequence_days(sequence)))
 
@@ -2997,6 +3003,33 @@ class ControlPanel(object):
                          'Try 18:00, 6pm or 1800.' % value.strip())
             return
         sequence['time'] = parsed
+        # One time or every hour, not both: two answers to one question.
+        sequence['hourly'] = None
+
+    def _edit_sequence_hourly(self, sequence):
+        """Every hour between two times, both included -- 09:00 to 00:00 is
+        nine in the morning to midnight. Left empty, it stops."""
+        hourly = sequence.get('hourly') or {}
+        times = []
+        for heading, current, example in (
+                ('Every hour from (9am, or 09:00)', hourly.get('from'), '9am'),
+                ('Until, included (midnight is 00:00)', hourly.get('to'),
+                 '00:00')):
+            value = _dialog().input(heading, current or '')
+            if value is None:
+                return
+            if not value.strip():
+                sequence['hourly'] = None
+                return
+            parsed = sequence_lib.parse_time(value)
+            if not parsed:
+                _dialog().ok(utils.ADDON_NAME,
+                             'Could not read "%s" as a time.\n\nTry %s.'
+                             % (value.strip(), example))
+                return
+            times.append(parsed)
+        sequence['hourly'] = {'from': times[0], 'to': times[1]}
+        sequence['time'] = ''
 
     def _edit_sequence_days(self, sequence):
         """A toggled checklist, as the scene target picker is and for the
@@ -3045,6 +3078,7 @@ class ControlPanel(object):
 
         sequence['phase'] = choice
         sequence['time'] = ''
+        sequence['hourly'] = None
         sequence['days'] = []
 
     def _show_tv_status(self):
@@ -3089,6 +3123,7 @@ class ControlPanel(object):
 
     def _clear_schedule(self, sequence):
         sequence['time'] = ''
+        sequence['hourly'] = None
         sequence['days'] = []
         sequence['phase'] = 0
         utils.notify('%s runs only when you run it' % sequence['name'])
@@ -3275,8 +3310,16 @@ class ControlPanel(object):
                 ('Toggle', sequence_lib.KIND_POWER,
                  sequence_lib.ACTION_TOGGLE)])
         if device is not None and CAP_COMMANDS in capabilities:
+            clips = self.app.controller.commands(device)
+            # A set of clips named by the hour -- AJAX 9AM, AJAX 10AM -- is
+            # offered as one, played for the hour the step runs at. First,
+            # because that is what a set like that is for.
+            actions.extend(('%s (the clip for the hour)' % prefix,
+                            sequence_lib.KIND_COMMAND, template)
+                           for prefix, template
+                           in sequence_lib.hour_clip_sets(clips))
             actions.extend((name, sequence_lib.KIND_COMMAND, name)
-                           for name in self.app.controller.commands(device))
+                           for name in clips)
         if CAP_LOCK in capabilities:
             actions.append(('Lock', sequence_lib.KIND_LOCK, ''))
         if (CAP_UNLOCK in capabilities

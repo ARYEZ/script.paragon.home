@@ -1471,6 +1471,15 @@ class ParagonHome(object):
     def save_sequence_state(self):
         utils.write_json(sequence_lib.SEQUENCE_STATE_FILE, self.sequence_state)
 
+    def resolved_times(self, sequence, now):
+        """The ([times], days) a sequence really runs on: its hourly
+        window's every hour, its one time, or Paragon TV's."""
+        if not sequence_lib.follows_tv(sequence):
+            return (sequence_lib.own_times(sequence),
+                    list(sequence.get('days') or []))
+        at_time, days = self.resolved_schedule(sequence, now)
+        return ([at_time] if at_time else []), days
+
     def resolved_schedule(self, sequence, now):
         """The (time, days) a sequence really runs on.
 
@@ -1505,10 +1514,17 @@ class ParagonHome(object):
         state = self.sequence_state
         due = []
         for sequence in self.sequences:
-            schedule = self.resolved_schedule(sequence, moment)
-            if sequence_lib.due(sequence, moment, state.get(sequence['name'], ''),
-                              schedule=schedule, grace=grace):
-                due.append((sequence, schedule[0]))
+            # Each hour of an hourly window is a run of its own, marked with
+            # its own time, so nine o'clock having run does not stop ten. If a
+            # long pause leaves two hours due at once, it runs once, for the
+            # later: ten o'clock's time check, not nine's and then ten's.
+            times, days = self.resolved_times(sequence, moment)
+            for at_time in reversed(times):
+                if sequence_lib.due(sequence, moment,
+                                    state.get(sequence['name'], ''),
+                                    schedule=(at_time, days), grace=grace):
+                    due.append((sequence, at_time))
+                    break
         return due
 
     def run_due_sequences(self, now=None, sleep_func=None, on_step=None,
@@ -1804,13 +1820,14 @@ class ParagonHome(object):
                                           phase_run_key(stamp),
                                           rerack['name']))
             for sequence in self.sequences:
-                at_time, days = self.resolved_schedule(sequence, day)
-                if not at_time or day.weekday() not in days:
+                times, days = self.resolved_times(sequence, day)
+                if day.weekday() not in days:
                     continue
-                stamp = sequence_lib.stamp(sequence, day, at_time)
-                runs.append(self._run(sequence['name'], day, at_time,
-                                      own_run_key(sequence['name'], stamp),
-                                      ''))
+                for at_time in times:
+                    stamp = sequence_lib.stamp(sequence, day, at_time)
+                    runs.append(self._run(sequence['name'], day, at_time,
+                                          own_run_key(sequence['name'],
+                                                      stamp), ''))
         # The emergency stop passes over whatever falls due while it holds,
         # so those are not runs that will happen.
         start = max(moment, self.held_until(moment) or moment)
